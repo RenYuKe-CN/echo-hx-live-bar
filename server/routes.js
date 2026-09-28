@@ -103,6 +103,12 @@ router.post('/admin/settings/check', (_req, res) => {
   const checks = Object.fromEntries(Object.entries(status.groups).map(([group, value]) => [group, { status: value.configured ? 'ready_for_auth' : 'missing_config', missing: value.missing }]));
   res.json({ ok: true, checks, message: '配置完整性检查完成；真实平台授权、签名和回调仍需使用商户资质联调' });
 });
+router.get('/runtime-config', (_req, res) => {
+  const { values } = getIntegrationStatus();
+  const apiBaseUrl = values.public_api_base_url;
+  if (!apiBaseUrl || !/^https:\/\//i.test(apiBaseUrl)) return res.status(503).json({ message: '小程序 API 地址尚未配置为 HTTPS' });
+  res.json({ apiBaseUrl: apiBaseUrl.replace(/\/$/, '') });
+});
 
 function getOrCreateSession(storeId, tableId, userId) {
   let session = db.prepare("SELECT * FROM table_sessions WHERE store_id = ? AND table_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(storeId, tableId);

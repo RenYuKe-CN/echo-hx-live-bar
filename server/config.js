@@ -6,6 +6,7 @@ import { db } from './db.js';
 // without restarting the API. Environment variables remain the preferred
 // source for secrets in production and override database values.
 export const integrationDefinitions = {
+  public_api_base_url: { label: '小程序 API 正式 HTTPS 地址', group: 'miniapp', required: true, secret: false, env: 'MINIPROGRAM_API_BASE_URL' },
   wechat_app_id: { label: '微信小程序 AppID', group: 'wechat', required: true, secret: false, env: 'WECHAT_APP_ID' },
   wechat_app_secret: { label: '微信小程序 AppSecret', group: 'wechat', required: true, secret: true, env: 'WECHAT_APP_SECRET' },
   wechat_mch_id: { label: '微信支付商户号', group: 'wechatPay', required: true, secret: false, env: 'WECHAT_MCH_ID' },
@@ -32,7 +33,7 @@ export function getIntegrationStatus() {
   const groups = {};
   for (const [key, definition] of Object.entries(integrationDefinitions)) {
     const group = groups[definition.group] ||= { configured: true, missing: [], label: definition.group };
-    if (!values[key]) { group.configured = false; group.missing.push(key); }
+    if (definition.required && !values[key]) { group.configured = false; group.missing.push(key); }
   }
   return { values, groups };
 }
