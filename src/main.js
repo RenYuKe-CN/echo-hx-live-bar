@@ -28,7 +28,9 @@ function cartTotals() {
 
 async function api(path, options = {}) {
   const token = sessionStorage.getItem('adminToken');
-  const response = await fetch(`/api${path}`, { ...options, headers: { 'Content-Type': 'application/json', 'x-demo-user-id': '1', ...(token && path.startsWith('/admin') ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) } });
+  const isGet = !options.method || options.method.toUpperCase() === 'GET';
+  const requestPath = isGet ? `${path}${path.includes('?') ? '&' : '?'}_ts=${Date.now()}` : path;
+  const response = await fetch(`/api${requestPath}`, { ...options, cache: isGet ? 'no-store' : 'default', headers: { 'Content-Type': 'application/json', 'x-demo-user-id': '1', ...(token && path.startsWith('/admin') ? { Authorization: `Bearer ${token}` } : {}), ...(options.headers || {}) } });
   if (!response.headers.get('content-type')?.includes('application/json')) {
     throw new Error('接口返回了网页，请检查 API 服务和 /api 代理配置');
   }
@@ -194,6 +196,8 @@ async function createOrder() {
 }
 
 const adminState = { section: 'dashboard', data: null, toast: '', dialog: null, account: null, memberPhone: '', storagePhone: '', reportRange: { start: '', end: '' }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
+let adminRenderVersion = 0;
+let lastPendingOrderCount = null;
 const adminModules = [['dashboard','经营概览'],['mini-page','小程序页面'],['pos','收银点单'],['orders','订单管理'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['settings','接口配置']];
 const adminApi = (path, options = {}) => api(`/admin${path}`, options);
 const adminTitles = Object.fromEntries(adminModules);
@@ -238,9 +242,12 @@ function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, char
 function adminTable(headers, rows) { return `<div class="admin-table-wrap"><table class="admin-table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}" class="empty-cell">暂无数据</td></tr>`}</tbody></table></div>`; }
 async function renderAdmin() {
   if (!adminState.account) return renderAdminLogin();
+  const renderVersion = ++adminRenderVersion;
+  const renderingSection = adminState.section;
   if (!adminState.account.permissions.includes(adminState.section)) adminState.section = adminState.account.permissions[0] || 'dashboard';
   let content = '<div class="admin-loading">正在加载...</div>';
   try { adminState.data = await adminApi(adminState.section === 'dashboard' ? '/summary' : adminState.section === 'products' ? '/products' : adminState.section === 'group-buy' ? '/group-buy' : adminState.section === 'wallet' ? '/wallet-packages' : adminState.section === 'members' ? `/members?phone=${encodeURIComponent(adminState.memberPhone)}` : adminState.section === 'storage' ? `/storage?phone=${encodeURIComponent(adminState.storagePhone)}` : adminState.section === 'pos' ? `/pos?phone=${encodeURIComponent(adminState.pos.phone)}` : adminState.section === 'reports' ? `/reports?start=${encodeURIComponent(adminState.reportRange.start)}&end=${encodeURIComponent(adminState.reportRange.end)}` : `/${adminState.section}`); content = adminContent(adminState.section, adminState.data); } catch (error) { content = `<div class="panel error-panel">${escapeHtml(error.message)}</div>`; }
+  if (renderVersion !== adminRenderVersion || renderingSection !== adminState.section) return;
   document.querySelector('#app').innerHTML = `<main class="admin-shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">EH</span><div><strong>Echo HX</strong><small>运营管理台</small></div></div><div class="store-switcher">Echo HX Live Bar</div><nav class="side-nav">${adminModules.filter(([id]) => adminState.account.permissions.includes(id)).map(([id, label]) => `<a class="${adminState.section === id ? 'current' : ''}" data-admin-section="${id}"><span>${label}</span></a>`).join('')}</nav><div class="sidebar-footer"><div class="staff-avatar">${escapeHtml(adminState.account.displayName.slice(0,1))}</div><div><strong>${escapeHtml(adminState.account.displayName)}</strong><small>${{super:'超级管理员',manager:'管理员',staff:'店员'}[adminState.account.role]}</small></div></div></aside><section class="admin-content"><header class="admin-header"><div><span class="eyebrow">ECHO HX LIVE BAR · 运营中心</span><h1>${adminTitles[adminState.section]}</h1></div><div class="header-actions"><button class="outline-button" data-action="password">修改密码</button><button class="outline-button" data-action="logout">退出登录</button><button class="outline-button" data-action="refresh">刷新数据</button></div></header>${content}</section></main><div id="admin-dialog-root"></div>${adminState.toast ? `<div class="toast admin-toast">${escapeHtml(adminState.toast)}</div>` : ''}`;
   if (adminState.account.role === 'super' && adminState.section !== 'mini-page') {
     const shortcut = document.createElement('button');
@@ -471,13 +478,26 @@ async function openAdminDialog(type, item) {
 
 if (location.pathname.startsWith('/admin')) {
   setInterval(async () => {
-    if (document.hidden || adminState.section !== 'dashboard') return;
+    if (document.hidden || !adminState.account || adminState.dialog) return;
     try {
-      const data = await adminApi('/summary');
-      [adminMoney(data.todayRevenue), data.activeOrders, data.activeTables, data.members].forEach((value, i) => { const node = document.querySelector(`[data-kpi="${i}"]`); if (node) node.textContent = value; });
+      if (adminState.section === 'dashboard' || adminState.section === 'orders') {
+        const data = await adminApi('/summary');
+        const pendingCount = Number(data.activeOrders || 0);
+        const newOrderCount = lastPendingOrderCount !== null && pendingCount > lastPendingOrderCount ? pendingCount - lastPendingOrderCount : 0;
+        lastPendingOrderCount = pendingCount;
+        if (adminState.section === 'dashboard') {
+          [adminMoney(data.todayMetrics?.revenue ?? data.todayRevenue), data.activeOrders, data.activeTables, data.idleTables].forEach((value, i) => { const node = document.querySelector(`[data-kpi="${i}"]`); if (node) node.textContent = value; });
+          if (adminState.data?.pendingOrders?.length !== data.pendingOrders?.length) await renderAdmin();
+        } else {
+          await renderAdmin();
+        }
+        if (newOrderCount) adminNotice(`收到 ${newOrderCount} 笔新订单，请及时处理`);
+      } else if (adminState.section === 'products' || adminState.section === 'tables' || adminState.section === 'storage' || adminState.section === 'members') {
+        await renderAdmin();
+      }
     } catch (error) { console.error('概览刷新失败', error); }
   }, 10000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && !adminState.dialog && adminState.section === 'dashboard') renderAdmin(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !adminState.dialog && adminState.account) renderAdmin(); });
 }
 
 function showToast(message) { state.toast = message; renderCustomer(); setTimeout(() => { state.toast = ''; renderCustomer(); }, 2200); }
