@@ -198,6 +198,7 @@ async function createOrder() {
 const adminState = { section: 'dashboard', data: null, toast: '', dialog: null, account: null, memberPhone: '', storagePhone: '', reportRange: { start: '', end: '' }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
 let adminRenderVersion = 0;
 let lastPendingOrderCount = null;
+let adminPolling = false;
 const adminModules = [['dashboard','经营概览'],['mini-page','小程序页面'],['pos','收银点单'],['orders','订单管理'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['settings','接口配置']];
 const adminApi = (path, options = {}) => api(`/admin${path}`, options);
 const adminTitles = Object.fromEntries(adminModules);
@@ -478,7 +479,8 @@ async function openAdminDialog(type, item) {
 
 if (location.pathname.startsWith('/admin')) {
   setInterval(async () => {
-    if (document.hidden || !adminState.account || adminState.dialog) return;
+    if (document.hidden || !adminState.account || adminState.dialog || adminPolling) return;
+    adminPolling = true;
     try {
       if (adminState.section === 'dashboard' || adminState.section === 'orders') {
         const data = await adminApi('/summary');
@@ -486,8 +488,7 @@ if (location.pathname.startsWith('/admin')) {
         const newOrderCount = lastPendingOrderCount !== null && pendingCount > lastPendingOrderCount ? pendingCount - lastPendingOrderCount : 0;
         lastPendingOrderCount = pendingCount;
         if (adminState.section === 'dashboard') {
-          [adminMoney(data.todayMetrics?.revenue ?? data.todayRevenue), data.activeOrders, data.activeTables, data.idleTables].forEach((value, i) => { const node = document.querySelector(`[data-kpi="${i}"]`); if (node) node.textContent = value; });
-          if (adminState.data?.pendingOrders?.length !== data.pendingOrders?.length) await renderAdmin();
+          await renderAdmin();
         } else {
           await renderAdmin();
         }
@@ -496,6 +497,7 @@ if (location.pathname.startsWith('/admin')) {
         await renderAdmin();
       }
     } catch (error) { console.error('概览刷新失败', error); }
+    finally { adminPolling = false; }
   }, 10000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !adminState.dialog && adminState.account) renderAdmin(); });
 }
