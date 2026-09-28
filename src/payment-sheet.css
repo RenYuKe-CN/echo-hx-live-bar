@@ -1,0 +1,50 @@
+.payment-backdrop { position: fixed; inset: 0; z-index: 10; display: flex; align-items: flex-end; justify-content: center; background: #13232966; }
+.payment-sheet { width: min(100%, 460px); max-height: 88vh; overflow: auto; background: #fff; border-radius: 18px 18px 0 0; padding: 22px 20px 24px; box-shadow: 0 -10px 35px #14272c24; }
+.sheet-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 18px; }
+.sheet-heading h2 { font: 800 22px Manrope; margin: 6px 0 0; color: #1c2d32; }
+.close-button { width: 28px; height: 28px; border-radius: 50%; background: #f2f3f1; color: #687375; font-size: 22px; line-height: 1; }
+.payment-table { border-top: 1px solid #edf0ed; border-bottom: 1px solid #edf0ed; }
+.payment-table-head, .payment-item { display: flex; justify-content: space-between; align-items: center; }
+.payment-table-head { color: #98a19f; font-size: 10px; padding: 11px 0 8px; }
+.payment-item { padding: 11px 0; border-top: 1px solid #f1f3f1; }
+.payment-item strong, .payment-item small { display: block; }
+.payment-item strong { color: #35464a; font-size: 12px; }
+.payment-item small { margin-top: 5px; font-size: 10px; }
+.payment-item del { color: #a4aaa7; margin-right: 7px; }
+.payment-item b { color: #2b9a70; font-weight: 700; }
+.payment-item > span { color: #2b9a70; font-weight: 700; font-size: 13px; }
+.payment-summary { padding-top: 13px; }
+.payment-summary > div { display: flex; justify-content: space-between; align-items: center; padding: 5px 0; color: #778281; font-size: 12px; }
+.payment-summary strong { color: #47575a; font-size: 12px; }
+.payment-summary .discount { color: #2b9a70; }
+.payment-summary .payable-row { border-top: 1px solid #edf0ed; margin-top: 8px; padding-top: 14px; color: #24383d; font-weight: 700; }
+.payment-summary .payable-row strong { color: #2b9a70; font: 800 22px Manrope; }
+.payment-note { display: flex; align-items: center; gap: 9px; background: #eef8f2; color: #428466; border-radius: 8px; padding: 10px; margin: 13px 0 15px; font-size: 11px; }
+.payment-note .member-mark { width: 25px; height: 25px; font-size: 11px; flex: none; }
+.payment-button { width: 100%; background: #d59b64; color: #211b18; border-radius: 9px; padding: 13px; font-weight: 700; font-size: 13px; }
+.sheet-heading p { margin: 6px 0 0; color: #96a09e; font-size: 11px; }
+.payment-product { display: flex; align-items: center; gap: 9px; }
+.payment-methods { margin: 14px 0; border-top: 1px solid #edf0ed; padding-top: 13px; font-size: 12px; }
+.payment-choice { display: flex; width: 100%; justify-content: space-between; align-items: center; text-align: left; border: 1px solid #e4e9e6; border-radius: 7px; padding: 10px; margin-top: 8px; color: #273d3c; }
+.payment-choice.selected { border-color: #2b9a70; background: #f0f8f3; }
+.payment-choice small { display: block; color: #758682; font-size: 10px; margin-top: 4px; }
+.payment-choice b { color: #2b9a70; }
+.payment-warning { display: block; color: #b35b42; padding: 6px 2px 0; }
+.payment-button:disabled { opacity: .6; }
+.report-note { font-size: 12px; color: #697b78; margin: 12px 0 20px; }
+.mini-product-art { width: 38px; height: 38px; border-radius: 7px; display: grid; place-items: center; color: #fff; font: 700 16px Manrope; }
+.payment-item-actions { display: flex; align-items: center; gap: 8px; }
+.quantity-controls { display: flex; align-items: center; gap: 7px; }
+.quantity-controls button { width: 25px; height: 25px; border-radius: 50%; background: #edf1ef; color: #3c5553; font-size: 17px; line-height: 1; }
+.quantity-controls b { min-width: 12px; text-align: center; font-size: 12px; color: #33474a; }
+.quantity-controls.compact { gap: 4px; }
+.quantity-controls.compact button { width: 22px; height: 22px; font-size: 15px; }
+.remove-button { color: #b56d60; font-size: 10px; padding: 4px; }
+.dock-total { min-width: 0; }
+.dock-total > div { display: flex; align-items: baseline; gap: 6px; margin-top: 3px; }
+.dock-total del { color: #9aacab; font-size: 11px; }
+.dock-total strong { color: #73c197; font-size: 17px; }
+.dock-total small { display: block; color: #9bc6b1; font-size: 9px; margin-top: 3px; }
+.order-dock { gap: 12px; padding: 12px 16px; }
+.order-dock .dock-total { flex: 1; }
+.order-dock #pay-button { flex: 0 0 auto; margin: 0; min-width: 124px; white-space: nowrap; text-align: center; }

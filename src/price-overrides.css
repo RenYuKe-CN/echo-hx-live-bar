@@ -1,0 +1,9 @@
+.price-group { display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
+.price-group del { font-size: 11px; color: #a7aaa8; }
+.price-group strong { font-size: 15px; color: #2b9a70; }
+.price-group small { font-size: 9px; color: #2b9a70; background: #e7f5ed; padding: 2px 4px; border-radius: 3px; }
+.price-group .regular-price, .payment-product .regular-price { color: #1d2e33; }
+.payment-product .reference-price { color: #298962; }
+.upgrade-banner { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 12px 0; border-bottom: 1px solid #e7e8e8; font-size: 12px; }
+.upgrade-banner span { flex: 1; min-width: 180px; }
+.upgrade-banner button { color: #298962; }

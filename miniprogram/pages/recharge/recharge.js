@@ -1,0 +1,2 @@
+const api = require('../../utils/api');
+Page({ data: { packages: [] }, onShow() { api.request('/wallet-packages').then(data => this.setData({ packages: data.packages.map(item => ({ ...item, payText: Number(item.pay).toFixed(2), storedText: Number(item.stored).toFixed(2), bonusText: Number(item.bonus).toFixed(2), totalText: ((Math.round(Number(item.stored) * 100) + Math.round(Number(item.bonus) * 100)) / 100).toFixed(2) })) })).catch(error => wx.showToast({ title: error.message, icon: 'none' })); } });

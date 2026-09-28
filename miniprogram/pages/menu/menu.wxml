@@ -1,0 +1,14 @@
+<view class="page">
+  <view class="hero"><view><text class="eyebrow">ECHO HX LIVE BAR</text><text class="title">今晚喝点什么？</text></view><view class="table">{{tableNo}} · 多人点单</view></view>
+  <view class="member"><text class="badge">{{memberInitial}}</text><view><text class="member-title">{{isMember ? user.member_level : '普通会员'}}</text><text class="muted">本桌多人可同时加单</text></view></view>
+  <view wx:if="{{!isMember}}" class="upgrade-banner" bindtap="upgrade"><text>是否充值余额并升级会员？</text><text class="upgrade-link">查看套餐 ›</text></view>
+  <scroll-view scroll-x="true" class="tabs"><text wx:for="{{categories}}" wx:key="*this" class="tab {{category === item ? 'active' : ''}}" data-category="{{item}}" bindtap="selectCategory">{{item}}</text></scroll-view>
+  <view class="products"><view wx:for="{{visibleProducts}}" wx:key="id" class="product">
+    <view class="art {{item.color}}"><image wx:if="{{item.imageUrl}}" class="product-image" src="{{item.imageUrl}}" mode="aspectFill"/><block wx:else><text>{{item.tag}}</text><text class="initial">{{item.initial}}</text></block></view>
+    <view class="product-info"><text class="name">{{item.name}}</text><text class="detail">{{item.detail}}</text><text class="stock {{item.stock <= 5 ? 'stock-low' : ''}}">剩余库存 {{item.stock}} 件</text><view class="buy">
+      <view class="prices"><text wx:if="{{item.showDiscount}}" class="origin">¥{{item.priceText}}</text><text class="{{isMember ? 'member-price' : 'regular-price'}}">¥{{isMember ? item.memberPriceText : item.priceText}}</text><text class="reference-price">{{isMember ? '会员价' : '会员价 ¥' + item.referenceMemberPriceText}}</text></view>
+      <view class="counter"><button wx:if="{{cartMap[item.id]}}" data-id="{{item.id}}" data-delta="-1" bindtap="change">−</button><text wx:if="{{cartMap[item.id]}}">{{cartMap[item.id]}}</text><button data-id="{{item.id}}" data-delta="1" bindtap="change">+</button></view>
+    </view></view>
+  </view></view>
+  <view class="dock"><view class="dock-prices"><text class="dock-label">待支付 · {{isMember ? '会员价' : '原价'}}</text><text><text wx:if="{{isMember && totals.discount > 0}}" class="strike">¥{{totals.originalText}}</text><text class="dock-total"> ¥{{totals.memberText}}</text></text></view><button bindtap="preview">支付本桌订单 ({{totalQty}})</button></view>
+</view>

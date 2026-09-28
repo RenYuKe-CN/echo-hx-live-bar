@@ -1,0 +1,24 @@
+<view class="page">
+  <view class="title">确认本桌订单</view>
+  <text class="muted">多人加入的商品一起结算，支付后可继续加单</text>
+  <view wx:for="{{items}}" wx:key="id" class="item">
+    <image wx:if="{{item.image}}" class="pic" src="{{item.image}}" mode="aspectFill" />
+    <view wx:else class="pic">{{item.initial}}</view>
+    <view class="info"><text>{{item.name}}</text><text class="muted">数量 {{item.quantity}}</text></view>
+    <view class="item-prices"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">¥{{item.memberText}}</text><text wx:if="{{!isMember}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text></view>
+  </view>
+  <view class="summary">
+    <view><text>商品原价</text><text>¥{{totals.originalText}}</text></view>
+    <view wx:if="{{isMember}}"><text>会员优惠</text><text class="green">-¥{{totals.discountText}}</text></view>
+    <view class="pay"><text>应付金额</text><text>¥{{totals.memberText}}</text></view>
+  </view>
+  <view wx:if="{{!isMember}}" class="upgrade-banner" bindtap="upgrade">当前按原价结算，是否充值余额并升级会员？<text>查看套餐 ›</text></view>
+  <view wx:if="{{checkout && items.length}}" class="methods">
+    <view class="section-title">支付方式</view>
+    <view class="method {{method === 'mixed' ? 'selected' : ''}}" data-method="mixed" bindtap="chooseMethod"><view><text>余额 + 微信支付</text><text class="hint">账户储值 ¥{{checkout.storedText}} · 本单抵扣 ¥{{checkout.balanceDeductionText}} · 微信支付 ¥{{checkout.wechatDueText}}</text></view><text class="radio">{{method === 'mixed' ? '●' : '○'}}</text></view>
+    <view class="method {{method === 'balance' ? 'selected' : ''}}" data-method="balance" bindtap="chooseMethod"><view><text>余额支付</text><text class="hint">储值余额 ¥{{checkout.storedText}} · 赠金 ¥{{checkout.bonusText}} · 本单最多抵扣 ¥{{checkout.balanceDeductionText}}</text></view><text class="radio">{{method === 'balance' ? '●' : '○'}}</text></view>
+    <view wx:if="{{!checkout.balanceAvailable}}" class="warning">余额不足时默认使用组合支付，微信接口尚未接通</view>
+    <view class="method {{method === 'wechat' ? 'selected' : ''}}" data-method="wechat" bindtap="chooseMethod"><view><text>仅微信支付</text><text class="hint">不使用账户余额，支付接口尚未接通</text></view><text class="radio">{{method === 'wechat' ? '●' : '○'}}</text></view>
+  </view>
+  <button class="pay-button" disabled="{{!items.length || submitting}}" loading="{{submitting}}" bindtap="pay">{{method === 'balance' ? '确认余额支付' : method === 'mixed' ? '余额抵扣 ¥' + checkout.balanceDeductionText + '，微信支付 ¥' + checkout.wechatDueText : '创建待支付订单'}} {{method === 'mixed' ? '' : '¥' + totals.memberText}}</button>
+</view>

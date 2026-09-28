@@ -1,0 +1,26 @@
+.membership-rules-panel { margin-top: 17px; }
+.primary-small { background: #1d3035; color: #fff; border-radius: 6px; padding: 9px 12px; font-size: 11px; font-weight: 700; }
+.rule-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.rule-card { border: 1px solid #e8edeb; border-radius: 8px; padding: 15px; display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; }
+.rule-icon { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; color: #fff; font-size: 13px; font-weight: 700; }
+.rule-icon.wallet { background: #68a58c; }
+.rule-icon.crown { background: #c49755; }
+.rule-icon.spend { background: #708fa5; }
+.rule-card strong, .rule-card span { display: block; }
+.rule-card strong { font-size: 12px; color: #2d3d41; }
+.rule-card span { color: #9aa5a6; font-size: 10px; line-height: 1.5; margin-top: 4px; }
+.switch { position: relative; width: 30px; height: 18px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch i { position: absolute; inset: 0; background: #cad2d1; border-radius: 20px; }
+.switch i:before { content: ''; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: .2s; }
+.switch input:checked + i { background: #4f9b78; }
+.switch input:checked + i:before { transform: translateX(12px); }
+.rule-fields { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; border-top: 1px solid #eff2f1; padding-top: 10px; }
+.rule-fields label { color: #8e9a9c; font-size: 9px; }
+.rule-fields input, .rule-fields select { width: 100%; margin-top: 5px; border: 1px solid #e1e7e5; border-radius: 5px; padding: 7px 6px; color: #425357; font: inherit; font-size: 10px; background: #fff; }
+.tier-summary { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #edf0ef; margin-top: 16px; padding-top: 15px; }
+.tier-summary strong, .tier-summary span { display: block; }
+.tier-summary strong { font-size: 11px; color: #334449; }
+.tier-summary span { font-size: 10px; color: #929d9e; margin-top: 4px; }
+@media (max-width: 850px) { .rule-grid { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { .tier-summary { align-items: flex-start; gap: 10px; flex-direction: column; } }
