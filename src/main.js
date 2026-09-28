@@ -184,6 +184,7 @@ const adminState = { section: 'dashboard', data: null, toast: '', dialog: null, 
 const adminModules = [['dashboard','经营概览'],['pos','收银点单'],['orders','订单管理'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['mini-page','小程序页面'],['settings','接口配置']];
 const adminApi = (path, options = {}) => api(`/admin${path}`, options);
 const adminTitles = Object.fromEntries(adminModules);
+const configLabels = { public_api_base_url:'小程序 API 正式 HTTPS 地址', wechat_app_id:'微信小程序 AppID', wechat_app_secret:'微信小程序 AppSecret', wechat_mch_id:'微信支付商户号', wechat_api_v3_key:'微信支付 API v3 密钥', wechat_merchant_serial:'微信支付商户证书序列号', wechat_private_key:'微信支付商户私钥', wechat_notify_url:'微信支付回调地址', meituan_client_id:'美团客户端 ID', meituan_client_secret:'美团客户端密钥', douyin_client_key:'抖音客户端 Key', douyin_client_secret:'抖音客户端密钥' };
 const miniIconLabels = { gift:'礼 · 礼物', bottle:'酒 · 存酒', wallet:'¥ · 钱包', receipt:'单 · 订单', star:'★ · 星标', glass:'杯 · 酒杯', card:'卡 · 会员卡', bag:'兑 · 奖品' };
 const miniEntryLabels = { rewards:'兑换中心', storage:'我的存酒', recharge:'会员充值', orders:'我的订单' };
 function adminMoney(value) { return `¥${Number(value || 0).toFixed(2)}`; }
