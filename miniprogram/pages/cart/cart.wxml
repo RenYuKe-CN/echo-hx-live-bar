@@ -7,6 +7,7 @@
     <view class="info"><text>{{item.name}}</text><text class="muted">数量 {{item.quantity}}</text></view>
     <view class="item-prices"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">¥{{item.memberText}}</text><text wx:if="{{!isMember}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text></view>
   </view>
+  <view class="order-note"><text class="section-title">订单备注</text><textarea value="{{note}}" maxlength="200" auto-height placeholder="例如：少冰、送到 A 区，不超过 200 字" bindinput="onNoteInput" /></view>
   <view class="summary">
     <view><text>商品原价</text><text>¥{{totals.originalText}}</text></view>
     <view wx:if="{{isMember}}"><text>会员优惠</text><text class="green">-¥{{totals.discountText}}</text></view>

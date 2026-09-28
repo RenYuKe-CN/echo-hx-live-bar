@@ -1,6 +1,6 @@
 const api = require('../../utils/api');
 Page({
-  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？' },
+  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？', detailProduct: null },
   onLoad() { this.tableVersion = -1; },
   onShow() { this.load(); },
   load() {
@@ -31,6 +31,10 @@ Page({
     this.setData({ visibleProducts: list });
   },
   selectCategory(e) { this.setData({ category: e.currentTarget.dataset.category }); this.filter(); },
+  showDetail(e) { const product = this.data.visibleProducts.find(item => item.id === Number(e.currentTarget.dataset.id)); if (product) this.setData({ detailProduct: product }); },
+  closeDetail() { this.setData({ detailProduct: null }); },
+  noop() {},
+  addFromDetail() { const product = this.data.detailProduct; if (!product) return; const sid = getApp().globalData.sessionId; api.request('/sessions/' + sid + '/cart/items', { method: 'POST', data: { productId: product.id, quantity: 1 } }).then(() => { this.setData({ detailProduct: null }); this.refreshCart(); }).catch(error => wx.showToast({ title: error.message, icon: 'none' })); },
   refreshCart() {
     const id = getApp().globalData.sessionId;
     api.request('/sessions/' + id + '/cart').then(data => {

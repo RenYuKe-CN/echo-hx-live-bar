@@ -1,7 +1,7 @@
 const api = require('../../utils/api');
 const emptyTotals = { originalText: '0.00', memberText: '0.00', discountText: '0.00' };
 Page({
-  data: { items: [], totals: emptyTotals, isMember: false, checkout: null, method: 'balance', submitting: false },
+  data: { items: [], totals: emptyTotals, isMember: false, checkout: null, method: 'balance', submitting: false, note: '' },
   onShow() { this.refresh(); },
   refresh() {
     const id = getApp().globalData.sessionId;
@@ -29,7 +29,7 @@ Page({
     if (!this.data.items.length || this.data.submitting) return;
     const id = getApp().globalData.sessionId;
     this.setData({ submitting: true });
-    api.request('/sessions/' + id + '/orders', { method: 'POST', data: { paymentMethod: this.data.method } }).then(data => {
+    api.request('/sessions/' + id + '/orders', { method: 'POST', data: { paymentMethod: this.data.method, note: this.data.note } }).then(data => {
       if (data.payment.status === 'paid') {
         this.setData({ items: [], totals: emptyTotals });
         wx.showToast({ title: '余额支付成功', icon: 'success' });
@@ -38,5 +38,6 @@ Page({
         wx.showModal({ title: data.payment.statusLabel || '待微信支付', content: data.payment.message + '；请勿重复下单，可联系店员处理。', showCancel: false, success: () => wx.navigateTo({ url: '/pages/order/order' }) });
       }
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ submitting: false }));
-  }
+  },
+  onNoteInput(e) { this.setData({ note: e.detail.value }); }
 });

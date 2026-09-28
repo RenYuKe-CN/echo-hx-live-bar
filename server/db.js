@@ -19,7 +19,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS table_sessions (id INTEGER PRIMARY KEY, store_id INTEGER NOT NULL REFERENCES stores(id), table_id INTEGER NOT NULL REFERENCES tables(id), session_no TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'open', opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, closed_at TEXT);
   CREATE TABLE IF NOT EXISTS session_members (session_id INTEGER NOT NULL REFERENCES table_sessions(id), user_id INTEGER NOT NULL REFERENCES users(id), joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (session_id, user_id));
   CREATE TABLE IF NOT EXISTS cart_items (id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES table_sessions(id), product_id INTEGER NOT NULL REFERENCES products(id), quantity INTEGER NOT NULL CHECK(quantity > 0), added_by_user_id INTEGER NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-  CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY, order_no TEXT NOT NULL UNIQUE, session_id INTEGER NOT NULL REFERENCES table_sessions(id), payer_user_id INTEGER NOT NULL REFERENCES users(id), original_amount_cents INTEGER NOT NULL, discount_amount_cents INTEGER NOT NULL DEFAULT 0, payable_amount_cents INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending_payment', payment_status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, paid_at TEXT);
+  CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY, order_no TEXT NOT NULL UNIQUE, session_id INTEGER NOT NULL REFERENCES table_sessions(id), payer_user_id INTEGER NOT NULL REFERENCES users(id), original_amount_cents INTEGER NOT NULL, discount_amount_cents INTEGER NOT NULL DEFAULT 0, payable_amount_cents INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending_payment', payment_status TEXT NOT NULL DEFAULT 'pending', note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, paid_at TEXT);
   CREATE TABLE IF NOT EXISTS order_items (id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), cart_item_id INTEGER REFERENCES cart_items(id), product_id INTEGER NOT NULL REFERENCES products(id), product_name TEXT NOT NULL, quantity INTEGER NOT NULL, original_price_cents INTEGER NOT NULL, paid_price_cents INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS points_ledger (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), order_id INTEGER REFERENCES orders(id), points INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
   CREATE TABLE IF NOT EXISTS wallet_accounts (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id), stored_cents INTEGER NOT NULL DEFAULT 0, bonus_cents INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -71,6 +71,7 @@ ensureColumn('orders', 'offline_paid_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('orders', 'offline_channel', 'TEXT');
 ensureColumn('orders', 'pos_request_id', 'TEXT');
 ensureColumn('orders', 'delivered_at', 'TEXT');
+ensureColumn('orders', 'note', "TEXT NOT NULL DEFAULT ''");
 db.exec(`
   UPDATE orders SET status = 'awaiting_delivery' WHERE status = 'paid' AND payment_status = 'paid';
   UPDATE products SET status = 'inactive' WHERE stock <= 0 AND status = 'active';

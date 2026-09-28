@@ -1,0 +1,6 @@
+.order-note-field{display:grid;gap:7px;margin:18px 0;color:#536267;font-size:12px;font-weight:700}
+.order-note-field textarea{width:100%;box-sizing:border-box;min-height:72px;padding:10px 12px;border:1px solid #dce3e4;border-radius:6px;background:#fbfcfb;color:#223338;font:inherit;line-height:1.5;resize:vertical}
+.admin-field textarea{width:100%;box-sizing:border-box;min-height:92px;padding:8px 10px;border:1px solid #dce3e4;border-radius:5px;background:#fff;color:#223338;font:inherit;line-height:1.5;resize:vertical}
+.order-note-cell{max-width:220px;white-space:pre-wrap;overflow-wrap:anywhere}
+.muted-cell{color:#9aa6a4}
+.pending-note{display:block;margin-top:7px;padding:6px 8px;border-left:3px solid #c98755;background:#fff7ed;color:#86552f;font-size:12px;font-style:normal;white-space:pre-wrap;overflow-wrap:anywhere}

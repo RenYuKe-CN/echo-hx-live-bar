@@ -323,6 +323,8 @@ router.get('/sessions/:sessionId/checkout', (req, res) => {
 router.post('/sessions/:sessionId/orders', (req, res) => {
   const userId = currentUserId(req);
   const method = req.body?.paymentMethod;
+  const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+  if (note.length > 200) return res.status(400).json({ message: '订单备注不能超过 200 个字' });
   if (!['balance','wechat','mixed'].includes(method)) return res.status(400).json({ message: '请选择支付方式' });
   const session = db.prepare("SELECT * FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
   const items = db.prepare("SELECT ci.*, p.name, p.price_cents, p.member_price_cents, p.cost_cents, p.stock, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(req.params.sessionId);
@@ -341,7 +343,7 @@ router.post('/sessions/:sessionId/orders', (req, res) => {
     const wechat = totals.member - bonus - stored;
     if (method === 'balance' && wechat > 0) throw new Error('余额不足，请选择组合支付或微信支付');
     if (method === 'mixed' && (wechat <= 0 || bonus + stored <= 0)) throw new Error('当前订单不需要组合支付');
-    const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.member, totals.member, method, stored, bonus, wechat);
+    const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.member, totals.member, method, stored, bonus, wechat, note);
     const insertItem = db.prepare('INSERT INTO order_items (order_id, cart_item_id, product_id, product_name, quantity, original_price_cents, paid_price_cents, cost_price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
     items.forEach(item => insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, item.quantity, item.price_cents, unitPrice(item, pricing), item.cost_cents));
     db.prepare(`UPDATE cart_items SET status = 'checking_out' WHERE session_id = ? AND status = 'pending'`).run(session.id);
@@ -381,7 +383,7 @@ router.get('/admin/summary', (req, res) => {
   const lowStock = db.prepare("SELECT COUNT(*) AS value FROM products WHERE stock <= 0 OR (stock <= 20 AND status = 'active')").get().value;
   const outOfStock = db.prepare('SELECT COUNT(*) AS value FROM products WHERE stock <= 0').get().value;
   const canViewOrders = req.staff.role === 'super' || JSON.parse(req.staff.permissions).includes('orders');
-  const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
+  const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, o.note, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
   const items = orderItems(pendingOrders.map(o => o.id));
   const today = db.prepare("SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents),0) AS revenue, COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents - COALESCE((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id),0)),0) AS profit, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.offline_paid_cents ELSE 0 END),0) AS offline, COALESCE(SUM((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id)),0) AS order_cost FROM orders o WHERE o.payment_status = 'paid' AND date(o.paid_at, 'localtime') = date('now','localtime')").get();
   const todayRecharge = db.prepare("SELECT COALESCE(SUM(pay_cents),0) AS value FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') = date('now','localtime')").get().value;
