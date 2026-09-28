@@ -1,6 +1,6 @@
 const api = require('../../utils/api');
 Page({
-  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08' },
+  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？' },
   onLoad() { this.tableVersion = -1; },
   onShow() { this.load(); },
   load() {
@@ -14,13 +14,15 @@ Page({
       if (version !== app.globalData.tableVersion) return null;
       app.globalData.tableNo = tableNo;
       this.setData({ tableNo });
-      return Promise.all([api.request('/products?storeId=1'), api.request('/tables/' + encodeURIComponent(tableNo) + '/session')]);
+      return Promise.all([api.request('/products?storeId=1'), api.request('/tables/' + encodeURIComponent(tableNo) + '/session'), api.request('/mini-page')]);
     }).then(result => {
       if (!result || version !== app.globalData.tableVersion) return;
-      const [products, session] = result;
+      const [products, session, page] = result;
+      const settings = Object.fromEntries(page.entries.map(item => [item.key, item.title]));
       app.globalData.sessionId = session.session.id;
       app.globalData.user = session.user;
-      this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.member_level || '会').charAt(0) });
+      this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.member_level || '会').charAt(0), appName: settings.app_name || 'Echo HX Live Bar', homeTitle: settings.home_title || '今晚喝点什么？' });
+      wx.setNavigationBarTitle({ title: settings.app_name || 'Echo HX Live Bar' });
       this.filter(); this.refreshCart();
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
   },

@@ -520,11 +520,18 @@ router.patch('/admin/members/:id', (req, res) => {
   } catch (error) { res.status(409).json({ message: error.code === 'SQLITE_CONSTRAINT_UNIQUE' ? '手机号已绑定其他会员' : error.message }); }
 });
 router.get('/me', (req, res) => { const user = db.prepare('SELECT id, nickname, avatar_url, member_level, points, member_expires_at FROM users WHERE id = ?').get(currentUserId(req)); if (!user) return res.status(404).json({ message: '用户不存在' }); const wallet = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(user.id) || { stored_cents: 0, bonus_cents: 0 }; res.json({ user, wallet: { stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents) } }); });
-const miniEntries = { rewards: { title: '兑换中心', icon: 'gift' }, storage: { title: '我的存酒', icon: 'bottle' }, recharge: { title: '会员充值', icon: 'wallet' }, orders: { title: '我的订单', icon: 'receipt' } };
+const miniEntries = {
+  app_name: { title: 'Echo HX Live Bar', type: 'text' },
+  home_title: { title: '今晚喝点什么？', type: 'text' },
+  rewards: { title: '兑换中心', icon: 'gift', type: 'entry' },
+  storage: { title: '我的存酒', icon: 'bottle', type: 'entry' },
+  recharge: { title: '会员充值', icon: 'wallet', type: 'entry' },
+  orders: { title: '我的订单', icon: 'receipt', type: 'entry' }
+};
 const miniIcons = ['gift','bottle','wallet','receipt','star','glass','card','bag'];
 router.get('/mini-page', (_req, res) => {
   const saved = Object.fromEntries(db.prepare('SELECT * FROM mini_page_settings').all().map(row => [row.key, row]));
-  res.json({ entries: Object.entries(miniEntries).map(([key, defaults]) => ({ key, title: saved[key]?.title || defaults.title, icon: saved[key]?.icon || defaults.icon })) });
+  res.json({ entries: Object.entries(miniEntries).map(([key, defaults]) => ({ key, title: saved[key]?.title || defaults.title, icon: saved[key]?.icon || defaults.icon, type: defaults.type })) });
 });
 router.get('/wallet-packages', (_req, res) => res.json({ packages: db.prepare("SELECT id, name, pay_cents, stored_cents, bonus_cents FROM wallet_packages WHERE status = 'active' ORDER BY pay_cents").all().map(row => ({ id: row.id, name: row.name, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })) }));
 const rewardQuery = 'SELECT r.*, p.image_url AS product_image, p.name AS product_name FROM reward_items r LEFT JOIN products p ON p.id = r.product_id';
@@ -647,8 +654,13 @@ router.get('/admin/mini-page', (_req, res) => res.json({ entries: Object.entries
 router.put('/admin/mini-page', (req, res) => {
   if (req.staff.role !== 'super') return res.status(403).json({ message: '仅超级管理员可修改小程序页面' });
   const entries = req.body?.entries;
-  if (!Array.isArray(entries) || entries.length !== Object.keys(miniEntries).length || entries.some(item => !miniEntries[item.key] || !String(item.title || '').trim() || String(item.title).length > 8 || !miniIcons.includes(item.icon)) || new Set(entries.map(item => item.key)).size !== entries.length) return res.status(400).json({ message: '页面名称或图标无效' });
-  db.transaction(() => { for (const item of entries) db.prepare('INSERT INTO mini_page_settings (key, title, icon) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET title = excluded.title, icon = excluded.icon').run(item.key, item.title.trim(), item.icon); audit(req, '修改小程序页面', entries.map(item => item.title).join('、')); })();
+  const valid = Array.isArray(entries) && entries.length === Object.keys(miniEntries).length && new Set(entries.map(item => item.key)).size === entries.length && entries.every(item => {
+    const definition = miniEntries[item.key];
+    const title = String(item.title || '').trim();
+    return definition && title && title.length <= (definition.type === 'text' ? 30 : 8) && (definition.type === 'text' || miniIcons.includes(item.icon));
+  });
+  if (!valid) return res.status(400).json({ message: '小程序名称、首页标题或页面入口配置无效' });
+  db.transaction(() => { for (const item of entries) db.prepare('INSERT INTO mini_page_settings (key, title, icon) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET title = excluded.title, icon = excluded.icon').run(item.key, item.title.trim(), item.icon || miniEntries[item.key].icon || ''); audit(req, '修改小程序页面', entries.map(item => item.title).join('、')); })();
   res.json({ ok: true });
 });
 router.post('/admin/wallet-packages', (req, res) => { const r = db.prepare('INSERT INTO wallet_packages (store_id, name, pay_cents, stored_cents, bonus_cents, allow_bonus) VALUES (1, ?, ?, ?, ?, ?)').run(req.body.name, Math.round(Number(req.body.pay || 0) * 100), Math.round(Number(req.body.stored || 0) * 100), Math.round(Number(req.body.bonus || 0) * 100), req.body.allowBonus ? 1 : 0); audit(req, '新增储值套餐', req.body.name); res.status(201).json({ package: db.prepare('SELECT * FROM wallet_packages WHERE id = ?').get(r.lastInsertRowid) }); });

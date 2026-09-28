@@ -129,6 +129,8 @@ chmod 750 data logs backups
 
 打开 `https://bar.example.com/admin`。账号是 `admin`，密码是 `.env` 中的 `ADMIN_INITIAL_PASSWORD`。首次登录后立即修改密码，然后配置商品、库存、会员、储值、桌台二维码、管理员和店员权限。
 
+在“超级管理员后台 → 小程序页面”可以修改小程序内显示名称、首页欢迎标题和会员页入口名称/图标。保存后小程序下次打开会从服务端读取，无需重新上传审核；微信公众平台的主体名称仍需在微信官方后台维护。
+
 ## 10. 微信小程序配置
 
 在微信公众平台配置 request、uploadFile、downloadFile 合法域名，均填写：
