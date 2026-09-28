@@ -5,6 +5,7 @@ import express from 'express';
 import { Router } from 'express';
 import { db, centsToMoney } from './db.js';
 import { getIntegrationStatus, integrationDefinitions } from './config.js';
+import { getUnlimitedMiniProgramCode } from './wechat-mini-code.js';
 
 export const router = Router();
 const currentUserId = req => Number(req.header('x-demo-user-id') || 1);
@@ -147,6 +148,15 @@ router.get('/products', (req, res) => {
   const rows = db.prepare("SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id WHERE p.store_id = ? AND p.status = 'active' AND p.stock > 0 ORDER BY c.sort, p.sort, p.id").all(storeId);
   const pricing = memberPricing(currentUserId(req));
   res.json({ membership: pricing, products: rows.map(row => ({ ...productView(row), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) })), categories: [...new Set(rows.map(row => row.category))] });
+});
+
+router.get('/tables/resolve', (req, res) => {
+  const scene = String(req.query.scene || '');
+  const match = /^t_(\d{1,12})$/.exec(scene);
+  if (!match) return res.status(400).json({ message: '桌台二维码参数无效' });
+  const table = db.prepare("SELECT id, table_no FROM tables WHERE id = ? AND status != 'disabled'").get(Number(match[1]));
+  if (!table) return res.status(404).json({ message: '桌台不存在或已停用' });
+  res.json({ table: { id: table.id, tableNo: table.table_no } });
 });
 
 router.get('/tables/:tableNo/session', (req, res) => {
@@ -414,6 +424,17 @@ router.post('/admin/categories', (req, res) => { if (!req.body.name) return res.
 router.patch('/admin/categories/:id', (req, res) => { db.prepare('UPDATE categories SET name = COALESCE(?, name), sort = COALESCE(?, sort), status = COALESCE(?, status) WHERE id = ?').run(req.body.name, req.body.sort == null ? null : Number(req.body.sort), req.body.status, req.params.id); res.json({ ok: true }); });
 
 router.get('/admin/tables', (_req, res) => res.json({ tables: adminRows("SELECT t.*, ts.session_no, ts.status AS session_status, COALESCE(SUM(o.payable_amount_cents),0) AS order_total FROM tables t LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'open' LEFT JOIN orders o ON o.session_id = ts.id AND o.payment_status = 'paid' GROUP BY t.id ORDER BY t.table_no") .map(row => ({ ...row, orderTotal: centsToMoney(row.order_total) })) }));
+router.get('/admin/tables/:id/mini-code', async (req, res) => {
+  const table = db.prepare("SELECT id, table_no FROM tables WHERE id = ? AND status != 'disabled'").get(req.params.id);
+  if (!table) return res.status(404).json({ message: '桌台不存在或已停用' });
+  try {
+    const image = await getUnlimitedMiniProgramCode(`t_${table.id}`);
+    res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'private, no-store', 'Content-Disposition': `inline; filename="table-${table.id}.png"` });
+    res.send(image);
+  } catch (error) {
+    res.status(502).json({ message: error.name === 'AbortError' ? '微信接口超时，请稍后重试' : error.message });
+  }
+});
 router.post('/admin/tables', (req, res) => { if (!req.body.tableNo) return res.status(400).json({ message: '桌号不能为空' }); const token = `echo-${String(req.body.tableNo).toLowerCase()}-${crypto.randomBytes(4).toString('hex')}`; const r = db.prepare('INSERT INTO tables (store_id, table_no, qr_token) VALUES (1, ?, ?)').run(req.body.tableNo, token); audit(req, '新增桌台', req.body.tableNo); res.status(201).json({ table: db.prepare('SELECT * FROM tables WHERE id = ?').get(r.lastInsertRowid) }); });
 router.patch('/admin/tables/:id', (req, res) => { db.prepare('UPDATE tables SET table_no = COALESCE(?, table_no), status = COALESCE(?, status) WHERE id = ?').run(req.body.tableNo, req.body.status, req.params.id); res.json({ ok: true }); });
 router.post('/admin/tables/:id/close', (req, res) => { const session = db.prepare("SELECT id FROM table_sessions WHERE table_id = ? AND status = 'open'").get(req.params.id); if (session) { db.prepare("UPDATE table_sessions SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = ?").run(session.id); audit(req, '结束桌台', req.params.id); } res.json({ ok: true }); });

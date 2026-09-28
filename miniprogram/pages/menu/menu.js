@@ -1,11 +1,23 @@
 const api = require('../../utils/api');
 Page({
   data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08' },
-  onLoad() { this.setData({ tableNo: getApp().globalData.tableNo }); this.load(); },
-  onShow() { if (getApp().globalData.sessionId) this.load(); },
+  onLoad() { this.tableVersion = -1; },
+  onShow() { this.load(); },
   load() {
     const app = getApp();
-    Promise.all([api.request('/products?storeId=1'), api.request('/tables/' + this.data.tableNo + '/session')]).then(([products, session]) => {
+    const version = app.globalData.tableVersion;
+    if (this.tableVersion !== version) {
+      this.tableVersion = version;
+      this.setData({ cart: [], cartMap: {}, totalQty: 0 });
+    }
+    Promise.resolve(app.apiReady).then(() => app.globalData.pendingScene ? api.request('/tables/resolve?scene=' + encodeURIComponent(app.globalData.pendingScene)).then(result => result.table.tableNo) : app.globalData.tableNo).then(tableNo => {
+      if (version !== app.globalData.tableVersion) return null;
+      app.globalData.tableNo = tableNo;
+      this.setData({ tableNo });
+      return Promise.all([api.request('/products?storeId=1'), api.request('/tables/' + encodeURIComponent(tableNo) + '/session')]);
+    }).then(result => {
+      if (!result || version !== app.globalData.tableVersion) return;
+      const [products, session] = result;
       app.globalData.sessionId = session.session.id;
       app.globalData.user = session.user;
       this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.member_level || '会').charAt(0) });

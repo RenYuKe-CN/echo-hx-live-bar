@@ -125,6 +125,14 @@ curl https://api.example.com/api/health
 5. 创建管理员、店员账号并分配权限。
 6. 使用测试会员验证点单、余额、赠金、存酒和取酒流程。
 
+### 桌台小程序码
+
+进入“桌台管理”，每个桌台点击“预览 / 下载”。服务端会按微信官方接口 `wxa/getwxacodeunlimit` 生成 PNG，二维码场景使用桌台 ID（例如 `t_12`），小程序扫码后会调用服务端解析桌台并进入对应桌台点单。桌号后续改名不会让已打印的小程序码失效。
+
+生成前需要在微信公众平台完成：小程序已绑定真实 AppID、AppSecret 有效、`pages/menu/menu` 已加入小程序页面，并把 API 域名配置为 HTTPS 合法域名。然后在超级管理员“接口配置”填写“微信小程序 AppID”和“微信小程序 AppSecret”，保存后即可生成。未配置或微信接口返回错误时，后台会显示具体错误，不会生成演示二维码。
+
+小程序码正式使用前仍需上传并发布小程序；开发阶段可把环境变量 `WECHAT_MINIPROGRAM_ENV_VERSION=trial` 或 `develop`，正式环境默认使用 `release`。
+
 ## 八、微信小程序配置
 
 在微信公众平台配置 request、uploadFile、downloadFile 合法域名：
