@@ -127,7 +127,7 @@ bash scripts/manage.sh install
 进入这个网站的“设置 -> 配置文件”，在 `server {}` 内确认有以下配置。已有同名配置时保留一份即可：
 
 ```nginx
-location /api/ {
+location ^~ /api/ {
     proxy_pass http://127.0.0.1:3001;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
@@ -142,7 +142,9 @@ location / {
 }
 ```
 
-保存并重载 Nginx。`/api/` 必须使用更具体的匹配，避免 API 请求被返回前端首页。
+保存并重载 Nginx。必须使用 `^~ /api/`：宝塔可能自动添加匹配 `.png`、`.jpg`、`.webp` 的静态缓存规则。若只写 `location /api/`，商品图片 `/api/product-images/文件名.png` 会被静态规则截获并返回 Nginx 404，即使 API 和上传都正常。检查网站的 HTTP 和 HTTPS 两份生效配置；不要存在另一个 `location /api/` 重复定义。
+
+上传的图片保存在 `DATA_DIR/uploads/`（默认是项目的 `data/uploads/`）。若图片是重新克隆前上传的，确认旧项目的 `data/uploads/` 已一起迁移，新上传的图片无法替代丢失的旧文件。
 
 ## 七、开启 HTTPS
 

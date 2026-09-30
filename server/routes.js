@@ -107,7 +107,7 @@ router.get('/admin/settings', (_req, res) => {
   const status = getIntegrationStatus();
   res.json({ settings: Object.entries(integrationDefinitions).map(([key, definition]) => ({ key, label: definition.label, value: definition.secret && status.values[key] ? '' : status.values[key], configured: Boolean(status.values[key]), secret: definition.secret, source: process.env[definition.env] ? 'environment' : 'admin' })), groups: status.groups, integrationsActive: false });
 });
-const imageDir = path.resolve('data/uploads');
+const imageDir = path.join(path.resolve(process.env.DATA_DIR || 'data'), 'uploads');
 fs.mkdirSync(imageDir, { recursive: true });
 router.post('/admin/products/image', express.raw({ type: ['image/png','image/jpeg','image/webp'], limit: '5mb' }), (req, res) => {
   const type = req.header('content-type')?.split(';')[0];

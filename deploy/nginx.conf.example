@@ -15,7 +15,8 @@ server {
     root /var/www/echo-hx-live-bar/dist;
     index index.html;
 
-    location /api/ {
+    # ^~ keeps image requests under /api/ from being intercepted by static-file regex locations.
+    location ^~ /api/ {
         proxy_pass http://127.0.0.1:3001;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
