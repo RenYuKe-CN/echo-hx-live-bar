@@ -3,7 +3,7 @@ App({
   globalData: { sessionId: null, tableNo: 'A-08', pendingScene: '', tableVersion: 0, user: null },
   onLaunch(options) {
     api.setUserId(1);
-    this.apiReady = api.refreshApiBaseUrl().then(() => api.request('/mini-page')).then(page => {
+    this.apiReady = api.refreshApiBaseUrl().then(() => api.login()).then(login => { this.globalData.user = login.user; return api.request('/mini-page'); }).then(page => {
       this.globalData.miniPage = page.entries;
       const appName = page.entries.find(item => item.key === 'app_name')?.title;
       if (appName) wx.setNavigationBarTitle({ title: appName });

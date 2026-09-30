@@ -72,6 +72,12 @@ ensureColumn('orders', 'offline_channel', 'TEXT');
 ensureColumn('orders', 'pos_request_id', 'TEXT');
 ensureColumn('orders', 'delivered_at', 'TEXT');
 ensureColumn('orders', 'note', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('orders', 'wechat_prepay_id', 'TEXT');
+ensureColumn('orders', 'wechat_transaction_id', 'TEXT');
+ensureColumn('orders', 'payment_expire_at', 'TEXT');
+ensureColumn('orders', 'payment_error', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('wallet_accounts', 'stored_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('wallet_accounts', 'bonus_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 db.exec(`
   UPDATE orders SET status = 'awaiting_delivery' WHERE status = 'paid' AND payment_status = 'paid';
   UPDATE products SET status = 'inactive' WHERE stock <= 0 AND status = 'active';
@@ -89,6 +95,18 @@ db.exec(`
 `);
 ensureColumn('wallet_transactions', 'pos_request_id', 'TEXT');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS orders_pos_request_unique ON orders(pos_request_id) WHERE pos_request_id IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS wallet_pos_request_unique ON wallet_transactions(pos_request_id) WHERE pos_request_id IS NOT NULL;');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS orders_wechat_prepay_unique ON orders(wechat_prepay_id) WHERE wechat_prepay_id IS NOT NULL;');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS wechat_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    openid TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS wechat_sessions_openid_unique ON wechat_sessions(openid);
+`);
 
 if (!db.prepare("SELECT id FROM staff_accounts WHERE role = 'super' LIMIT 1").get()) {
   const password = process.env.ADMIN_INITIAL_PASSWORD || crypto.randomBytes(12).toString('base64url');

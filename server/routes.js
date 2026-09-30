@@ -6,9 +6,18 @@ import { Router } from 'express';
 import { db, centsToMoney } from './db.js';
 import { getIntegrationStatus, integrationDefinitions } from './config.js';
 import { getUnlimitedMiniProgramCode } from './wechat-mini-code.js';
+import { wechatLogin, createJsapiPayment, verifyNotification, queryPayment } from './integrations/wechat.js';
 
 export const router = Router();
-const currentUserId = req => Number(req.header('x-demo-user-id') || 1);
+const PAYMENT_EXPIRY_MS = 10 * 60 * 1000;
+const orderCreatedAt = order => {
+  if (!order?.created_at) return null;
+  const value = String(order.created_at).includes('T') ? String(order.created_at) : `${String(order.created_at).replace(' ', 'T')}Z`;
+  const time = new Date(value).getTime();
+  return Number.isFinite(time) ? time : null;
+};
+const orderExpiryAt = order => order?.payment_expire_at || (orderCreatedAt(order) ? new Date(orderCreatedAt(order) + PAYMENT_EXPIRY_MS).toISOString() : null);
+const currentUserId = req => req.user?.id || (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEMO_USER !== 'false' ? Number(req.header('x-demo-user-id') || 1) : 0);
 const todayLocalDate = () => db.prepare("SELECT date('now', 'localtime') AS day").get().day;
 const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','reports','losses'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
@@ -19,6 +28,32 @@ const audit = (req, action, detail = '') => db.prepare('INSERT INTO operation_lo
 const syncProductAvailability = () => {
   db.prepare("UPDATE products SET status = 'inactive' WHERE stock <= 0 AND status = 'active'").run();
 };
+const tokenHash = token => crypto.createHash('sha256').update(token).digest('hex');
+const publicUser = row => ({ id: row.id, nickname: row.nickname, phone: row.phone, avatarUrl: row.avatar_url, memberLevel: row.member_level, points: row.points, memberExpiresAt: row.member_expires_at });
+
+router.post('/auth/wechat/login', async (req, res) => {
+  const code = String(req.body?.code || '').trim();
+  if (!code || code.length > 256) return res.status(400).json({ message: '微信登录 code 无效' });
+  try {
+    const result = await wechatLogin(code);
+    let user = db.prepare('SELECT * FROM users WHERE wechat_openid = ?').get(result.openid);
+    if (!user) {
+      const id = db.prepare('INSERT INTO users (nickname, wechat_openid) VALUES (?, ?)').run('微信用户', result.openid).lastInsertRowid;
+      db.prepare('INSERT INTO wallet_accounts (user_id) VALUES (?)').run(id);
+      user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    }
+    const token = crypto.randomBytes(32).toString('hex');
+    db.prepare('INSERT INTO wechat_sessions (token_hash, user_id, openid, expires_at) VALUES (?, ?, ?, ?) ON CONFLICT(openid) DO UPDATE SET token_hash = excluded.token_hash, expires_at = excluded.expires_at').run(tokenHash(token), user.id, result.openid, new Date(Date.now() + 30 * 86400000).toISOString());
+    res.json({ token, user: publicUser(user) });
+  } catch (error) { res.status(error.status || 503).json({ message: error.message, code: error.code || 'WECHAT_LOGIN_ERROR' }); }
+});
+
+router.use((req, _res, next) => {
+  const bearer = req.header('authorization')?.match(/^Bearer ([a-f0-9]{64})$/)?.[1];
+  if (bearer) req.user = db.prepare("SELECT u.* FROM wechat_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?").get(tokenHash(bearer), new Date().toISOString());
+  next();
+});
+router.get('/auth/me', (req, res) => req.user ? res.json({ user: publicUser(req.user) }) : res.status(401).json({ message: '请先完成微信登录' }));
 
 router.post('/admin/login', (req, res) => {
   const account = db.prepare("SELECT * FROM staff_accounts WHERE username = ? AND status = 'active'").get(String(req.body?.username || '').trim());
@@ -97,12 +132,12 @@ router.put('/admin/settings', (req, res) => {
   }))();
   audit(req, '更新接口配置', Object.keys(values).join(','));
   const status = getIntegrationStatus();
-  res.json({ ok: true, integrationsActive: false, groups: status.groups });
+  res.json({ ok: true, integrationsActive: Boolean(status.groups.wechat?.configured && status.groups.wechatPay?.configured), groups: status.groups });
 });
 router.post('/admin/settings/check', (_req, res) => {
   const status = getIntegrationStatus();
   const checks = Object.fromEntries(Object.entries(status.groups).map(([group, value]) => [group, { status: value.configured ? 'ready_for_auth' : 'missing_config', missing: value.missing }]));
-  res.json({ ok: true, checks, message: '配置完整性检查完成；真实平台授权、签名和回调仍需使用商户资质联调' });
+  res.json({ ok: true, checks, integrationsActive: Boolean(status.groups.wechat?.configured && status.groups.wechatPay?.configured), message: '配置完整性检查完成；美团和抖音仍需平台授权后进行真实券码联调' });
 });
 router.get('/runtime-config', (_req, res) => {
   const { values } = getIntegrationStatus();
@@ -235,6 +270,150 @@ function settleOrder(order, method, req) {
   }
 }
 
+function completeWechatOrder(orderNo, transactionId) {
+  return db.transaction(() => {
+    const order = db.prepare('SELECT * FROM orders WHERE order_no = ?').get(orderNo);
+    if (!order) throw Object.assign(new Error('订单不存在'), { status: 404 });
+    if (order.payment_status === 'paid') return order;
+    if (order.payment_status !== 'pending') throw Object.assign(new Error('订单当前不可支付'), { status: 409 });
+    if (order.payment_method === 'mixed') {
+      const wallet = db.prepare('SELECT stored_cents, bonus_cents, stored_reserved_cents, bonus_reserved_cents FROM wallet_accounts WHERE user_id = ?').get(order.payer_user_id);
+      if (!wallet || wallet.stored_reserved_cents < order.stored_paid_cents || wallet.bonus_reserved_cents < order.bonus_paid_cents) throw new Error('余额冻结金额不足，请重新发起支付');
+      db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents - ?, bonus_cents = bonus_cents - ?, stored_reserved_cents = stored_reserved_cents - ?, bonus_reserved_cents = bonus_reserved_cents - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(order.stored_paid_cents, order.bonus_paid_cents, order.stored_paid_cents, order.bonus_paid_cents, order.payer_user_id);
+      db.prepare('INSERT INTO wallet_transactions (user_id, type, stored_cents, bonus_cents, remark) VALUES (?, ?, ?, ?, ?)').run(order.payer_user_id, 'order_payment', -order.stored_paid_cents, -order.bonus_paid_cents, order.order_no);
+    }
+    db.prepare('UPDATE orders SET wechat_transaction_id = ? WHERE id = ?').run(transactionId || null, order.id);
+    settleOrder({ ...order, payable_amount_cents: order.payable_amount_cents }, order.payment_method, {});
+    return db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  })();
+}
+
+function releasePendingOrder(orderId, reason) {
+  return db.transaction(() => {
+    const order = db.prepare("SELECT * FROM orders WHERE id = ? AND payment_status = 'pending'").get(orderId);
+    if (!order) return null;
+    const items = db.prepare('SELECT cart_item_id FROM order_items WHERE order_id = ?').all(order.id);
+    if (order.payment_method === 'mixed') {
+      db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = MAX(stored_reserved_cents - ?, 0), bonus_reserved_cents = MAX(bonus_reserved_cents - ?, 0), updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(order.stored_paid_cents, order.bonus_paid_cents, order.payer_user_id);
+    }
+    const restoreCartItem = db.prepare("UPDATE cart_items SET status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'checking_out'");
+    items.forEach(item => restoreCartItem.run(item.cart_item_id));
+    db.prepare("UPDATE orders SET payment_status = 'closed', status = 'cancelled', payment_error = ? WHERE id = ? AND payment_status = 'pending'").run(reason, order.id);
+    return db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  })();
+}
+
+function reconcilePendingWalletReservations() {
+  const resetAll = db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = 0, bonus_reserved_cents = 0, updated_at = CURRENT_TIMESTAMP');
+  const users = db.prepare("SELECT DISTINCT payer_user_id FROM orders WHERE payment_status = 'pending' AND payment_method = 'mixed'").all();
+  const reset = db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = ?, bonus_reserved_cents = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?');
+  const pending = db.prepare("SELECT COALESCE(SUM(stored_paid_cents), 0) AS stored, COALESCE(SUM(bonus_paid_cents), 0) AS bonus FROM orders WHERE payer_user_id = ? AND payment_status = 'pending' AND payment_method = 'mixed'");
+  db.transaction(() => {
+    resetAll.run();
+    for (const user of users) {
+      const amount = pending.get(user.payer_user_id);
+      reset.run(amount.stored, amount.bonus, user.payer_user_id);
+    }
+  })();
+}
+
+router.post('/payments/wechat/notify', async (req, res) => {
+  try {
+    const payload = verifyNotification({ body: req.rawBody || JSON.stringify(req.body || {}), timestamp: req.header('Wechatpay-Timestamp'), nonce: req.header('Wechatpay-Nonce'), signature: req.header('Wechatpay-Signature'), serial: req.header('Wechatpay-Serial') });
+    if (payload.trade_state === 'SUCCESS' && payload.out_trade_no) completeWechatOrder(payload.out_trade_no, payload.transaction_id);
+    res.json({ code: 'SUCCESS', message: '成功' });
+  } catch (error) {
+    res.status(error.code === 'WECHAT_SIGNATURE_INVALID' ? 401 : 500).json({ code: 'FAIL', message: error.message });
+  }
+});
+
+router.post('/payments/wechat/:orderNo/query', async (req, res) => {
+  if (!req.user) return res.status(401).json({ message: '请先登录' });
+  const order = db.prepare('SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, req.user.id);
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  try {
+    const result = await queryPayment(order.order_no);
+    if (result.trade_state === 'SUCCESS') completeWechatOrder(order.order_no, result.transaction_id);
+    res.json({ order: db.prepare('SELECT payment_status, status FROM orders WHERE id = ?').get(order.id), tradeState: result.trade_state });
+  } catch (error) { res.status(error.status || 503).json({ message: error.message, code: error.code || 'WECHAT_QUERY_ERROR' }); }
+});
+
+router.post('/me/orders/:orderNo/pay', async (req, res) => {
+  const userId = currentUserId(req);
+  if (!userId) return res.status(401).json({ message: '请先登录' });
+  const order = db.prepare("SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?").get(req.params.orderNo, userId);
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  if (order.payment_status !== 'pending') return res.status(409).json({ message: order.payment_status === 'paid' ? '订单已经支付' : '订单已关闭，无法继续支付' });
+  if (!['wechat', 'mixed'].includes(order.payment_method) || order.wechat_paid_cents <= 0) return res.status(409).json({ message: '该订单不支持继续微信支付' });
+
+  const paymentExpireAt = orderExpiryAt(order);
+  if (paymentExpireAt && new Date(paymentExpireAt) <= new Date()) {
+    if (!order.wechat_prepay_id) {
+      releasePendingOrder(order.id, '微信支付订单已过期关闭');
+      return res.status(409).json({ message: '订单已过期，请重新下单' });
+    }
+    try {
+      const result = await queryPayment(order.order_no);
+      if (result.trade_state === 'SUCCESS') {
+        completeWechatOrder(order.order_no, result.transaction_id);
+        return res.json({ order: db.prepare('SELECT payment_status, status FROM orders WHERE id = ?').get(order.id), payment: null });
+      }
+      if (['NOTPAY', 'CLOSED', 'REVOKED', 'PAYERROR'].includes(result.trade_state)) releasePendingOrder(order.id, '微信支付订单已过期关闭');
+      else return res.status(409).json({ message: '订单支付状态尚未确认，请稍后重试' });
+      return res.status(409).json({ message: '订单已过期，请重新下单' });
+    } catch (error) {
+      return res.status(error.status || 503).json({ message: error.message, code: error.code || 'WECHAT_QUERY_ERROR' });
+    }
+  }
+
+  try {
+    const user = db.prepare('SELECT wechat_openid FROM users WHERE id = ?').get(userId);
+    if (!user?.wechat_openid) return res.status(409).json({ message: '当前微信账号尚未完成登录绑定，请重新进入小程序' });
+    const result = await createJsapiPayment({ orderNo: order.order_no, description: `酒吧订单 ${order.order_no}`, totalCents: order.wechat_paid_cents, openid: user.wechat_openid });
+    db.prepare('UPDATE orders SET wechat_prepay_id = ?, payment_expire_at = ?, payment_error = \'\' WHERE id = ? AND payment_status = \'pending\'').run(result.prepayId, new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString(), order.id);
+    res.json({ payment: result.payment, message: order.payment_method === 'mixed' ? `余额抵扣 ${centsToMoney(order.stored_paid_cents + order.bonus_paid_cents)}，请完成微信支付` : '请完成微信支付' });
+  } catch (error) {
+    res.status(error.status || 502).json({ message: error.message, code: error.code || 'WECHAT_PAYMENT_ERROR' });
+  }
+});
+
+router.post('/me/orders/:orderNo/cancel', (req, res) => {
+  const userId = currentUserId(req);
+  if (!userId) return res.status(401).json({ message: '请先登录' });
+  const order = db.prepare('SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, userId);
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  if (order.payment_status !== 'pending') return res.status(409).json({ message: order.payment_status === 'paid' ? '已支付订单不能取消' : '订单已关闭，不能重复取消' });
+  const cancelled = releasePendingOrder(order.id, '用户取消支付');
+  if (!cancelled) return res.status(409).json({ message: '订单状态已发生变化，请刷新订单列表' });
+  res.json({ ok: true, order: { orderNo: cancelled.order_no, paymentStatus: cancelled.payment_status, status: cancelled.status } });
+});
+
+function releaseExpiredWechatOrders() {
+  return Promise.all(db.prepare("SELECT * FROM orders WHERE payment_status = 'pending' AND ((payment_expire_at IS NOT NULL AND payment_expire_at < ?) OR (payment_expire_at IS NULL AND datetime(created_at, '+10 minutes') < datetime('now')))").all(new Date().toISOString()).map(async order => {
+    if (!order.wechat_prepay_id) {
+      releasePendingOrder(order.id, '微信支付订单已过期关闭');
+      return;
+    }
+    try {
+      const result = await queryPayment(order.order_no);
+      if (result.trade_state === 'SUCCESS') completeWechatOrder(order.order_no, result.transaction_id);
+      else if (['NOTPAY', 'CLOSED', 'REVOKED', 'PAYERROR'].includes(result.trade_state)) releasePendingOrder(order.id, '微信支付超时关闭');
+    } catch (error) {
+      // 本地演示环境没有微信商户配置，不能让测试订单永久卡在待支付。
+      // 生产环境仍保留查询失败不自动关闭的保护，避免网络抖动误取消真实订单。
+      const { groups } = getIntegrationStatus();
+      if (!groups.wechatPay?.configured) {
+        releasePendingOrder(order.id, '微信支付未配置，订单超时关闭');
+      } else {
+        console.error(`[wechat] 查询超时订单 ${order.order_no} 失败: ${error.message}`);
+      }
+    }
+  }));
+}
+reconcilePendingWalletReservations();
+releaseExpiredWechatOrders().catch(error => console.error(`[wechat] 启动时检查超时订单失败: ${error.message}`));
+setInterval(() => releaseExpiredWechatOrders(), 60 * 1000).unref();
+
 const posMember = row => row && ({ id: row.id, phone: row.phone, nickname: row.nickname, level: row.member_level, stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) });
 const posMemberSql = 'SELECT u.*, COALESCE(w.stored_cents,0) AS stored_cents, COALESCE(w.bonus_cents,0) AS bonus_cents FROM users u LEFT JOIN wallet_accounts w ON w.user_id = u.id WHERE u.phone = ?';
 router.get('/admin/pos', (req, res) => {
@@ -320,12 +499,16 @@ router.get('/sessions/:sessionId/checkout', (req, res) => {
   res.json({ payable: centsToMoney(payable), stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0 });
 });
 
-router.post('/sessions/:sessionId/orders', (req, res) => {
+router.post('/sessions/:sessionId/orders', async (req, res) => {
   const userId = currentUserId(req);
   const method = req.body?.paymentMethod;
   const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
   if (note.length > 200) return res.status(400).json({ message: '订单备注不能超过 200 个字' });
   if (!['balance','wechat','mixed'].includes(method)) return res.status(400).json({ message: '请选择支付方式' });
+  if (method !== 'balance') {
+    const user = db.prepare('SELECT wechat_openid FROM users WHERE id = ?').get(userId);
+    if (!user?.wechat_openid) return res.status(409).json({ message: '当前微信账号尚未完成登录绑定，请重新进入小程序' });
+  }
   const session = db.prepare("SELECT * FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
   const items = db.prepare("SELECT ci.*, p.name, p.price_cents, p.member_price_cents, p.cost_cents, p.stock, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(req.params.sessionId);
   if (!session || !items.length) return res.status(400).json({ message: '桌台没有待支付商品' });
@@ -343,7 +526,8 @@ router.post('/sessions/:sessionId/orders', (req, res) => {
     const wechat = totals.member - bonus - stored;
     if (method === 'balance' && wechat > 0) throw new Error('余额不足，请选择组合支付或微信支付');
     if (method === 'mixed' && (wechat <= 0 || bonus + stored <= 0)) throw new Error('当前订单不需要组合支付');
-    const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.member, totals.member, method, stored, bonus, wechat, note);
+    const paymentExpireAt = method === 'balance' ? null : new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString();
+    const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents, payment_expire_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.member, totals.member, method, stored, bonus, wechat, paymentExpireAt, note);
     const insertItem = db.prepare('INSERT INTO order_items (order_id, cart_item_id, product_id, product_name, quantity, original_price_cents, paid_price_cents, cost_price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
     items.forEach(item => insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, item.quantity, item.price_cents, unitPrice(item, pricing), item.cost_cents));
     db.prepare(`UPDATE cart_items SET status = 'checking_out' WHERE session_id = ? AND status = 'pending'`).run(session.id);
@@ -352,9 +536,27 @@ router.post('/sessions/:sessionId/orders', (req, res) => {
       db.prepare('INSERT INTO wallet_transactions (user_id, type, stored_cents, bonus_cents, remark) VALUES (?, ?, ?, ?, ?)').run(userId, 'order_payment', -stored, -bonus, orderNo);
       settleOrder({ id: result.lastInsertRowid, payer_user_id: userId, payable_amount_cents: totals.member }, method, req);
     }
+    if (method === 'mixed') {
+      const changed = db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = stored_reserved_cents + ?, bonus_reserved_cents = bonus_reserved_cents + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND stored_cents - stored_reserved_cents >= ? AND bonus_cents - bonus_reserved_cents >= ?').run(stored, bonus, userId, stored, bonus).changes;
+      if (!changed) throw new Error('余额不足，请重新获取支付金额');
+    }
     return db.prepare('SELECT * FROM orders WHERE id = ?').get(result.lastInsertRowid);
   })();
-  res.status(201).json({ order: { ...order, originalAmount: centsToMoney(order.original_amount_cents), discountAmount: centsToMoney(order.discount_amount_cents), payableAmount: centsToMoney(order.payable_amount_cents), storedPaid: centsToMoney(order.stored_paid_cents), bonusPaid: centsToMoney(order.bonus_paid_cents), wechatPaid: centsToMoney(order.wechat_paid_cents) }, payment: method === 'balance' ? { provider: 'balance', status: 'paid', message: '余额支付成功' } : { provider: 'wechat', status: 'not_started', statusLabel: '待微信支付', message: method === 'mixed' ? `余额抵扣 ${centsToMoney(order.stored_paid_cents + order.bonus_paid_cents)}，微信需支付 ${centsToMoney(order.wechat_paid_cents)}；微信支付接口尚未接通，暂不扣除余额` : '微信支付尚未接通，订单待支付，不会扣款' } });
+  let payment = { provider: 'balance', status: 'paid', message: '余额支付成功' };
+  if (method !== 'balance') {
+    try {
+      const user = db.prepare('SELECT wechat_openid FROM users WHERE id = ?').get(userId);
+      const result = await createJsapiPayment({ orderNo: order.order_no, description: `酒吧订单 ${order.order_no}`, totalCents: order.wechat_paid_cents, openid: user.wechat_openid });
+      db.prepare('UPDATE orders SET wechat_prepay_id = ?, payment_expire_at = ? WHERE id = ?').run(result.prepayId, new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString(), order.id);
+      payment = { provider: 'wechat', status: 'pending', payment: result.payment, message: method === 'mixed' ? `余额抵扣 ${centsToMoney(order.stored_paid_cents + order.bonus_paid_cents)}，请完成微信支付` : '请完成微信支付' };
+    } catch (error) {
+      if (method === 'mixed') db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = MAX(stored_reserved_cents - ?, 0), bonus_reserved_cents = MAX(bonus_reserved_cents - ?, 0) WHERE user_id = ?').run(order.stored_paid_cents, order.bonus_paid_cents, userId);
+      db.prepare("UPDATE cart_items SET status = 'pending' WHERE session_id = ? AND status = 'checking_out'").run(session.id);
+      db.prepare('UPDATE orders SET payment_status = \'failed\', status = \'cancelled\', payment_error = ? WHERE id = ?').run(error.message, order.id);
+      return res.status(error.code === 'INTEGRATION_NOT_CONFIGURED' ? 503 : 502).json({ message: error.message, code: error.code || 'WECHAT_PAYMENT_ERROR' });
+    }
+  }
+  res.status(201).json({ order: { ...order, originalAmount: centsToMoney(order.original_amount_cents), discountAmount: centsToMoney(order.discount_amount_cents), payableAmount: centsToMoney(order.payable_amount_cents), storedPaid: centsToMoney(order.stored_paid_cents), bonusPaid: centsToMoney(order.bonus_paid_cents), wechatPaid: centsToMoney(order.wechat_paid_cents) }, payment });
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
 
@@ -425,7 +627,7 @@ router.get('/admin/categories', (_req, res) => res.json({ categories: adminRows(
 router.post('/admin/categories', (req, res) => { if (!req.body.name) return res.status(400).json({ message: '分类名称不能为空' }); const r = db.prepare('INSERT INTO categories (store_id, name, sort) VALUES (1, ?, ?)').run(req.body.name, Number(req.body.sort || 0)); res.status(201).json({ category: db.prepare('SELECT * FROM categories WHERE id = ?').get(r.lastInsertRowid) }); });
 router.patch('/admin/categories/:id', (req, res) => { db.prepare('UPDATE categories SET name = COALESCE(?, name), sort = COALESCE(?, sort), status = COALESCE(?, status) WHERE id = ?').run(req.body.name, req.body.sort == null ? null : Number(req.body.sort), req.body.status, req.params.id); res.json({ ok: true }); });
 
-router.get('/admin/tables', (_req, res) => res.json({ tables: adminRows("SELECT t.*, ts.session_no, ts.status AS session_status, COALESCE(SUM(o.payable_amount_cents),0) AS order_total FROM tables t LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'open' LEFT JOIN orders o ON o.session_id = ts.id AND o.payment_status = 'paid' GROUP BY t.id ORDER BY t.table_no") .map(row => ({ ...row, orderTotal: centsToMoney(row.order_total) })) }));
+router.get('/admin/tables', (_req, res) => res.json({ tables: adminRows("SELECT t.*, ts.session_no, ts.status AS session_status, COALESCE(SUM(o.payable_amount_cents),0) AS order_total FROM tables t LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'open' LEFT JOIN orders o ON o.session_id = ts.id AND o.payment_status = 'paid' WHERE t.status != 'disabled' GROUP BY t.id ORDER BY t.table_no") .map(row => ({ ...row, orderTotal: centsToMoney(row.order_total) })) }));
 router.get('/admin/tables/:id/mini-code', async (req, res) => {
   const table = db.prepare("SELECT id, table_no FROM tables WHERE id = ? AND status != 'disabled'").get(req.params.id);
   if (!table) return res.status(404).json({ message: '桌台不存在或已停用' });
@@ -437,8 +639,42 @@ router.get('/admin/tables/:id/mini-code', async (req, res) => {
     res.status(502).json({ message: error.name === 'AbortError' ? '微信接口超时，请稍后重试' : error.message });
   }
 });
-router.post('/admin/tables', (req, res) => { if (!req.body.tableNo) return res.status(400).json({ message: '桌号不能为空' }); const token = `echo-${String(req.body.tableNo).toLowerCase()}-${crypto.randomBytes(4).toString('hex')}`; const r = db.prepare('INSERT INTO tables (store_id, table_no, qr_token) VALUES (1, ?, ?)').run(req.body.tableNo, token); audit(req, '新增桌台', req.body.tableNo); res.status(201).json({ table: db.prepare('SELECT * FROM tables WHERE id = ?').get(r.lastInsertRowid) }); });
-router.patch('/admin/tables/:id', (req, res) => { db.prepare('UPDATE tables SET table_no = COALESCE(?, table_no), status = COALESCE(?, status) WHERE id = ?').run(req.body.tableNo, req.body.status, req.params.id); res.json({ ok: true }); });
+router.post('/admin/tables', (req, res) => {
+  const tableNo = String(req.body?.tableNo || '').trim();
+  if (!tableNo || tableNo.length > 30) return res.status(400).json({ message: '桌号不能为空且不能超过 30 个字' });
+  if (db.prepare('SELECT id FROM tables WHERE store_id = 1 AND table_no = ? AND status != ?').get(tableNo, 'disabled')) return res.status(409).json({ message: '这个桌号已经存在' });
+  const token = `echo-${tableNo.toLowerCase()}-${crypto.randomBytes(4).toString('hex')}`;
+  const r = db.prepare('INSERT INTO tables (store_id, table_no, qr_token) VALUES (1, ?, ?)').run(tableNo, token);
+  audit(req, '新增桌台', tableNo);
+  res.status(201).json({ table: db.prepare('SELECT * FROM tables WHERE id = ?').get(r.lastInsertRowid) });
+});
+router.patch('/admin/tables/:id', (req, res) => {
+  const table = db.prepare('SELECT * FROM tables WHERE id = ?').get(req.params.id);
+  if (!table) return res.status(404).json({ message: '桌台不存在' });
+  const tableNo = req.body?.tableNo == null ? table.table_no : String(req.body.tableNo).trim();
+  const status = req.body?.status == null ? table.status : String(req.body.status);
+  if (!tableNo || tableNo.length > 30) return res.status(400).json({ message: '桌号不能为空且不能超过 30 个字' });
+  if (!['available', 'disabled'].includes(status)) return res.status(400).json({ message: '桌台状态无效' });
+  if (status === 'disabled' && db.prepare("SELECT id FROM table_sessions WHERE table_id = ? AND status = 'open'").get(table.id)) return res.status(409).json({ message: '当前桌台正在使用，请先结束本桌后再停用' });
+  if (db.prepare('SELECT id FROM tables WHERE store_id = ? AND table_no = ? AND id != ? AND status != ?').get(table.store_id, tableNo, table.id, 'disabled')) return res.status(409).json({ message: '这个桌号已经存在' });
+  db.prepare('UPDATE tables SET table_no = ?, status = ? WHERE id = ?').run(tableNo, status, table.id);
+  audit(req, status === 'disabled' ? '停用桌台' : '编辑桌台', `${table.table_no} -> ${tableNo}`);
+  res.json({ ok: true });
+});
+router.delete('/admin/tables/:id', (req, res) => {
+  const table = db.prepare('SELECT * FROM tables WHERE id = ? AND status != ?').get(req.params.id, 'disabled');
+  if (!table) return res.status(404).json({ message: '桌台不存在或已停用' });
+  if (db.prepare("SELECT id FROM table_sessions WHERE table_id = ? AND status = 'open'").get(table.id)) return res.status(409).json({ message: '当前桌台正在使用，请先结束本桌后再停用' });
+  const hasHistory = db.prepare('SELECT id FROM table_sessions WHERE table_id = ? LIMIT 1').get(table.id);
+  if (hasHistory) {
+    db.prepare("UPDATE tables SET status = 'disabled' WHERE id = ?").run(table.id);
+    audit(req, '删除桌台（保留历史记录）', table.table_no);
+    return res.json({ ok: true, mode: 'archived', message: '桌台已从后台移除，历史订单仍保留' });
+  }
+  db.prepare('DELETE FROM tables WHERE id = ?').run(table.id);
+  audit(req, '删除桌台', table.table_no);
+  res.json({ ok: true, mode: 'deleted' });
+});
 router.post('/admin/tables/:id/close', (req, res) => { const session = db.prepare("SELECT id FROM table_sessions WHERE table_id = ? AND status = 'open'").get(req.params.id); if (session) { db.prepare("UPDATE table_sessions SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = ?").run(session.id); audit(req, '结束桌台', req.params.id); } res.json({ ok: true }); });
 
 router.get('/admin/orders', (req, res) => {
@@ -561,7 +797,14 @@ router.post('/rewards/:id/redeem', (req, res) => {
     res.status(201).json({ redemption: record });
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
-router.get('/me/orders', (req, res) => res.json({ orders: db.prepare('SELECT * FROM orders WHERE payer_user_id = ? ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => ({ ...row, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? '待支付' : '已取消', fulfillmentLabel: fulfillmentLabel(row) })) }));
+router.get('/me/orders', (req, res) => {
+  const orders = db.prepare('SELECT * FROM orders WHERE payer_user_id = ? ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => {
+    const paymentExpireAt = orderExpiryAt(row);
+    const isExpired = Boolean(row.payment_status === 'pending' && paymentExpireAt && new Date(paymentExpireAt) <= new Date());
+    return { ...row, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending' };
+  });
+  res.json({ orders });
+});
 function storageView(row) {
   const remainingDays = Math.max(0, Math.ceil((new Date(row.expires_at).getTime() - Date.now()) / 86400000));
   const expiresDate = row.expires_at.slice(0, 10);

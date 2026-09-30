@@ -6,7 +6,7 @@ const app = express();
 const port = process.env.PORT || 3001;
 const host = process.env.HOST || '127.0.0.1';
 
-app.use(express.json());
+app.use(express.json({ verify: (req, _res, buffer) => { req.rawBody = buffer.toString('utf8'); } }));
 app.use('/api', router);
 
 app.get('/api/health', (_req, res) => {

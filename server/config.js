@@ -14,6 +14,7 @@ export const integrationDefinitions = {
   wechat_merchant_serial: { label: '微信支付商户证书序列号', group: 'wechatPay', required: true, secret: false, env: 'WECHAT_MERCHANT_SERIAL' },
   wechat_private_key: { label: '微信支付商户私钥', group: 'wechatPay', required: true, secret: true, env: 'WECHAT_PRIVATE_KEY' },
   wechat_notify_url: { label: '微信支付回调地址', group: 'wechatPay', required: true, secret: false, env: 'WECHAT_NOTIFY_URL' },
+  wechat_platform_certificate: { label: '微信支付平台证书或公钥', group: 'wechatPay', required: true, secret: true, env: 'WECHAT_PLATFORM_CERTIFICATE' },
   meituan_client_id: { label: '美团客户端 ID', group: 'meituan', required: true, secret: false, env: 'MEITUAN_CLIENT_ID' },
   meituan_client_secret: { label: '美团客户端密钥', group: 'meituan', required: true, secret: true, env: 'MEITUAN_CLIENT_SECRET' },
   douyin_client_key: { label: '抖音客户端 Key', group: 'douyin', required: true, secret: false, env: 'DOUYIN_CLIENT_KEY' },
@@ -41,4 +42,16 @@ export function getIntegrationStatus() {
 export function readPrivateKey(value) {
   if (!value) return '';
   return value.includes('BEGIN') ? value.replace(/\\n/g, '\n') : fs.readFileSync(path.resolve(value), 'utf8');
+}
+
+export function requireIntegration(...keys) {
+  const values = getIntegrationValues();
+  const missing = keys.filter(key => !values[key]);
+  if (missing.length) {
+    const error = new Error(`接口尚未配置：${missing.join(', ')}`);
+    error.code = 'INTEGRATION_NOT_CONFIGURED';
+    error.missing = missing;
+    throw error;
+  }
+  return values;
 }

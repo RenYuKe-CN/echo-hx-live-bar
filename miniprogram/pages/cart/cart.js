@@ -35,7 +35,7 @@ Page({
         wx.showToast({ title: '余额支付成功', icon: 'success' });
         wx.navigateTo({ url: '/pages/order/order' });
       } else {
-        wx.showModal({ title: data.payment.statusLabel || '待微信支付', content: data.payment.message + '；请勿重复下单，可联系店员处理。', showCancel: false, success: () => wx.navigateTo({ url: '/pages/order/order' }) });
+        wx.requestPayment({ ...data.payment.payment, success: () => { this.setData({ items: [], totals: emptyTotals, note: '' }); wx.showToast({ title: '支付成功', icon: 'success' }); setTimeout(() => wx.navigateTo({ url: '/pages/order/order' }), 500); }, fail: error => { wx.showToast({ title: error.errMsg?.includes('cancel') ? '已取消支付' : '支付未完成', icon: 'none' }); this.refresh(); } });
       }
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ submitting: false }));
   },

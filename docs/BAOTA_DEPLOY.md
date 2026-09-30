@@ -139,9 +139,11 @@ chmod 750 data logs backups
 https://bar.example.com
 ```
 
-**首次正式发布必须修改一次小程序固定引导地址**：将 `miniprogram/utils/api.js` 中的 `BOOTSTRAP_API_URL` 从 `http://localhost:3001/api` 改为 `https://bar.example.com/api`，然后在微信开发者工具重新上传并提交审核。后台的 `public_api_base_url` 只控制启动后获取的目标 API 地址，不能改变已发布代码中的固定引导地址。以后切换目标地址可在后台修改，但引导域名必须持续可用，新旧域名都必须加入微信合法域名。`localhost` 只能用于开发工具本地调试。
+**首次正式发布必须修改一次小程序固定引导地址**：将 `miniprogram/utils/api.js` 中的 `BOOTSTRAP_API_URL` 从 `http://localhost:3001/api` 改为 `https://bar.example.com/api`，然后在微信开发者工具重新上传并提交审核。后台的 `public_api_base_url` 只控制启动后获取的目标 API 地址，不能改变已发布代码中的固定引导地址。以后切换目标地址可在后台修改，但引导域名必须持续可用，新旧域名都必须加入微信合法域名。`localhost` 只能用于开发工具本地调试。小程序启动后会调用微信登录接口，生产环境不再使用演示用户 ID。
 
 “桌台管理”中的“预览 / 下载”会调用微信官方 `wxa/getwxacodeunlimit` 接口生成桌台专属小程序码。先在“接口配置”填写微信小程序 AppID、AppSecret，并确认小程序已经发布 `pages/menu/menu` 页面；配置 HTTPS 合法域名后即可下载 PNG 打印。二维码绑定桌台 ID，桌号改名后原二维码仍可使用。微信接口未配置或返回错误时，后台会显示具体错误，不会生成假二维码。
+
+微信支付回调必须公网可访问：`https://bar.example.com/api/payments/wechat/notify`。后台接口配置中需要填写商户号、API v3 Key、商户证书序列号、商户私钥、平台证书或平台公钥和这个回调地址；只填写 AppID 不能完成支付。
 
 ## 11. 宝塔计划任务
 
