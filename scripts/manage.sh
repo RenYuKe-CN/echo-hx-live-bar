@@ -90,13 +90,21 @@ case "${1:-help}" in
     require_node
     command -v git >/dev/null || { echo '未找到 git' >&2; exit 1; }
     [[ -z "$(git status --porcelain)" ]] || { echo '项目含未提交改动；为保护服务器本地修改，更新已停止。请先检查 git status。' >&2; exit 1; }
-    [[ "$(git branch --show-current)" == main ]] || { echo '更新仅支持 main 分支' >&2; exit 1; }
+    git fetch origin main
+    current_branch="$(git branch --show-current)"
+    if [[ "$current_branch" != main ]]; then
+      if git show-ref --verify --quiet refs/heads/main; then
+        git switch main
+      else
+        git switch --create main --track origin/main
+      fi
+      echo "已将当前分支${current_branch:+ $current_branch}切换为 main"
+    fi
     echo "更新前版本：$(git rev-parse --short HEAD)"
     if [[ -f data/echo-hx.sqlite ]]; then
       command -v sqlite3 >/dev/null || { echo '请先安装 sqlite3 以备份营业数据库' >&2; exit 1; }
       bash scripts/backup.sh
     fi
-    git fetch origin main
     git merge --ff-only origin/main
     npm_install
     npm run build

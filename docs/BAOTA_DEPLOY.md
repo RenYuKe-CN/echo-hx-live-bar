@@ -269,6 +269,26 @@ npm ci --include=dev
 
 运行的仍是旧 Node.js。切换宝塔 Node.js 版本到 20 或 22，并确认终端和 Node 项目管理器使用的是同一个版本。
 
+### 更新提示“更新仅支持 main 分支”
+
+新版更新脚本会在服务器工作区干净时自动把 `master` 或 detached HEAD 切换到 `main`。如果服务器使用的是旧版脚本，或者目录中有本地改动，请先检查：
+
+```bash
+cd /www/wwwroot/echo-hx-live-bar
+git status
+git branch --show-current
+```
+
+确认没有需要保留的本地代码改动后，可以执行一次：
+
+```bash
+git fetch origin main
+git switch --create main --track origin/main
+bash scripts/manage.sh update
+```
+
+如果 `git status` 显示有改动，不要直接删除或强制切换；先备份 `.env`、`data/` 和本地改动，再处理。`.env` 和 `data/` 不应通过 Git 管理。
+
 ### 页面 502
 
 执行：
