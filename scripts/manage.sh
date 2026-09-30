@@ -89,8 +89,16 @@ case "${1:-help}" in
   update)
     require_node
     command -v git >/dev/null || { echo '未找到 git' >&2; exit 1; }
-    [[ -z "$(git status --porcelain)" ]] || { echo '项目含未提交改动；为保护服务器本地修改，更新已停止。请先检查 git status。' >&2; exit 1; }
     git fetch origin main
+    if [[ -n "$(git status --porcelain)" ]]; then
+      if git diff --quiet origin/main -- . && git diff --cached --quiet; then
+        git reset --hard origin/main >/dev/null
+        echo '服务器存在与 origin/main 内容一致的残留改动，已自动同步清理。'
+      else
+        echo '项目含未提交改动；为保护服务器本地修改，更新已停止。请先检查 git status。' >&2
+        exit 1
+      fi
+    fi
     current_branch="$(git branch --show-current)"
     if [[ "$current_branch" != main ]]; then
       if git show-ref --verify --quiet refs/heads/main; then

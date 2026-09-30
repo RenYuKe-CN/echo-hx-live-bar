@@ -1,7 +1,7 @@
 // This bootstrap URL must remain reachable and be included in WeChat's legal
 // request domains. The admin-configured URL is fetched from it at launch.
 // 微信开发者工具可访问本机 API；真机和正式版应通过后台配置切换到 HTTPS 域名。
-const BOOTSTRAP_API_URL = 'http://localhost:3001/api';
+const BOOTSTRAP_API_URL = 'https://www.9bar.cn/api';
 let API_BASE_URL = wx.getStorageSync('echoApiBaseUrl') || BOOTSTRAP_API_URL;
 let userId = 1;
 let authToken = wx.getStorageSync('echoAuthToken') || '';
