@@ -8,7 +8,11 @@ App({
       const appName = page.entries.find(item => item.key === 'app_name')?.title;
       if (appName) wx.setNavigationBarTitle({ title: appName });
       return page;
-    }).catch(() => null);
+    }).catch(error => {
+      this.globalData.loginError = error.message;
+      wx.showToast({ title: error.message, icon: 'none', duration: 3500 });
+      throw error;
+    });
     this.applyLaunchOptions(options || wx.getLaunchOptionsSync());
   },
   onShow(options) { this.applyLaunchOptions(options); },

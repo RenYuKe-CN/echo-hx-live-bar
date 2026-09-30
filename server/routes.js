@@ -141,8 +141,11 @@ router.post('/admin/settings/check', (_req, res) => {
 });
 router.get('/runtime-config', (_req, res) => {
   const { values } = getIntegrationStatus();
-  const apiBaseUrl = values.public_api_base_url;
-  if (!apiBaseUrl || !/^https:\/\//i.test(apiBaseUrl)) return res.status(503).json({ message: '小程序 API 地址尚未配置为 HTTPS' });
+  const apiBaseUrl = values.public_api_base_url || (process.env.NODE_ENV !== 'production' ? 'http://localhost:3001/api' : '');
+  const isLocal = /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?\/api\/?$/i.test(apiBaseUrl || '');
+  if (!apiBaseUrl || (!/^https:\/\//i.test(apiBaseUrl) && !(process.env.NODE_ENV !== 'production' && isLocal))) {
+    return res.status(503).json({ message: process.env.NODE_ENV === 'production' ? '小程序 API 地址尚未配置为 HTTPS' : '小程序 API 地址尚未配置；开发环境可使用 http://localhost:3001/api，正式环境必须使用 HTTPS' });
+  }
   res.json({ apiBaseUrl: apiBaseUrl.replace(/\/$/, '') });
 });
 
