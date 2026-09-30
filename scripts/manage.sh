@@ -27,6 +27,12 @@ require_node() {
   command -v npm >/dev/null || { echo '未找到 npm，请检查宝塔终端使用的 Node 版本' >&2; exit 1; }
 }
 
+npm_install() {
+  local registry="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+  echo "使用 npm 源：$registry"
+  npm ci --include=dev --registry="$registry"
+}
+
 service_mode() {
   case "${MANAGE_SERVICE:-panel}" in
     panel|script|pm2) ;;
@@ -75,7 +81,7 @@ case "${1:-help}" in
     require_node
     mkdir -p data logs
     if [[ ! -f .env ]]; then cp .env.example .env; echo '已创建 .env，请检查并填写正式配置。'; fi
-    npm ci --include=dev
+    npm_install
     npm run build
     echo "安装完成，前端目录：$ROOT_DIR/dist"
     echo '请在宝塔创建 Node 项目和静态网站，参见 docs/BAOTA_DEPLOY.md。'
@@ -92,7 +98,7 @@ case "${1:-help}" in
     fi
     git fetch origin main
     git merge --ff-only origin/main
-    npm ci --include=dev
+    npm_install
     npm run build
     echo "更新后版本：$(git rev-parse --short HEAD)"
     service_action restart

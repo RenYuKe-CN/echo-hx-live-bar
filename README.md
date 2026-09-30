@@ -2,7 +2,7 @@
 
 使用宝塔面板部署请阅读：[宝塔面板部署教程](docs/BAOTA_DEPLOY.md)。
 
-宝塔快速安装与更新：克隆仓库后在项目目录执行 `bash scripts/manage.sh install`；以后执行 `bash scripts/manage.sh update`，再到宝塔 Node 项目页面点击“重启”。`bash scripts/manage.sh version` 可查看当前版本；完整命令见 `bash scripts/manage.sh --help`。更新前自动备份数据库，保留 `.env` 和 `data/`。
+宝塔快速安装与更新：全新服务器先安装 Node.js 20/22、Nginx、Git、SQLite 和宝塔 Node 项目管理器，然后在项目目录执行 `bash scripts/manage.sh install`；以后执行 `bash scripts/manage.sh update`，再到宝塔 Node 项目页面点击“重启”。脚本默认使用 `https://registry.npmmirror.com` 安装 npm 依赖，自动保留 `.env` 和 `data/`。完整步骤见上面的宝塔教程。
 
 酒吧点单、会员、储值、存酒和运营管理系统，包含顾客端、微信小程序、管理后台、收银点单、库存、报表、SQLite 数据库和 GitHub 部署脚本。
 
@@ -72,7 +72,7 @@ Echo HX Live Bar 是面向酒吧、餐吧和 live house 场景的点单与会员
 
 美团和抖音目前完成的是后台配置项、内部套餐/核销记录和业务入口，**尚未声称已完成真实平台券码查询与核销**。要正式使用，仍需申请对应生活服务开放平台权限、绑定门店、取得接口凭证，并根据平台审核结果完成签名、回调和生产环境联调。
 
-## 一、服务器要求
+## 一、服务器要求（非宝塔手工部署）
 
 需要公网服务器、域名、HTTPS 证书、Node.js 20+、npm、Git、Nginx、sqlite3。建议至少 2 GB 内存。开放 22、80、443 端口，3001 只允许本机访问。
 

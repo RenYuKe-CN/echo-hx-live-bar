@@ -9,7 +9,10 @@ node -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 20
 
 mkdir -p data logs
 [[ -f .env ]] || cp .env.example .env
-npm ci --include=dev
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
+echo "使用 npm 源：$NPM_REGISTRY"
+npm ci --include=dev --registry="$NPM_REGISTRY"
 npm run build
 chmod +x scripts/*.sh
-echo "安装完成。请编辑 $ROOT_DIR/.env，然后运行：sudo $ROOT_DIR/scripts/service.sh start"
+echo "安装完成。请编辑 $ROOT_DIR/.env，然后在宝塔「网站 -> Node 项目」中托管并启动 server/index.js。"
+echo "宝塔部署完整教程：$ROOT_DIR/docs/BAOTA_DEPLOY.md"

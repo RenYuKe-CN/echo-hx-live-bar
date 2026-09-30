@@ -1,102 +1,130 @@
-# Echo HX Live Bar 宝塔面板部署教程
+# Echo HX Live Bar 宝塔部署教程
 
-本文适用于宝塔 Linux 面板。推荐使用宝塔 Node 项目管理器运行 API，Nginx 托管前端并反向代理 `/api`。
+本文按“全新服务器 + 宝塔面板”编写。整套服务只使用一种托管方式：
 
-## 1. 安装软件
+- 宝塔 Node 项目管理器运行 API
+- 宝塔网站的 Nginx 托管 `dist/` 并反向代理 `/api/`
+- SQLite 保存业务数据
 
-在宝塔“软件商店”安装 Nginx、Node.js 20+、Node 项目管理器或 PM2、Git、SQLite/sqlite3。服务器建议至少 2 GB 内存，域名应已解析到服务器公网 IP。
+不要再同时使用 PM2、`scripts/service.sh` 和宝塔 Node 项目启动同一个 API，否则会出现端口冲突。
 
-## 2. 克隆项目
+## 一、宝塔安装软件
 
-打开宝塔终端执行：
+在“软件商店”安装：
+
+1. Nginx
+2. Node.js 版本管理器或 Node.js 项目管理器
+3. Git
+4. SQLite 或 `sqlite3`
+
+在 Node.js 版本管理器中安装并启用 **Node.js 20 LTS 或 22 LTS**。本项目要求 Node.js 20 及以上，Node.js 12、14、16、18 都不能使用。
+
+服务器需要一个已经解析到服务器 IP 的域名，并开放 80、443 端口。API 的 3001 端口只允许本机访问，不需要对公网开放。
+
+## 二、首次安装项目
+
+打开宝塔“终端”，复制执行以下命令：
 
 ```bash
-mkdir -p /www/wwwroot
 cd /www/wwwroot
 git clone https://github.com/RenYuKe-CN/echo-hx-live-bar.git echo-hx-live-bar
 cd /www/wwwroot/echo-hx-live-bar
+
+# 防止宝塔遗留的错误 npm 源影响安装
+npm config set registry https://registry.npmmirror.com --global
+npm config delete init.module --global 2>/dev/null || true
+
+# 安装依赖、创建 .env、构建前端
 bash scripts/manage.sh install
 ```
 
-`install` 会检查 Node.js 版本、创建 `.env`（已存在则保留）、安装依赖并生成 `dist/`。请先按下文安装 Node.js 20+，再运行此命令；如果已经克隆了项目，直接进入项目目录运行即可。也可以使用宝塔 Git 管理器克隆：仓库为 `https://github.com/RenYuKe-CN/echo-hx-live-bar.git`，分支为 `main`，目录为 `/www/wwwroot/echo-hx-live-bar`。
+安装成功后必须存在以下文件：
 
-## 3. 配置环境变量
+```text
+/www/wwwroot/echo-hx-live-bar/dist/index.html
+/www/wwwroot/echo-hx-live-bar/dist/assets/
+```
+
+如果要使用 npm 官方源，可以把安装命令替换为：
+
+```bash
+NPM_REGISTRY=https://registry.npmjs.org bash scripts/manage.sh install
+```
+
+不要把 `https://mirrors.tuna.tsinghua.edu.cn/nodejs-release` 或其他 Node.js 下载镜像地址配置成 npm registry。npm registry 必须是 npm 包仓库地址。
+
+## 三、填写服务器配置
+
+安装脚本会自动创建 `.env`，没有创建时可手动执行：
 
 ```bash
 cd /www/wwwroot/echo-hx-live-bar
 cp .env.example .env
-vi .env
 ```
 
-至少填写：
+打开 `.env`，至少确认这些内容：
 
 ```env
 NODE_ENV=production
 HOST=127.0.0.1
 PORT=3001
 DATA_DIR=./data
-ADMIN_INITIAL_PASSWORD=设置一个至少10位的强密码
-MINIPROGRAM_API_BASE_URL=https://bar.example.com/api
+ADMIN_INITIAL_PASSWORD=请替换成至少10位的强密码
+MINIPROGRAM_API_BASE_URL=https://你的域名/api
 ```
 
-第三方配置可以写在 `.env`，也可以登录超级管理员后台填写。环境变量优先于后台配置。不要将 `.env`、私钥、数据库或上传图片提交到 GitHub。
+保存后不要把 `.env` 提交到 GitHub。微信支付、微信登录、美团、抖音等密钥可以在超级管理员后台填写；密钥只保存在服务器，不要写进小程序代码。
 
-## 4. 确认 Node.js 版本
+## 四、在宝塔添加 Node 项目
 
-在宝塔“软件商店 -> Node.js 版本管理”中安装并启用 Node.js 20、22 或更高版本。不要使用系统自带的 Node.js 12、14、16 或 18；本项目使用 ES 模块、可选链、`||=` 和 Node.js 内置 `fetch`，旧版本会在启动时出现 `Unexpected token '||='` 等语法错误。
-
-在宝塔终端确认当前命令行版本：
-
-```bash
-node --version
-which node
-```
-
-必须看到 `v20.x`、`v22.x` 或更高版本。如果宝塔 Node 项目管理器和终端使用的 Node 版本不同，应以 Node 项目管理器中选择的版本为准。
-
-## 5. 添加 Node 项目
-
-进入“网站 -> Node 项目 -> 添加 Node 项目”：
+进入“网站 -> Node 项目 -> 添加 Node 项目”，填写：
 
 | 配置项 | 内容 |
 | --- | --- |
 | 项目名称 | `echo-hx-live-bar-api` |
 | 项目路径 | `/www/wwwroot/echo-hx-live-bar` |
 | 启动文件 | `server/index.js` |
-| Node 版本 | 20 或更高 |
+| Node 版本 | 20 或 22 |
 | 端口 | `3001` |
 | 运行用户 | 通常为 `www` |
 
-启动命令为 `node --env-file=.env server/index.js`（Node.js 20.6+），工作目录必须是项目根目录。宝塔面板不会自动读取 `.env`；如果所用 Node 版本或项目管理器不支持 `--env-file`，请在面板“环境变量”中逐项填写，并使用 `node server/index.js`。启动后执行：
+工作目录必须是项目根目录。Node 项目管理器若支持启动参数，可使用：
+
+```text
+node --env-file=.env server/index.js
+```
+
+如果面板不支持 `--env-file`，就在 Node 项目的“环境变量”中逐项填写 `.env` 内容，启动文件仍填 `server/index.js`。
+
+点击启动后，在宝塔终端检查 API：
 
 ```bash
 curl http://127.0.0.1:3001/api/health
 ```
 
-不要同时使用宝塔 Node 项目管理器和 PM2 管理同一个 API，否则会造成端口冲突。如果没有 Node 项目管理器，才使用 PM2：
+应返回 JSON。若返回连接失败，先看“网站 -> Node 项目”的运行日志；若返回 HTML，说明请求没有到 API 进程。
 
-```bash
-cd /www/wwwroot/echo-hx-live-bar
-npm install -g pm2
-pm2 start server/index.js --name echo-hx-live-bar-api --node-args="--env-file=.env"
-pm2 save
-pm2 startup
-```
+## 五、创建前端网站
 
-## 6. 创建网站
-
-进入“网站 -> 添加站点”：
+进入“网站 -> 添加站点”，填写：
 
 | 配置项 | 内容 |
 | --- | --- |
-| 域名 | `bar.example.com` |
+| 域名 | 你的正式域名，例如 `bar.example.com` |
 | 根目录 | `/www/wwwroot/echo-hx-live-bar/dist` |
 | PHP | 不需要 |
-| 数据库 | 不需要 MySQL，本项目使用 SQLite |
+| 数据库 | 不需要 MySQL，项目使用 SQLite |
 
-## 7. 配置反向代理
+如果找不到 `dist` 目录，说明第二步没有成功执行 `npm run build`。回到项目目录重新运行：
 
-在网站设置的“反向代理”中将 `/api` 代理到 `http://127.0.0.1:3001`。如果面板版本配置不稳定，在 Nginx `server {}` 中加入：
+```bash
+cd /www/wwwroot/echo-hx-live-bar
+bash scripts/manage.sh install
+```
+
+## 六、配置 Nginx 反向代理
+
+进入这个网站的“设置 -> 配置文件”，在 `server {}` 内确认有以下配置。已有同名配置时保留一份即可：
 
 ```nginx
 location /api/ {
@@ -114,19 +142,19 @@ location / {
 }
 ```
 
-保存后点击“重载配置”。
+保存并重载 Nginx。`/api/` 必须使用更具体的匹配，避免 API 请求被返回前端首页。
 
-## 8. 开启 HTTPS
+## 七、开启 HTTPS
 
-在“网站 -> 设置 -> SSL”中选择 Let’s Encrypt，选择 `bar.example.com`，申请证书并开启“强制 HTTPS”。验证：
+进入“网站 -> 设置 -> SSL”，申请 Let’s Encrypt 证书并开启强制 HTTPS。然后检查：
 
 ```bash
-curl https://bar.example.com/api/health
+curl https://你的域名/api/health
 ```
 
-必须返回 JSON，不能返回首页 HTML。
+必须返回 200 JSON，不能返回 `index.html` 内容。
 
-## 9. 设置目录权限
+给 API 数据目录设置权限。以下以 Node 项目运行用户 `www` 为例：
 
 ```bash
 cd /www/wwwroot/echo-hx-live-bar
@@ -135,74 +163,142 @@ chown -R www:www data logs backups
 chmod 750 data logs backups
 ```
 
-如果宝塔 Node 项目运行用户不是 `www`，将命令中的 `www:www` 换成实际用户。不要删除 `data/`，其中包含营业数据库和商品图片。
+如果 Node 项目运行用户不是 `www`，将命令中的 `www:www` 换成面板实际运行用户。
 
-## 10. 首次登录后台
+## 八、首次登录和微信配置
 
-打开 `https://bar.example.com/admin`。账号是 `admin`，密码是 `.env` 中的 `ADMIN_INITIAL_PASSWORD`。首次登录后立即修改密码，然后配置商品、库存、会员、储值、桌台二维码、管理员和店员权限。
-
-在“超级管理员后台 → 小程序页面”可以修改小程序内显示名称、首页欢迎标题和会员页入口名称/图标。保存后小程序下次打开会从服务端读取，无需重新上传审核；微信公众平台的主体名称仍需在微信官方后台维护。
-
-## 11. 微信小程序配置
-
-在微信公众平台配置 request 合法域名：
+打开：
 
 ```text
-https://bar.example.com
+https://你的域名/admin
 ```
 
-**首次正式发布必须修改一次小程序固定引导地址**：将 `miniprogram/utils/api.js` 中的 `BOOTSTRAP_API_URL` 从 `http://localhost:3001/api` 改为 `https://bar.example.com/api`，然后在微信开发者工具重新上传并提交审核。后台的 `public_api_base_url` 只控制启动后获取的目标 API 地址，不能改变已发布代码中的固定引导地址。以后切换目标地址可在后台修改，但引导域名必须持续可用，新旧域名都必须加入微信合法域名。`localhost` 只能用于开发工具本地调试。小程序启动后会调用微信登录接口，生产环境不再使用演示用户 ID。
+账号为 `admin`，初始密码是 `.env` 中的 `ADMIN_INITIAL_PASSWORD`。首次登录后立即修改密码。
 
-“桌台管理”中的“预览 / 下载”会调用微信官方 `wxa/getwxacodeunlimit` 接口生成桌台专属小程序码。先在“接口配置”填写微信小程序 AppID、AppSecret，并确认小程序已经发布 `pages/menu/menu` 页面；配置 HTTPS 合法域名后即可下载 PNG 打印。二维码绑定桌台 ID，桌号改名后原二维码仍可使用。微信接口未配置或返回错误时，后台会显示具体错误，不会生成假二维码。
+然后在超级管理员后台配置商品、库存、会员、储值、桌台、账号权限和第三方接口。
 
-微信支付回调必须公网可访问：`https://bar.example.com/api/payments/wechat/notify`。后台接口配置中需要填写商户号、API v3 Key、商户证书序列号、商户私钥、平台证书或平台公钥和这个回调地址；只填写 AppID 不能完成支付。
+微信小程序还需要：
 
-## 12. 宝塔计划任务
+1. 在微信公众平台把 `你的域名` 加入 request 合法域名。
+2. 将 `miniprogram/utils/api.js` 中的 `BOOTSTRAP_API_URL` 改为 `https://你的域名/api`。
+3. 在微信开发者工具重新上传小程序代码。
+4. 在后台填写微信小程序 AppID、AppSecret、微信支付商户号、API v3 Key、证书和回调配置。
 
-在“计划任务”添加每天 04:15 执行的 Shell 任务：
+只填写 AppID 不能完成微信登录或微信支付。桌台二维码使用微信官方接口生成，也需要有效的 AppID 和 AppSecret。
 
-```bash
-cd /www/wwwroot/echo-hx-live-bar && ./scripts/backup.sh >> logs/backup.log 2>&1
+微信支付回调地址为：
+
+```text
+https://你的域名/api/payments/wechat/notify
 ```
 
-备份文件位于 `backups/`。以后更新只需在宝塔终端运行：
+美团、抖音核销也必须在后台填写对应平台分配的正式应用信息，并按照平台后台要求配置回调或白名单。
+
+## 九、日常更新：只需要一条命令
+
+发布新版本后，在宝塔终端执行：
 
 ```bash
 cd /www/wwwroot/echo-hx-live-bar
 bash scripts/manage.sh update
 ```
 
-更新命令先备份数据库，再检查本地改动、快进获取 `origin/main`、安装依赖并重建 `dist/`。`.env`、`data/` 和图片不会被覆盖。默认按宝塔 Node 项目管理器托管处理，**更新完成后仍需到「网站 -> Node 项目」点击一次“重启”**；脚本不会另起一个 API 进程。若更新时提示有未提交改动，请先检查 `git status`，不要直接强制覆盖；若备份失败则会停止更新。
+脚本会自动：
 
-常用命令：
+- 备份 SQLite 数据库
+- 从 GitHub 获取 `main` 分支最新代码
+- 安装锁定版本依赖和开发依赖
+- 重新构建 `dist/`
+- 保留 `.env`、`data/` 和上传图片
+
+命令完成后，进入“网站 -> Node 项目”，点击 `echo-hx-live-bar-api` 的“重启”。前端文件已经更新，API 需要这一次重启加载新代码。
+
+更新前不要在服务器直接改项目源代码。如果提示工作区有未提交改动，先查看：
 
 ```bash
-bash scripts/manage.sh version  # 当前提交版本
-bash scripts/manage.sh history  # 最近 10 次提交
-bash scripts/manage.sh status   # 面板模式提示 + API 健康检查
-bash scripts/manage.sh --help   # 查看全部命令
+git status
 ```
 
-如果 API **确实由 PM2 托管**，可以改用 `MANAGE_SERVICE=pm2 bash scripts/manage.sh update`，更新完成后脚本会重启已有的 `echo-hx-live-bar-api` 并检查健康状态；如果由项目自带 `scripts/service.sh` 托管，则使用 `MANAGE_SERVICE=script bash scripts/manage.sh update`。同一台服务器只能选择一种托管方式，不要同时用宝塔、PM2 和脚本启动 API。数据库结构升级可能不可逆，回退代码前应保存 `backups/` 中的数据库备份。
+脚本会停止更新以保护本地改动，不要直接执行强制覆盖命令。
 
-## 13. 常见问题
+## 十、数据库备份和恢复
 
-页面 502：执行 `curl http://127.0.0.1:3001/api/health`，确认 Node 项目运行、端口为 3001、代理目标正确。
+手动备份：
 
-出现 `Unexpected token '<'`：通常是 `/api` 被返回成前端 HTML。确认 Nginx 包含 `location /api/`，并执行 `curl https://bar.example.com/api/health`。
+```bash
+cd /www/wwwroot/echo-hx-live-bar
+bash scripts/backup.sh
+```
 
-图片上传失败或数据库无法写入：检查 Node 项目运行用户对 `data/`、`data/uploads/`、`logs/` 有写权限，并确认没有启动两个 API 进程。
+备份文件位于 `backups/`。可以在宝塔“计划任务”添加每天一次的 Shell 任务：
 
-小程序提示合法域名错误：确认域名使用 HTTPS、已加入微信后台合法域名，并且公网访问 `/api/health` 返回 200。
+```bash
+cd /www/wwwroot/echo-hx-live-bar && bash scripts/backup.sh >> logs/backup.log 2>&1
+```
 
-## 14. 上线验收
+不要删除 `data/`，其中包含营业数据库和商品图片。
 
-- [ ] `https://bar.example.com/api/health` 返回 200 JSON
-- [ ] `/admin` 可以登录，超级管理员密码已修改
-- [ ] 商品图片上传、库存和下架正常
+## 十一、常见问题
+
+### `vite: command not found`
+
+通常是没有安装开发依赖，或使用了错误的 Node/npm 环境。确认 Node.js 为 20 或 22，然后执行：
+
+```bash
+cd /www/wwwroot/echo-hx-live-bar
+npm config set registry https://registry.npmmirror.com --global
+npm ci --include=dev
+npm run build
+```
+
+### `npm ci` 提示缺少 lockfile
+
+当前仓库已包含 `package-lock.json`。如果服务器目录不是通过 Git 克隆的完整仓库，请重新克隆；不要在生产机删除 lockfile 后随意安装。
+
+### npm 报 `404 ... nodejs-release ... vite`
+
+这是 npm 源配置错误。修复：
+
+```bash
+npm config set registry https://registry.npmmirror.com --global
+npm config delete init.module --global 2>/dev/null || true
+npm ci --include=dev
+```
+
+### `Unexpected token '||='`
+
+运行的仍是旧 Node.js。切换宝塔 Node.js 版本到 20 或 22，并确认终端和 Node 项目管理器使用的是同一个版本。
+
+### 页面 502
+
+执行：
+
+```bash
+curl http://127.0.0.1:3001/api/health
+```
+
+若失败，查看 Node 项目日志；若成功，检查 Nginx 的 `/api/` 代理、端口和 SSL 配置。
+
+### 出现 `Unexpected token '<'`
+
+这表示前端把 HTML 当作 API JSON 解析。优先检查：
+
+```bash
+curl -i https://你的域名/api/health
+```
+
+如果响应是 HTML，修正 Nginx `/api/` 反向代理，不要修改前端 JSON 解析逻辑。
+
+## 十二、上线检查清单
+
+- [ ] Node 项目使用 Node.js 20 或 22
+- [ ] `https://你的域名/api/health` 返回 JSON
+- [ ] `/admin` 可以登录并已修改初始密码
+- [ ] 商品图片上传、库存和自动下架正常
 - [ ] 会员价、积分、储值和赠金计算正常
-- [ ] 存酒登记和取酒正常
-- [ ] 管理员和店员权限正常
-- [ ] 宝塔自动备份任务执行成功
-- [ ] 小程序合法域名已配置
-- [ ] 微信登录、微信支付、美团和抖音核销已用真实资质联调
+- [ ] 存酒登记、取酒和过期规则正常
+- [ ] 管理员、店员和操作日志权限正常
+- [ ] 小程序 request 合法域名已配置
+- [ ] 小程序代码中的 `BOOTSTRAP_API_URL` 已改为 HTTPS
+- [ ] 微信登录、微信支付、美团、抖音已使用真实资质联调
+- [ ] 宝塔计划任务能够生成数据库备份
