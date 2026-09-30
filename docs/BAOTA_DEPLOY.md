@@ -42,7 +42,20 @@ MINIPROGRAM_API_BASE_URL=https://bar.example.com/api
 
 第三方配置可以写在 `.env`，也可以登录超级管理员后台填写。环境变量优先于后台配置。不要将 `.env`、私钥、数据库或上传图片提交到 GitHub。
 
-## 4. 添加 Node 项目
+## 4. 确认 Node.js 版本
+
+在宝塔“软件商店 -> Node.js 版本管理”中安装并启用 Node.js 20、22 或更高版本。不要使用系统自带的 Node.js 12、14、16 或 18；本项目使用 ES 模块、可选链、`||=` 和 Node.js 内置 `fetch`，旧版本会在启动时出现 `Unexpected token '||='` 等语法错误。
+
+在宝塔终端确认当前命令行版本：
+
+```bash
+node --version
+which node
+```
+
+必须看到 `v20.x`、`v22.x` 或更高版本。如果宝塔 Node 项目管理器和终端使用的 Node 版本不同，应以 Node 项目管理器中选择的版本为准。
+
+## 5. 添加 Node 项目
 
 进入“网站 -> Node 项目 -> 添加 Node 项目”：
 
@@ -71,7 +84,7 @@ pm2 save
 pm2 startup
 ```
 
-## 5. 创建网站
+## 6. 创建网站
 
 进入“网站 -> 添加站点”：
 
@@ -82,7 +95,7 @@ pm2 startup
 | PHP | 不需要 |
 | 数据库 | 不需要 MySQL，本项目使用 SQLite |
 
-## 6. 配置反向代理
+## 7. 配置反向代理
 
 在网站设置的“反向代理”中将 `/api` 代理到 `http://127.0.0.1:3001`。如果面板版本配置不稳定，在 Nginx `server {}` 中加入：
 
@@ -104,7 +117,7 @@ location / {
 
 保存后点击“重载配置”。
 
-## 7. 开启 HTTPS
+## 8. 开启 HTTPS
 
 在“网站 -> 设置 -> SSL”中选择 Let’s Encrypt，选择 `bar.example.com`，申请证书并开启“强制 HTTPS”。验证：
 
@@ -114,7 +127,7 @@ curl https://bar.example.com/api/health
 
 必须返回 JSON，不能返回首页 HTML。
 
-## 8. 设置目录权限
+## 9. 设置目录权限
 
 ```bash
 cd /www/wwwroot/echo-hx-live-bar
@@ -125,13 +138,13 @@ chmod 750 data logs backups
 
 如果宝塔 Node 项目运行用户不是 `www`，将命令中的 `www:www` 换成实际用户。不要删除 `data/`，其中包含营业数据库和商品图片。
 
-## 9. 首次登录后台
+## 10. 首次登录后台
 
 打开 `https://bar.example.com/admin`。账号是 `admin`，密码是 `.env` 中的 `ADMIN_INITIAL_PASSWORD`。首次登录后立即修改密码，然后配置商品、库存、会员、储值、桌台二维码、管理员和店员权限。
 
 在“超级管理员后台 → 小程序页面”可以修改小程序内显示名称、首页欢迎标题和会员页入口名称/图标。保存后小程序下次打开会从服务端读取，无需重新上传审核；微信公众平台的主体名称仍需在微信官方后台维护。
 
-## 10. 微信小程序配置
+## 11. 微信小程序配置
 
 在微信公众平台配置 request、uploadFile、downloadFile 合法域名，均填写：
 
@@ -145,7 +158,7 @@ https://bar.example.com
 
 微信支付回调必须公网可访问：`https://bar.example.com/api/payments/wechat/notify`。后台接口配置中需要填写商户号、API v3 Key、商户证书序列号、商户私钥、平台证书或平台公钥和这个回调地址；只填写 AppID 不能完成支付。
 
-## 11. 宝塔计划任务
+## 12. 宝塔计划任务
 
 在“计划任务”添加每天 04:15 执行的 Shell 任务：
 
@@ -164,7 +177,7 @@ npm run build
 
 然后在宝塔 Node 项目页面点击“重启”；如果使用 PM2，则执行 `pm2 restart echo-hx-live-bar-api`。
 
-## 12. 常见问题
+## 13. 常见问题
 
 页面 502：执行 `curl http://127.0.0.1:3001/api/health`，确认 Node 项目运行、端口为 3001、代理目标正确。
 
@@ -174,7 +187,7 @@ npm run build
 
 小程序提示合法域名错误：确认域名使用 HTTPS、已加入微信后台合法域名，并且公网访问 `/api/health` 返回 200。
 
-## 13. 上线验收
+## 14. 上线验收
 
 - [ ] `https://bar.example.com/api/health` 返回 200 JSON
 - [ ] `/admin` 可以登录，超级管理员密码已修改
