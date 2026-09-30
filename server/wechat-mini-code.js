@@ -44,20 +44,29 @@ export async function getUnlimitedMiniProgramCode(scene) {
   let token = await getAccessToken();
   let response = await request(token);
   let bytes = Buffer.from(await response.arrayBuffer());
-  if (response.headers.get('content-type')?.includes('application/json')) {
-    const data = JSON.parse(bytes.toString('utf8'));
-    if (data.errcode === 40001 || data.errcode === 42001) {
+  const readWechatError = () => {
+    const contentType = response.headers.get('content-type') || '';
+    const text = bytes.toString('utf8').trim();
+    if (!contentType.includes('json') && !text.startsWith('{') && !text.startsWith('[')) return null;
+    try {
+      const data = JSON.parse(text);
+      return data && typeof data === 'object' && (data.errcode || data.errmsg) ? data : null;
+    } catch {
+      return null;
+    }
+  };
+  let error = readWechatError();
+  if (error) {
+    if (error.errcode === 40001 || error.errcode === 42001) {
       tokenCache = { value: '', expiresAt: 0 };
       token = await getAccessToken();
       response = await request(token);
       bytes = Buffer.from(await response.arrayBuffer());
+      error = readWechatError();
     }
-    if (response.headers.get('content-type')?.includes('application/json')) {
-      let error = data;
-      try { error = JSON.parse(bytes.toString('utf8')); } catch {}
-      throw new Error(`微信小程序码生成失败：${error.errmsg || `HTTP ${response.status}`}`);
-    }
+    if (error) throw new Error(`微信小程序码生成失败（错误码 ${error.errcode ?? '未知'}）：${error.errmsg || `HTTP ${response.status}`}`);
   }
-  if (!response.ok || bytes.length < 100 || !bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) throw new Error(`微信小程序码返回异常：HTTP ${response.status}`);
+  const isPng = bytes.length >= 100 && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
+  if (!response.ok || !isPng) throw new Error(`微信小程序码返回异常：HTTP ${response.status}，响应不是有效 PNG（请检查 AppID、AppSecret、env_version 和 pages/menu/menu 是否已发布）`);
   return bytes;
 }

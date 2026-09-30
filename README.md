@@ -203,6 +203,8 @@ curl https://api.example.com/api/health
 
 小程序码正式使用前仍需上传并发布小程序；开发阶段可把环境变量 `WECHAT_MINIPROGRAM_ENV_VERSION=trial` 或 `develop`，正式环境默认使用 `release`。
 
+微信小程序码接口业务失败时也可能返回 HTTP 200，判断标准是响应是否为有效 PNG，而不是只看 HTTP 状态码。若后台显示“响应不是有效 PNG”，请查看后续显示的微信错误码和错误消息，并重点检查 AppID、AppSecret、`env_version`、`pages/menu/menu` 是否存在于对应版本，以及小程序是否已上传/发布。
+
 ## 八、微信小程序配置
 
 在微信公众平台配置 request、uploadFile、downloadFile 合法域名：
