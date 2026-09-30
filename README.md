@@ -105,7 +105,7 @@ cd /var/www/echo-hx-live-bar
 ./scripts/install.sh
 ```
 
-安装脚本会检查 Node.js、创建 `data/` 和 `logs/`、生成 `.env`、执行 `npm ci` 和 `npm run build`。
+安装脚本会检查 Node.js、创建 `data/` 和 `logs/`、生成 `.env`、执行 `npm ci --include=dev` 和 `npm run build`。
 
 ## 四、配置环境变量
 
@@ -231,7 +231,7 @@ cd /var/www/echo-hx-live-bar
 ./scripts/update.sh
 ```
 
-更新脚本会执行 `git pull --ff-only`、`npm ci`、`npm run build`、重启服务并检查 API 健康状态。数据库是 `data/echo-hx.sqlite`，图片在 `data/uploads/`，备份在 `backups/`。
+更新脚本会执行 `git pull --ff-only`、`npm ci --include=dev`、`npm run build`、重启服务并检查 API 健康状态。数据库是 `data/echo-hx.sqlite`，图片在 `data/uploads/`，备份在 `backups/`。
 
 每天凌晨自动备份：
 

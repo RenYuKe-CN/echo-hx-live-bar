@@ -9,7 +9,7 @@ node -e 'const major=Number(process.versions.node.split(".")[0]); if (major < 20
 
 mkdir -p data logs
 [[ -f .env ]] || cp .env.example .env
-npm ci
+npm ci --include=dev
 npm run build
 chmod +x scripts/*.sh
 echo "安装完成。请编辑 $ROOT_DIR/.env，然后运行：sudo $ROOT_DIR/scripts/service.sh start"

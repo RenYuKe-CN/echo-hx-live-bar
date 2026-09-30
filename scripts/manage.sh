@@ -75,7 +75,7 @@ case "${1:-help}" in
     require_node
     mkdir -p data logs
     if [[ ! -f .env ]]; then cp .env.example .env; echo '已创建 .env，请检查并填写正式配置。'; fi
-    npm ci
+    npm ci --include=dev
     npm run build
     echo "安装完成，前端目录：$ROOT_DIR/dist"
     echo '请在宝塔创建 Node 项目和静态网站，参见 docs/BAOTA_DEPLOY.md。'
@@ -92,7 +92,7 @@ case "${1:-help}" in
     fi
     git fetch origin main
     git merge --ff-only origin/main
-    npm ci
+    npm ci --include=dev
     npm run build
     echo "更新后版本：$(git rev-parse --short HEAD)"
     service_action restart
