@@ -2,6 +2,8 @@
 
 使用宝塔面板部署请阅读：[宝塔面板部署教程](docs/BAOTA_DEPLOY.md)。
 
+宝塔快速安装与更新：克隆仓库后在项目目录执行 `bash scripts/manage.sh install`；以后执行 `bash scripts/manage.sh update`，再到宝塔 Node 项目页面点击“重启”。`bash scripts/manage.sh version` 可查看当前版本；完整命令见 `bash scripts/manage.sh --help`。更新前自动备份数据库，保留 `.env` 和 `data/`。
+
 酒吧点单、会员、储值、存酒和运营管理系统，包含顾客端、微信小程序、管理后台、收银点单、库存、报表、SQLite 数据库和 GitHub 部署脚本。
 
 > 本文以 Ubuntu 22.04/24.04 为例。微信支付、微信登录、美团/抖音核销仍需真实商户资质和平台联调。

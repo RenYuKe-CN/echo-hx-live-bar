@@ -15,11 +15,10 @@ mkdir -p /www/wwwroot
 cd /www/wwwroot
 git clone https://github.com/RenYuKe-CN/echo-hx-live-bar.git echo-hx-live-bar
 cd /www/wwwroot/echo-hx-live-bar
-npm ci
-npm run build
+bash scripts/manage.sh install
 ```
 
-也可以使用宝塔 Git 管理器克隆：仓库为 `https://github.com/RenYuKe-CN/echo-hx-live-bar.git`，分支为 `main`，目录为 `/www/wwwroot/echo-hx-live-bar`。
+`install` 会检查 Node.js 版本、创建 `.env`（已存在则保留）、安装依赖并生成 `dist/`。请先按下文安装 Node.js 20+，再运行此命令；如果已经克隆了项目，直接进入项目目录运行即可。也可以使用宝塔 Git 管理器克隆：仓库为 `https://github.com/RenYuKe-CN/echo-hx-live-bar.git`，分支为 `main`，目录为 `/www/wwwroot/echo-hx-live-bar`。
 
 ## 3. 配置环境变量
 
@@ -146,7 +145,7 @@ chmod 750 data logs backups
 
 ## 11. 微信小程序配置
 
-在微信公众平台配置 request、uploadFile、downloadFile 合法域名，均填写：
+在微信公众平台配置 request 合法域名：
 
 ```text
 https://bar.example.com
@@ -166,16 +165,25 @@ https://bar.example.com
 cd /www/wwwroot/echo-hx-live-bar && ./scripts/backup.sh >> logs/backup.log 2>&1
 ```
 
-备份文件位于 `backups/`。上线后手动更新：
+备份文件位于 `backups/`。以后更新只需在宝塔终端运行：
 
 ```bash
 cd /www/wwwroot/echo-hx-live-bar
-git pull --ff-only
-npm ci
-npm run build
+bash scripts/manage.sh update
 ```
 
-然后在宝塔 Node 项目页面点击“重启”；如果使用 PM2，则执行 `pm2 restart echo-hx-live-bar-api`。
+更新命令先备份数据库，再检查本地改动、快进获取 `origin/main`、安装依赖并重建 `dist/`。`.env`、`data/` 和图片不会被覆盖。默认按宝塔 Node 项目管理器托管处理，**更新完成后仍需到「网站 -> Node 项目」点击一次“重启”**；脚本不会另起一个 API 进程。若更新时提示有未提交改动，请先检查 `git status`，不要直接强制覆盖；若备份失败则会停止更新。
+
+常用命令：
+
+```bash
+bash scripts/manage.sh version  # 当前提交版本
+bash scripts/manage.sh history  # 最近 10 次提交
+bash scripts/manage.sh status   # 面板模式提示 + API 健康检查
+bash scripts/manage.sh --help   # 查看全部命令
+```
+
+如果 API **确实由 PM2 托管**，可以改用 `MANAGE_SERVICE=pm2 bash scripts/manage.sh update`，更新完成后脚本会重启已有的 `echo-hx-live-bar-api` 并检查健康状态；如果由项目自带 `scripts/service.sh` 托管，则使用 `MANAGE_SERVICE=script bash scripts/manage.sh update`。同一台服务器只能选择一种托管方式，不要同时用宝塔、PM2 和脚本启动 API。数据库结构升级可能不可逆，回退代码前应保存 `backups/` 中的数据库备份。
 
 ## 13. 常见问题
 
