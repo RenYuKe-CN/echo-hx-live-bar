@@ -17,6 +17,28 @@ export async function wechatLogin(code) {
   return data;
 }
 
+let phoneAccessToken = null;
+let phoneAccessTokenExpiresAt = 0;
+export async function getWechatPhoneNumber(code) {
+  const values = requireIntegration('wechat_app_id', 'wechat_app_secret');
+  if (!phoneAccessToken || Date.now() >= phoneAccessTokenExpiresAt) {
+    const url = new URL('https://api.weixin.qq.com/cgi-bin/token');
+    url.search = new URLSearchParams({ grant_type: 'client_credential', appid: values.wechat_app_id, secret: values.wechat_app_secret });
+    const token = await fetch(url).then(json);
+    if (token.errcode || !token.access_token) throw Object.assign(new Error(token.errmsg || '获取微信接口令牌失败'), { code: token.errcode || 'WECHAT_TOKEN_ERROR' });
+    phoneAccessToken = token.access_token;
+    phoneAccessTokenExpiresAt = Date.now() + Math.max(Number(token.expires_in || 7200) - 300, 60) * 1000;
+  }
+  const response = await fetch(`https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token=${encodeURIComponent(phoneAccessToken)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code })
+  }).then(json);
+  if (response.errcode || !response.phone_info?.purePhoneNumber) {
+    if ([40001, 42001].includes(response.errcode)) { phoneAccessToken = null; phoneAccessTokenExpiresAt = 0; }
+    throw Object.assign(new Error(response.errmsg || '微信手机号授权失败'), { code: response.errcode || 'WECHAT_PHONE_ERROR' });
+  }
+  return response.phone_info;
+}
+
 function signMessage(message, privateKey) {
   return crypto.createSign('RSA-SHA256').update(message).end().sign(privateKey, 'base64');
 }

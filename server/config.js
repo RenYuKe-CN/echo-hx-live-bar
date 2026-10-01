@@ -18,7 +18,15 @@ export const integrationDefinitions = {
   meituan_client_id: { label: '美团客户端 ID', group: 'meituan', required: true, secret: false, env: 'MEITUAN_CLIENT_ID' },
   meituan_client_secret: { label: '美团客户端密钥', group: 'meituan', required: true, secret: true, env: 'MEITUAN_CLIENT_SECRET' },
   douyin_client_key: { label: '抖音客户端 Key', group: 'douyin', required: true, secret: false, env: 'DOUYIN_CLIENT_KEY' },
-  douyin_client_secret: { label: '抖音客户端密钥', group: 'douyin', required: true, secret: true, env: 'DOUYIN_CLIENT_SECRET' }
+  douyin_client_secret: { label: '抖音客户端密钥', group: 'douyin', required: true, secret: true, env: 'DOUYIN_CLIENT_SECRET' },
+  storage_provider: { label: '对象存储类型（local 或 s3）', group: 'storage', required: false, secret: false, env: 'STORAGE_PROVIDER' },
+  storage_endpoint: { label: '对象存储 S3 Endpoint', group: 'storage', required: false, secret: false, env: 'STORAGE_ENDPOINT' },
+  storage_region: { label: '对象存储区域', group: 'storage', required: false, secret: false, env: 'STORAGE_REGION' },
+  storage_bucket: { label: '对象存储 Bucket', group: 'storage', required: false, secret: false, env: 'STORAGE_BUCKET' },
+  storage_access_key: { label: '对象存储 Access Key', group: 'storage', required: false, secret: true, env: 'STORAGE_ACCESS_KEY' },
+  storage_secret_key: { label: '对象存储 Secret Key', group: 'storage', required: false, secret: true, env: 'STORAGE_SECRET_KEY' },
+  storage_public_base_url: { label: '对象存储公开访问地址', group: 'storage', required: false, secret: false, env: 'STORAGE_PUBLIC_BASE_URL' },
+  storage_path_prefix: { label: '对象存储目录前缀', group: 'storage', required: false, secret: false, env: 'STORAGE_PATH_PREFIX' }
 };
 
 const readDbValues = () => Object.fromEntries(db.prepare('SELECT key, value FROM integration_settings').all().map(row => [row.key, row.value]));
@@ -26,7 +34,12 @@ const envValue = definition => definition.env ? process.env[definition.env] : ''
 
 export function getIntegrationValues() {
   const saved = readDbValues();
-  return Object.fromEntries(Object.entries(integrationDefinitions).map(([key, definition]) => [key, String(envValue(definition) || saved[key] || '').trim()]));
+  return Object.fromEntries(Object.entries(integrationDefinitions).map(([key, definition]) => {
+    // The provider itself is runtime-switchable from the super-admin panel;
+    // environment variables still take precedence for secrets and endpoints.
+    const value = key === 'storage_provider' ? (saved[key] || envValue(definition)) : (envValue(definition) || saved[key]);
+    return [key, String(value || '').trim()];
+  }));
 }
 
 export function getIntegrationStatus() {
@@ -35,6 +48,12 @@ export function getIntegrationStatus() {
   for (const [key, definition] of Object.entries(integrationDefinitions)) {
     const group = groups[definition.group] ||= { configured: true, missing: [], label: definition.group };
     if (definition.required && !values[key]) { group.configured = false; group.missing.push(key); }
+  }
+  const storage = groups.storage || (groups.storage = { configured: true, missing: [], label: 'storage' });
+  if (values.storage_provider && values.storage_provider !== 'local') {
+    for (const key of ['storage_endpoint', 'storage_region', 'storage_bucket', 'storage_access_key', 'storage_secret_key']) {
+      if (!values[key]) { storage.configured = false; storage.missing.push(key); }
+    }
   }
   return { values, groups };
 }

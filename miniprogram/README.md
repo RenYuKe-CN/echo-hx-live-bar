@@ -12,6 +12,10 @@
 
 微信登录流程已经接通：小程序调用 `wx.login` 获取临时 `code`，后端使用超级管理员后台配置的 AppID/AppSecret 调用微信 `jscode2session` 换取 openid，再创建登录会话。若登录失败，小程序会显示微信接口返回的错误信息，不会静默使用演示用户。
 
+首次进入首页会在当前页面显示授权弹层，不会跳转到另一个资料页面。用户点击官方“授权头像和昵称”按钮后，小程序用 `wx.getUserProfile` 获取头像和昵称，再点击官方“授权手机号”按钮完成手机号授权；后端把三项信息保存到同一个会员账户的 `avatar_url`、`nickname` 和 `phone` 字段，后台“会员管理”可按手机号查看。小程序不会在用户没有点击官方按钮时静默读取这些资料。会员页仍保留“资料设置”入口，用于后续主动修改头像和昵称。手机号授权使用微信官方 `getuserphonenumber` 接口，因此线上必须配置正确的 AppID/AppSecret，并在小程序隐私设置中声明头像、昵称、手机号的用途。
+
+头像上传使用 `wx.uploadFile` 请求 `/api/me/avatar`，商品图片上传使用后台的 `/api/admin/products/image`。两个接口会把文件默认保存到服务器 `data/uploads/`；如果超级管理员配置了 S3 兼容对象存储，则新文件会切换到对象存储。微信公众平台需要将 API 的同一个 HTTPS 主域名分别加入 request、uploadFile 和 downloadFile 合法域名，填写域名时不要带 `/api` 后缀。开发者工具本地调试可关闭合法域名校验，真机和正式版必须使用备案/证书正常的 HTTPS 域名。
+
 本地验证步骤：
 
 1. 启动 API：`npm run dev` 或 `node server/index.js`。

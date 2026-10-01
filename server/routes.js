@@ -1,12 +1,11 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
 import express from 'express';
 import { Router } from 'express';
 import { db, centsToMoney } from './db.js';
 import { getIntegrationStatus, integrationDefinitions } from './config.js';
 import { getUnlimitedMiniProgramCode } from './wechat-mini-code.js';
-import { wechatLogin, createJsapiPayment, verifyNotification, queryPayment } from './integrations/wechat.js';
+import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment } from './integrations/wechat.js';
+import { localImageDir, saveUpload, readUpload, isAllowedImageUrl } from './storage.js';
 
 export const router = Router();
 const PAYMENT_EXPIRY_MS = 10 * 60 * 1000;
@@ -107,21 +106,24 @@ router.get('/admin/settings', (_req, res) => {
   const status = getIntegrationStatus();
   res.json({ settings: Object.entries(integrationDefinitions).map(([key, definition]) => ({ key, label: definition.label, value: definition.secret && status.values[key] ? '' : status.values[key], configured: Boolean(status.values[key]), secret: definition.secret, source: process.env[definition.env] ? 'environment' : 'admin' })), groups: status.groups, integrationsActive: false });
 });
-const imageDir = path.join(path.resolve(process.env.DATA_DIR || 'data'), 'uploads');
-fs.mkdirSync(imageDir, { recursive: true });
-router.post('/admin/products/image', express.raw({ type: ['image/png','image/jpeg','image/webp'], limit: '5mb' }), (req, res) => {
+router.post('/admin/products/image', express.raw({ type: ['image/png','image/jpeg','image/webp'], limit: '5mb' }), async (req, res) => {
   const type = req.header('content-type')?.split(';')[0];
   const bytes = req.body;
   const extension = type === 'image/png' && bytes?.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'png' : type === 'image/jpeg' && bytes?.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')) ? 'jpg' : type === 'image/webp' && bytes?.subarray(0, 4).toString() === 'RIFF' && bytes?.subarray(8, 12).toString() === 'WEBP' ? 'webp' : null;
   if (!extension) return res.status(400).json({ message: '仅支持 PNG、JPEG、WebP 图片，最大 5MB' });
-  const filename = `${crypto.randomUUID()}.${extension}`;
-  fs.writeFileSync(path.join(imageDir, filename), bytes);
-  audit(req, '上传商品图片', filename);
-  res.status(201).json({ imageUrl: `/api/product-images/${filename}` });
+  try {
+    const upload = await saveUpload({ bytes, extension, contentType: type });
+    audit(req, '上传商品图片', upload.name);
+    res.status(201).json({ imageUrl: upload.url });
+  } catch (error) { res.status(error.code === 'STORAGE_NOT_CONFIGURED' ? 503 : 502).json({ message: error.message }); }
 });
-router.get('/product-images/:name', (req, res) => {
+router.get('/product-images/:name', async (req, res) => {
   if (!/^[a-f0-9-]+\.(png|jpg|webp)$/.test(req.params.name)) return res.sendStatus(404);
-  res.sendFile(path.join(imageDir, req.params.name));
+  try {
+    const upload = await readUpload(req.params.name);
+    if (!upload) return res.sendStatus(404);
+    res.type(upload.contentType).send(upload.body);
+  } catch (error) { res.status(502).json({ message: error.message }); }
 });
 router.put('/admin/settings', (req, res) => {
   const values = req.body || {};
@@ -148,6 +150,16 @@ router.get('/runtime-config', (_req, res) => {
   }
   res.json({ apiBaseUrl: apiBaseUrl.replace(/\/$/, '') });
 });
+
+// Customer business data must come from a real WeChat session in production.
+// The demo-user fallback is intentionally limited to local development.
+const requireWechatUser = (req, res, next) => {
+  const demoAllowed = process.env.NODE_ENV !== 'production' && currentUserId(req) > 0;
+  if (!req.user && !demoAllowed) return res.status(401).json({ message: '请先完成微信登录' });
+  next();
+};
+router.use('/sessions', requireWechatUser);
+router.use('/me', requireWechatUser);
 
 function getOrCreateSession(storeId, tableId, userId) {
   let session = db.prepare("SELECT * FROM table_sessions WHERE store_id = ? AND table_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(storeId, tableId);
@@ -197,12 +209,12 @@ router.get('/tables/resolve', (req, res) => {
   res.json({ table: { id: table.id, tableNo: table.table_no } });
 });
 
-router.get('/tables/:tableNo/session', (req, res) => {
+router.get('/tables/:tableNo/session', requireWechatUser, (req, res) => {
   const userId = currentUserId(req);
   const table = db.prepare('SELECT * FROM tables WHERE table_no = ? AND status != ?').get(req.params.tableNo, 'disabled');
   if (!table) return res.status(404).json({ message: '桌台不存在' });
   const session = getOrCreateSession(table.store_id, table.id, userId);
-  const user = db.prepare('SELECT id, nickname, member_level, member_discount, points, member_expires_at FROM users WHERE id = ?').get(userId);
+  const user = publicUser(db.prepare('SELECT id, nickname, phone, avatar_url, member_level, points, member_expires_at FROM users WHERE id = ?').get(userId));
   res.json({ table: { id: table.id, tableNo: table.table_no }, session, user, membership: memberPricing(userId) });
 });
 
@@ -760,7 +772,81 @@ router.patch('/admin/members/:id', (req, res) => {
     res.json({ member: memberView(db.prepare(`${memberQuery} WHERE u.id = ?`).get(current.id)) });
   } catch (error) { res.status(409).json({ message: error.code === 'SQLITE_CONSTRAINT_UNIQUE' ? '手机号已绑定其他会员' : error.message }); }
 });
-router.get('/me', (req, res) => { const user = db.prepare('SELECT id, nickname, avatar_url, member_level, points, member_expires_at FROM users WHERE id = ?').get(currentUserId(req)); if (!user) return res.status(404).json({ message: '用户不存在' }); const wallet = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(user.id) || { stored_cents: 0, bonus_cents: 0 }; res.json({ user, wallet: { stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents) } }); });
+router.delete('/admin/members/:id', (req, res) => {
+  if (req.staff.role !== 'super') return res.status(403).json({ message: '仅超级管理员可删除会员' });
+  const member = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!member) return res.status(404).json({ message: '会员不存在' });
+  const blockers = [
+    ['orders', '订单记录', 'payer_user_id'],
+    ['cart_items', '购物车记录', 'added_by_user_id'],
+    ['points_ledger', '积分流水', 'user_id'],
+    ['storage_records', '存酒记录', 'user_id'],
+    ['reward_redemptions', '积分兑换记录', 'user_id'],
+    ['wallet_transactions', '储值流水', 'user_id']
+  ];
+  const usedBy = blockers.find(([table, _label, column]) => db.prepare(`SELECT 1 FROM ${table} WHERE ${column} = ? LIMIT 1`).get(member.id));
+  if (usedBy) return res.status(409).json({ message: `该会员存在${usedBy[1]}，为保护账务和历史记录不能删除` });
+  const wallet = db.prepare('SELECT stored_cents, bonus_cents, stored_reserved_cents, bonus_reserved_cents FROM wallet_accounts WHERE user_id = ?').get(member.id);
+  if (wallet && [wallet.stored_cents, wallet.bonus_cents, wallet.stored_reserved_cents, wallet.bonus_reserved_cents].some(value => Number(value) > 0)) return res.status(409).json({ message: '该会员还有余额或冻结金额，不能删除' });
+  try {
+    db.transaction(() => {
+      db.prepare('DELETE FROM session_members WHERE user_id = ?').run(member.id);
+      db.prepare('DELETE FROM wechat_sessions WHERE user_id = ?').run(member.id);
+      db.prepare('DELETE FROM wallet_accounts WHERE user_id = ?').run(member.id);
+      db.prepare('DELETE FROM users WHERE id = ?').run(member.id);
+      audit(req, '删除会员', `ID ${member.id} 手机尾号 ${member.phone?.slice(-4) || '未绑定'}`);
+    })();
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(409).json({ message: error.code === 'SQLITE_CONSTRAINT_FOREIGNKEY' ? '该会员存在关联数据，无法删除' : error.message });
+  }
+});
+const ownProfile = req => db.prepare('SELECT id, nickname, phone, avatar_url, member_level, points, member_expires_at FROM users WHERE id = ?').get(currentUserId(req));
+router.get('/me', (req, res) => { const row = ownProfile(req); if (!row) return res.status(404).json({ message: '用户不存在' }); const wallet = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(row.id) || { stored_cents: 0, bonus_cents: 0 }; res.json({ user: publicUser(row), wallet: { stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents) } }); });
+router.post('/me/avatar', express.raw({ type: ['application/octet-stream', 'multipart/form-data'], limit: '3mb' }), async (req, res) => {
+  let bytes = req.body;
+  const contentType = req.header('content-type') || '';
+  if (Buffer.isBuffer(bytes) && contentType.startsWith('multipart/form-data')) {
+    const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[1] || contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i)?.[2];
+    if (boundary) {
+      const headerEnd = bytes.indexOf(Buffer.from('\r\n\r\n'));
+      const fileEnd = bytes.lastIndexOf(Buffer.from(`\r\n--${boundary}`));
+      if (headerEnd >= 0 && fileEnd > headerEnd) bytes = bytes.subarray(headerEnd + 4, fileEnd);
+    }
+  }
+  if (!Buffer.isBuffer(bytes) || bytes.length < 100 || bytes.length > 2 * 1024 * 1024) return res.status(400).json({ message: '请选择小于 2MB 的头像' });
+  const extension = bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')) ? 'jpg'
+    : bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'png'
+      : bytes.subarray(0, 4).toString() === 'RIFF' && bytes.subarray(8, 12).toString() === 'WEBP' ? 'webp' : null;
+  if (!extension) return res.status(400).json({ message: '头像仅支持 JPEG、PNG 或 WebP 图片' });
+  try {
+    const upload = await saveUpload({ bytes, extension, contentType: extension === 'jpg' ? 'image/jpeg' : `image/${extension}` });
+    res.status(201).json({ avatarUrl: upload.url });
+  } catch (error) { res.status(error.code === 'STORAGE_NOT_CONFIGURED' ? 503 : 502).json({ message: error.message }); }
+});
+router.patch('/me/profile', (req, res) => {
+  const user = ownProfile(req);
+  if (!user) return res.status(404).json({ message: '用户不存在' });
+  const nickname = String(req.body?.nickname || '').trim();
+  const avatarUrl = String(req.body?.avatarUrl || '').trim();
+  if (!nickname || nickname === '微信用户' || nickname.length > 50 || !isAllowedImageUrl(avatarUrl)) return res.status(400).json({ message: '请填写昵称并选择有效头像' });
+  db.prepare('UPDATE users SET nickname = ?, avatar_url = ? WHERE id = ?').run(nickname, avatarUrl, user.id);
+  res.json({ user: publicUser(ownProfile(req)) });
+});
+router.post('/me/phone', async (req, res) => {
+  if (!req.user) return res.status(401).json({ message: '请先使用微信登录' });
+  const code = String(req.body?.code || '').trim();
+  if (!code || code.length > 256) return res.status(400).json({ message: '手机号授权 code 无效' });
+  try {
+    const info = await getWechatPhoneNumber(code);
+    const phone = String(info.purePhoneNumber || '');
+    if (!validPhone(phone) || info.countryCode !== '86') return res.status(422).json({ message: '目前仅支持绑定中国大陆手机号' });
+    const other = db.prepare('SELECT id FROM users WHERE phone = ? AND id != ?').get(phone, req.user.id);
+    if (other) return res.status(409).json({ message: '此手机号已属于其他会员，请联系店员核对账户，避免余额或积分混用' });
+    db.prepare('UPDATE users SET phone = ? WHERE id = ?').run(phone, req.user.id);
+    res.json({ user: publicUser(ownProfile(req)) });
+  } catch (error) { res.status(error.code === 'SQLITE_CONSTRAINT_UNIQUE' ? 409 : error.status || 502).json({ message: error.code === 'SQLITE_CONSTRAINT_UNIQUE' ? '此手机号已绑定其他会员' : error.message, code: error.code || 'WECHAT_PHONE_ERROR' }); }
+});
 const miniEntries = {
   app_name: { title: 'Echo HX Live Bar', type: 'text' },
   home_title: { title: '今晚喝点什么？', type: 'text' },
@@ -779,7 +865,7 @@ const rewardQuery = 'SELECT r.*, p.image_url AS product_image, p.name AS product
 const rewardView = row => ({ ...row, imageUrl: row.image_url || row.product_image || '', name: row.product_id ? row.product_name : row.name });
 router.get('/rewards', (_req, res) => res.json({ rewards: db.prepare(`${rewardQuery} WHERE r.status = 'active' ORDER BY r.id DESC`).all().map(rewardView) }));
 router.get('/me/redemptions', (req, res) => res.json({ redemptions: db.prepare('SELECT * FROM reward_redemptions WHERE user_id = ? ORDER BY id DESC LIMIT 50').all(currentUserId(req)) }));
-router.post('/rewards/:id/redeem', (req, res) => {
+router.post('/rewards/:id/redeem', requireWechatUser, (req, res) => {
   try {
     const record = db.transaction(() => {
       const reward = db.prepare("SELECT * FROM reward_items WHERE id = ? AND status = 'active'").get(req.params.id);

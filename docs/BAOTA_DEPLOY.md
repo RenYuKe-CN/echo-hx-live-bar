@@ -137,12 +137,42 @@ location ^~ /api/ {
     proxy_read_timeout 30s;
 }
 
+location = /admin {
+    try_files /index.html =404;
+}
+
+location ^~ /admin/ {
+    try_files $uri /index.html;
+}
+
+location = /index.html {
+    try_files $uri =404;
+}
+
+location ^~ /assets/ {
+    try_files $uri =404;
+}
+
+location = / {
+    return 404;
+}
+
 location / {
-    try_files $uri $uri/ /index.html;
+    return 404;
 }
 ```
 
-保存并重载 Nginx。必须使用 `^~ /api/`：宝塔可能自动添加匹配 `.png`、`.jpg`、`.webp` 的静态缓存规则。若只写 `location /api/`，商品图片 `/api/product-images/文件名.png` 会被静态规则截获并返回 Nginx 404，即使 API 和上传都正常。检查网站的 HTTP 和 HTTPS 两份生效配置；不要存在另一个 `location /api/` 重复定义。
+保存并重载 Nginx。这个配置只保留 `/admin` 管理后台，网站根路径 `/` 和其他顾客网页路由返回 404；顾客只能从微信小程序进入点单。`/api/`、`/api/product-images/`、`/assets/` 仍然保留，不能删除。必须使用 `^~ /api/`：宝塔可能自动添加匹配 `.png`、`.jpg`、`.webp` 的静态缓存规则。若只写 `location /api/`，商品图片 `/api/product-images/文件名.png` 会被静态规则截获并返回 Nginx 404，即使 API 和上传都正常。检查网站的 HTTP 和 HTTPS 两份生效配置；不要存在另一个 `location /api/` 重复定义。
+
+保存后点击“重载配置”，然后验证：
+
+```bash
+curl -I https://你的域名/
+curl -I https://你的域名/admin
+curl -i https://你的域名/api/health
+```
+
+第一条应为 `404`，第二条应为 `200` 或返回管理 SPA 的 HTML，第三条应为 JSON。若 `/` 仍显示点单页，说明宝塔当前生效的配置里还存在旧的 `location / { try_files ... /index.html; }`，请删除旧规则，并同时检查 HTTP、HTTPS 两份站点配置。
 
 上传的图片保存在 `DATA_DIR/uploads/`（默认是项目的 `data/uploads/`）。若图片是重新克隆前上传的，确认旧项目的 `data/uploads/` 已一起迁移，新上传的图片无法替代丢失的旧文件。
 
@@ -167,6 +197,31 @@ chmod 750 data logs backups
 
 如果 Node 项目运行用户不是 `www`，将命令中的 `www:www` 换成面板实际运行用户。
 
+### 商品图片和会员头像存储
+
+默认不需要额外购买对象存储，文件会写入：
+
+```text
+/www/wwwroot/echo-hx-live-bar/data/uploads/
+```
+
+上面的 `chown` 命令必须执行，否则后台可能上传成功但图片返回 404 或上传时报权限错误。需要使用腾讯云 COS、MinIO、AWS S3 等 S3 兼容对象存储时，可以在超级管理员后台“接口配置”填写以下字段，或写入 `.env`：
+
+```env
+# 留空时默认使用服务器本地 data/uploads/，也允许超级管理员在后台切换为 s3。
+# 如果固定写 local，后台的对象存储切换会被环境变量覆盖。
+STORAGE_PROVIDER=
+STORAGE_ENDPOINT=https://你的对象存储S3接口地址
+STORAGE_REGION=auto
+STORAGE_BUCKET=你的Bucket
+STORAGE_ACCESS_KEY=你的AccessKey
+STORAGE_SECRET_KEY=你的SecretKey
+STORAGE_PUBLIC_BASE_URL=
+STORAGE_PATH_PREFIX=uploads/
+```
+
+`STORAGE_ENDPOINT` 必须是对象存储的 S3 API 地址，不是控制台网址；`STORAGE_PUBLIC_BASE_URL` 是公开读文件的域名，可留空。留空时由服务器签名读取私有对象。配置后重启 Node 项目，重新上传一张商品图验证。切换对象存储只影响之后上传的文件，原来 `data/uploads/` 中的文件不会自动迁移，且 `data/` 仍要继续备份。
+
 ## 八、首次登录和微信配置
 
 打开：
@@ -182,9 +237,11 @@ https://你的域名/admin
 微信小程序还需要：
 
 1. 在微信公众平台把 `你的域名` 加入 request 合法域名。
-2. 将 `miniprogram/utils/api.js` 中的 `BOOTSTRAP_API_URL` 改为 `https://你的域名/api`。
-3. 在微信开发者工具重新上传小程序代码。
+2. 将同一个 HTTPS 主域名加入 uploadFile 合法域名和 downloadFile 合法域名。三项填写 `https://你的域名`，不要加 `/api`，也不要填写具体接口路径。
+3. 生产代码中的 `BOOTSTRAP_API_URL` 已预置为项目正式 API 地址；如果使用其他域名，修改 `miniprogram/utils/api.js` 后，在微信开发者工具重新上传小程序代码，或保证旧地址能够访问 `/api/runtime-config` 并在后台设置新的 `public_api_base_url`。
 4. 在后台填写微信小程序 AppID、AppSecret、微信支付商户号、API v3 Key、证书和回调配置。
+
+首次打开点单页时，小程序会在当前页面弹出微信官方授权流程：先点击授权头像和昵称，再点击授权手机号。不会跳转到独立资料页；会员页仍有资料设置入口供用户后续修改。头像会通过 `uploadFile` 上传到 `/api/me/avatar`，所以 uploadFile 合法域名和 `data/uploads` 写权限必须同时正确。
 
 只填写 AppID 不能完成微信登录或微信支付。桌台二维码使用微信官方接口生成，也需要有效的 AppID 和 AppSecret。
 

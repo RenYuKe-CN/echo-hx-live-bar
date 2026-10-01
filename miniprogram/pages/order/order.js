@@ -65,7 +65,7 @@ Page({
         storedText: Number(item.storedPaid).toFixed(2),
         bonusText: Number(item.bonusPaid).toFixed(2),
         wechatText: Number(item.wechatPaid).toFixed(2),
-        expireText: item.payment_status === 'pending' ? this.formatExpireText(item.paymentExpireAt, now) : ''
+        expireText: item.paymentStatus === 'pending' ? this.formatExpireText(item.paymentExpireAt, now) : ''
       })) });
       this.refreshCountdown();
       this.startCountdown();

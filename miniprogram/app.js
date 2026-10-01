@@ -3,8 +3,10 @@ App({
   globalData: { sessionId: null, tableNo: 'A-08', pendingScene: '', tableVersion: 0, user: null },
   onLaunch(options) {
     api.setUserId(1);
-    this.apiReady = api.refreshApiBaseUrl().then(() => api.login()).then(login => { this.globalData.user = login.user; return api.request('/mini-page'); }).then(page => {
+    this.apiReady = api.refreshApiBaseUrl().then(() => api.login()).then(login => { this.globalData.user = login.user; return Promise.all([api.request('/mini-page'), api.request('/me')]); }).then(([page, profile]) => {
       this.globalData.miniPage = page.entries;
+      this.globalData.user = profile.user;
+      this.globalData.profileComplete = Boolean(profile.user.phone && profile.user.avatarUrl && profile.user.nickname && profile.user.nickname !== '微信用户');
       const appName = page.entries.find(item => item.key === 'app_name')?.title;
       if (appName) wx.setNavigationBarTitle({ title: appName });
       return page;

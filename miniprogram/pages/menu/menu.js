@@ -1,6 +1,6 @@
 const api = require('../../utils/api');
 Page({
-  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？', detailProduct: null },
+  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？', detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile' },
   onLoad() { this.tableVersion = -1; },
   onShow() { this.load(); },
   load() {
@@ -21,7 +21,8 @@ Page({
       const settings = Object.fromEntries(page.entries.map(item => [item.key, item.title]));
       app.globalData.sessionId = session.session.id;
       app.globalData.user = session.user;
-      this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.member_level || '会').charAt(0), appName: settings.app_name || 'Echo HX Live Bar', homeTitle: settings.home_title || '今晚喝点什么？' });
+      const profileReady = Boolean(session.user.phone && session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户');
+      this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.memberLevel || '会').charAt(0), appName: settings.app_name || 'Echo HX Live Bar', homeTitle: settings.home_title || '今晚喝点什么？', authVisible: !profileReady, authStep: session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户' ? 'phone' : 'profile', authError: '' });
       wx.setNavigationBarTitle({ title: settings.app_name || 'Echo HX Live Bar' });
       this.filter(); this.refreshCart();
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
@@ -51,5 +52,33 @@ Page({
   upgrade() {
     wx.showModal({ title: '充值升级会员', content: '是否查看储值套餐？满足商家设置的升级条件后可享会员价，具体以充值后的会员等级为准。', confirmText: '查看套餐', success: result => { if (result.confirm) wx.navigateTo({ url: '/pages/recharge/recharge' }); } });
   },
-  preview() { if (!this.data.totalQty) return wx.showToast({ title: '请先选择商品', icon: 'none' }); wx.navigateTo({ url: '/pages/cart/cart' }); }
+  preview() { if (!this.data.totalQty) return wx.showToast({ title: '请先选择商品', icon: 'none' }); wx.navigateTo({ url: '/pages/cart/cart' }); },
+  closeAuth() { this.setData({ authVisible: false, authError: '' }); },
+  authorizeProfile() {
+    if (this.data.authBusy) return;
+    this.setData({ authBusy: true, authError: '' });
+    wx.getUserProfile({ desc: '用于展示会员头像和昵称', success: result => {
+      const profile = result.userInfo || {};
+      if (!profile.avatarUrl || !profile.nickName || profile.nickName === '微信用户') {
+        this.setData({ authBusy: false, authError: '没有获得有效的头像和昵称，请重新授权' });
+        return;
+      }
+      return new Promise((resolve, reject) => wx.downloadFile({ url: profile.avatarUrl, success: result => result.statusCode === 200 && result.tempFilePath ? resolve(result.tempFilePath) : reject(new Error('微信头像下载失败，请重试')), fail: reject })).then(filePath => api.uploadAvatar(filePath)).then(avatarUrl => api.request('/me/profile', { method: 'PATCH', data: { nickname: profile.nickName, avatarUrl } })).then(({ user }) => {
+        getApp().globalData.user = user;
+        getApp().globalData.profileComplete = Boolean(user.phone && user.avatarUrl && user.nickname && user.nickname !== '微信用户');
+        this.setData({ user, memberInitial: (user.memberLevel || '会').charAt(0), authStep: user.phone ? '' : 'phone', authError: '' });
+        if (user.phone) this.setData({ authVisible: false });
+      }).catch(error => this.setData({ authError: error.message || '头像昵称保存失败，请重试' })).finally(() => this.setData({ authBusy: false }));
+    }, fail: error => this.setData({ authError: error.errMsg?.includes('cancel') ? '你可以稍后再次点击授权' : '头像昵称授权失败，请重试', authBusy: false }) });
+  },
+  onPhone(e) {
+    if (this.data.authBusy) return;
+    if (!e.detail.code) return this.setData({ authError: '未获得手机号授权，请点击按钮重试' });
+    this.setData({ authBusy: true, authError: '' });
+    api.request('/me/phone', { method: 'POST', data: { code: e.detail.code } }).then(({ user }) => {
+      getApp().globalData.user = user;
+      getApp().globalData.profileComplete = true;
+      this.setData({ user, authVisible: false, authStep: '', authError: '' });
+    }).catch(error => this.setData({ authError: error.message || '手机号绑定失败，请重试' })).finally(() => this.setData({ authBusy: false }));
+  }
 });

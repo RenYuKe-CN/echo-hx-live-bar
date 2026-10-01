@@ -60,7 +60,7 @@ Echo HX Live Bar 是面向酒吧、餐吧和 live house 场景的点单与会员
 
 ### 技术组成
 
-- **顾客网页预览**：用于本地浏览器预览点单流程和会员界面。
+- **顾客网页预览**：仅用于本地开发浏览器预览点单流程和会员界面；正式部署时网站根路径关闭，顾客只能从微信小程序点单。
 - **微信小程序**：位于 `miniprogram/`，可使用微信开发者工具打开、预览和上传审核。
 - **管理后台**：位于 `src/`，包含经营、收银、会员、库存、订单、报表和系统配置页面。
 - **后端 API**：Node.js 服务，主要路由位于 `server/`，负责认证、权限、业务校验、支付、库存、报表和 SQLite 数据持久化。
@@ -142,6 +142,23 @@ DOUYIN_CLIENT_SECRET=
 
 微信私钥可以填写 PEM 内容（换行使用 `\\n`），也可以填写服务器上的私钥文件路径。不要把 `.env`、私钥、数据库或上传文件提交到 GitHub。
 
+### 文件上传与对象存储
+
+未配置对象存储时默认使用 `local`，商品图片和会员头像保存到 `DATA_DIR/uploads/`，也就是默认的 `data/uploads/`。运行 Node 项目的账号必须拥有该目录的读写权限。超级管理员也可以在“接口配置”中填写对象存储参数，将**后续新上传**的图片切换到腾讯云 COS、MinIO、AWS S3 或其他 S3 兼容服务。为了允许后台切换，`.env` 中不要固定写 `STORAGE_PROVIDER=local`；留空即可：
+
+```env
+STORAGE_PROVIDER=
+STORAGE_ENDPOINT=https://your-s3-endpoint
+STORAGE_REGION=auto
+STORAGE_BUCKET=your-bucket
+STORAGE_ACCESS_KEY=
+STORAGE_SECRET_KEY=
+STORAGE_PUBLIC_BASE_URL=
+STORAGE_PATH_PREFIX=uploads/
+```
+
+`STORAGE_ENDPOINT` 是服务端上传和私有读取使用的 S3 API 地址，`STORAGE_PUBLIC_BASE_URL` 是已经配置公开读权限的文件访问地址，可留空。留空时系统通过服务端签名代理读取对象，不要求 Bucket 公开。后台保存对象存储配置后，后续上传会立即使用新的 provider；如果同时在 `.env` 中填写了 endpoint、密钥等敏感项，环境变量仍优先。切换对象存储后请先上传一张测试图片；历史 `data/uploads/` 文件不会自动迁移，迁移前应先备份。
+
 ## 五、启动 API
 
 ```bash
@@ -214,6 +231,10 @@ https://api.example.com
 ```
 
 小程序启动时会访问 `GET /api/runtime-config`，读取后台配置的 `public_api_base_url` 并缓存。因此调整 API 域名时不需要手动编辑 `miniprogram/utils/api.js`，但旧引导地址仍必须可访问，新旧地址都必须加入微信合法域名。`localhost` 只能用于开发工具本地调试。
+
+首页首次进入时会在当前小程序页面显示官方授权弹层。用户点击“授权头像和昵称”后调用 `wx.getUserProfile`，再点击“授权手机号”按钮调用官方手机号接口；不会跳转到独立资料页，也不会在没有用户点击的情况下静默获取真实资料。会员页的“资料设置”仅用于后续修改。线上必须把同一个 HTTPS API 主域名同时加入 request、uploadFile、downloadFile 三项，例如 `https://api.example.com`，不要填写 `https://api.example.com/api`，也不要填写具体接口路径。
+
+小程序头像上传接口是 `POST /api/me/avatar`，后台商品图片上传接口是 `POST /api/admin/products/image`。上传域名必须配置到 uploadFile 合法域名；图片展示域名必须能通过 downloadFile 或 image 请求访问，因此 API 的 `/api/product-images/` 也必须由 HTTPS 反向代理转发到 Node 服务。
 
 使用微信开发者工具打开仓库中的 `miniprogram/` 目录；正式发布前将 `miniprogram/project.config.json` 的 AppID 换成真实 AppID，然后上传、审核、发布。
 
