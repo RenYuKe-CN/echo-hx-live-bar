@@ -266,19 +266,30 @@ bash scripts/manage.sh update
 
 - 备份 SQLite 数据库
 - 从 GitHub 获取 `main` 分支最新代码
+- 如果服务器有本地代码改动，先自动备份到 `backups/update-时间/`，再继续更新
 - 安装锁定版本依赖和开发依赖
 - 重新构建 `dist/`
 - 保留 `.env`、`data/` 和上传图片
 
 命令完成后，进入“网站 -> Node 项目”，点击 `echo-hx-live-bar-api` 的“重启”。前端文件已经更新，API 需要这一次重启加载新代码。
 
-更新前不要在服务器直接改项目源代码。如果提示工作区有未提交改动，先查看：
+如果服务器上存在直接修改过的源代码，脚本不会直接卡住，而是先保存：
+
+```text
+backups/update-时间/local-changes.patch
+backups/update-时间/untracked-files.tar.gz
+backups/update-时间/status.txt
+```
+
+然后以 GitHub `main` 分支为准继续完成更新。`.env`、`data/`、数据库和上传图片不会被覆盖。生产服务器上的临时改动如果需要长期保留，应查看补丁后在开发电脑合并并推送，不建议继续直接改服务器源代码。
+
+查看当前状态：
 
 ```bash
 git status
 ```
 
-脚本会停止更新以保护本地改动，不要直接执行强制覆盖命令。
+旧版本脚本遇到本地改动可能会停止更新；先让脚本更新到新版本，再重新执行 `bash scripts/manage.sh update`。不要手动执行强制覆盖命令。
 
 ## 十、数据库备份和恢复
 

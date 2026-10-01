@@ -8,7 +8,7 @@ usage() {
   cat <<'HELP'
 用法: bash scripts/manage.sh <命令>
   install   首次安装依赖、构建前端并生成 .env（不覆盖已有配置）
-  update    备份数据库、从 origin/main 快进更新、安装依赖并构建
+  update    自动备份本地改动和数据库、同步 origin/main、安装依赖并构建
   version   查看当前版本与远程版本
   history   查看最近 10 次提交
   status    查看服务状态及 API 健康状态
@@ -76,6 +76,27 @@ health() {
   echo
 }
 
+backup_local_changes() {
+  local status stamp backup_dir untracked_count
+  status="$(git status --porcelain --untracked-files=all)"
+  [[ -z "$status" ]] && return 0
+
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  backup_dir="$ROOT_DIR/backups/update-$stamp"
+  mkdir -p "$backup_dir"
+  printf '%s\n' "$status" > "$backup_dir/status.txt"
+  git diff HEAD --binary > "$backup_dir/local-changes.patch"
+
+  untracked_count="$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')"
+  if [[ "$untracked_count" -gt 0 ]]; then
+    git ls-files --others --exclude-standard -z | tar --null --files-from=- --create --gzip --file="$backup_dir/untracked-files.tar.gz"
+  fi
+
+  find "$ROOT_DIR/backups" -maxdepth 1 -type d -name 'update-*' -mtime +30 -exec rm -rf {} +
+  echo "检测到服务器本地改动，已自动备份到：$backup_dir"
+  echo '本次更新将以 GitHub main 为准；.env、data/、上传图片和数据库不会被覆盖。'
+}
+
 case "${1:-help}" in
   install)
     require_node
@@ -90,22 +111,12 @@ case "${1:-help}" in
     require_node
     command -v git >/dev/null || { echo '未找到 git' >&2; exit 1; }
     git fetch origin main
-    if [[ -n "$(git status --porcelain)" ]]; then
-      if git diff --quiet origin/main -- . && git diff --cached --quiet; then
-        git reset --hard origin/main >/dev/null
-        echo '服务器存在与 origin/main 内容一致的残留改动，已自动同步清理。'
-      else
-        echo '项目含未提交改动；为保护服务器本地修改，更新已停止。请先检查 git status。' >&2
-        exit 1
-      fi
-    fi
+    backup_local_changes
+    git reset --hard HEAD >/dev/null
+    git clean -fd >/dev/null
     current_branch="$(git branch --show-current)"
     if [[ "$current_branch" != main ]]; then
-      if git show-ref --verify --quiet refs/heads/main; then
-        git switch main
-      else
-        git switch --create main --track origin/main
-      fi
+      git checkout -B main origin/main >/dev/null
       echo "已将当前分支${current_branch:+ $current_branch}切换为 main"
     fi
     echo "更新前版本：$(git rev-parse --short HEAD)"
@@ -113,7 +124,7 @@ case "${1:-help}" in
       command -v sqlite3 >/dev/null || { echo '请先安装 sqlite3 以备份营业数据库' >&2; exit 1; }
       bash scripts/backup.sh
     fi
-    git merge --ff-only origin/main
+    git reset --hard origin/main >/dev/null
     npm_install
     npm run build
     echo "更新后版本：$(git rev-parse --short HEAD)"

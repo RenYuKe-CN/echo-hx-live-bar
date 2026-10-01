@@ -2,7 +2,7 @@
 
 使用宝塔面板部署请阅读：[宝塔面板部署教程](docs/BAOTA_DEPLOY.md)。
 
-宝塔快速安装与更新：全新服务器先安装 Node.js 20/22、Nginx、Git、SQLite 和宝塔 Node 项目管理器，然后在项目目录执行 `bash scripts/manage.sh install`；以后执行 `bash scripts/manage.sh update`，再到宝塔 Node 项目页面点击“重启”。脚本默认使用 `https://registry.npmmirror.com` 安装 npm 依赖，自动保留 `.env` 和 `data/`。完整步骤见上面的宝塔教程。
+宝塔快速安装与更新：全新服务器先安装 Node.js 20/22、Nginx、Git、SQLite 和宝塔 Node 项目管理器，然后在项目目录执行 `bash scripts/manage.sh install`；以后只需执行 `bash scripts/manage.sh update`，再到宝塔 Node 项目页面点击“重启”。更新脚本会自动备份服务器本地代码改动，不会因为 Git 工作区不干净而直接中断；脚本默认使用 `https://registry.npmmirror.com` 安装 npm 依赖，自动保留 `.env` 和 `data/`。完整步骤见上面的宝塔教程。
 
 酒吧点单、会员、储值、存酒和运营管理系统，包含顾客端、微信小程序、管理后台、收银点单、库存、报表、SQLite 数据库和 GitHub 部署脚本。
 
@@ -254,7 +254,9 @@ cd /var/www/echo-hx-live-bar
 ./scripts/update.sh
 ```
 
-更新脚本会执行 `git pull --ff-only`、`npm ci --include=dev`、`npm run build`、重启服务并检查 API 健康状态。数据库是 `data/echo-hx.sqlite`，图片在 `data/uploads/`，备份在 `backups/`。
+更新脚本会自动备份本地代码改动和 SQLite 数据库，然后以 GitHub `main` 为准执行同步、`npm ci --include=dev` 和 `npm run build`。数据库是 `data/echo-hx.sqlite`，图片在 `data/uploads/`，备份在 `backups/`。
+
+服务器如果存在直接修改过的源代码，代码改动会自动保存到 `backups/update-时间/`：已跟踪文件为 `local-changes.patch`，未跟踪文件为 `untracked-files.tar.gz`，清单为 `status.txt`。`.env`、`data/`、数据库和上传图片不会被覆盖。需要保留的业务改动应在开发电脑合并并推送，不建议继续直接修改生产代码。
 
 每天凌晨自动备份：
 
