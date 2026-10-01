@@ -218,9 +218,9 @@ curl https://api.example.com/api/health
 
 生成前需要在微信公众平台完成：小程序已绑定真实 AppID、AppSecret 有效、`pages/menu/menu` 已加入小程序页面，并把 API 域名配置为 HTTPS 合法域名。然后在超级管理员“接口配置”填写“微信小程序 AppID”和“微信小程序 AppSecret”，保存后即可生成。未配置或微信接口返回错误时，后台会显示具体错误，不会生成演示二维码。
 
-小程序码正式使用前仍需上传并发布小程序；开发阶段可把环境变量 `WECHAT_MINIPROGRAM_ENV_VERSION=trial` 或 `develop`，正式环境默认使用 `release`。
+小程序码正式使用前仍需上传并发布小程序。可以在超级管理员“接口配置”中设置“桌台二维码环境版本”：开发者工具中未发布的代码使用 `develop`，已上传但未正式发布的体验版使用 `trial`，正式线上版本使用 `release`。也可以通过环境变量 `WECHAT_MINIPROGRAM_ENV_VERSION` 设置；环境变量优先级高于后台配置。
 
-微信小程序码接口业务失败时也可能返回 HTTP 200，判断标准是响应是否为有效 PNG，而不是只看 HTTP 状态码。若后台显示“响应不是有效 PNG”，请查看后续显示的微信错误码和错误消息，并重点检查 AppID、AppSecret、`env_version`、`pages/menu/menu` 是否存在于对应版本，以及小程序是否已上传/发布。
+微信小程序码接口业务失败时也可能返回 HTTP 200，判断标准是响应是否为有效 PNG，而不是只看 HTTP 状态码。服务端会把微信返回的错误码、错误消息、环境版本和页面路径显示在后台。若提示 `41030`，重点检查 `pages/menu/menu` 是否存在于对应版本；若提示凭证相关错误，检查 AppID 和 AppSecret 是否属于同一个小程序；开发版/体验版二维码则必须使用对应的 `develop`/`trial` 环境版本。
 
 ## 八、微信小程序配置
 

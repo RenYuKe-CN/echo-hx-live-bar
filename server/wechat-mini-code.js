@@ -36,10 +36,13 @@ export async function getAccessToken() {
 export async function getUnlimitedMiniProgramCode(scene) {
   if (!/^[a-zA-Z0-9:_-]{1,32}$/.test(scene)) throw new Error('桌台二维码场景参数无效');
   const page = 'pages/menu/menu';
+  const configuredEnvVersion = getIntegrationValues().wechat_miniprogram_env_version || 'release';
+  const envVersion = ['release', 'trial', 'develop'].includes(configuredEnvVersion) ? configuredEnvVersion : '';
+  if (!envVersion) throw new Error(`桌台二维码环境版本无效：${configuredEnvVersion}，只能填写 release、trial 或 develop`);
   const request = async token => fetchWithTimeout(`${CODE_URL}?access_token=${encodeURIComponent(token)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ scene, page, check_path: false, env_version: process.env.WECHAT_MINIPROGRAM_ENV_VERSION || 'release', width: 430 })
+    body: JSON.stringify({ scene, page, check_path: false, env_version: envVersion, width: 430 })
   });
   let token = await getAccessToken();
   let response = await request(token);
@@ -47,7 +50,6 @@ export async function getUnlimitedMiniProgramCode(scene) {
   const readWechatError = () => {
     const contentType = response.headers.get('content-type') || '';
     const text = bytes.toString('utf8').trim();
-    if (!contentType.includes('json') && !text.startsWith('{') && !text.startsWith('[')) return null;
     try {
       const data = JSON.parse(text);
       return data && typeof data === 'object' && (data.errcode || data.errmsg) ? data : null;
@@ -67,6 +69,11 @@ export async function getUnlimitedMiniProgramCode(scene) {
     if (error) throw new Error(`微信小程序码生成失败（错误码 ${error.errcode ?? '未知'}）：${error.errmsg || `HTTP ${response.status}`}`);
   }
   const isPng = bytes.length >= 100 && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
-  if (!response.ok || !isPng) throw new Error(`微信小程序码返回异常：HTTP ${response.status}，响应不是有效 PNG（请检查 AppID、AppSecret、env_version 和 pages/menu/menu 是否已发布）`);
+  if (!response.ok || !isPng) {
+    const contentType = response.headers.get('content-type') || '未知';
+    const preview = bytes.toString('utf8').replace(/\s+/g, ' ').slice(0, 240);
+    const detail = preview ? `微信返回内容：${preview}` : `响应类型：${contentType}，响应长度：${bytes.length} 字节`;
+    throw new Error(`微信小程序码返回异常：HTTP ${response.status}，环境版本 ${envVersion}，页面 ${page}，${detail}。请检查 AppID、AppSecret、对应版本是否已上传，以及页面路径是否存在`);
+  }
   return bytes;
 }

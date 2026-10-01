@@ -9,6 +9,7 @@ export const integrationDefinitions = {
   public_api_base_url: { label: '小程序 API 正式 HTTPS 地址', group: 'miniapp', required: true, secret: false, env: 'MINIPROGRAM_API_BASE_URL' },
   wechat_app_id: { label: '微信小程序 AppID', group: 'wechat', required: true, secret: false, env: 'WECHAT_APP_ID' },
   wechat_app_secret: { label: '微信小程序 AppSecret', group: 'wechat', required: true, secret: true, env: 'WECHAT_APP_SECRET' },
+  wechat_miniprogram_env_version: { label: '桌台二维码环境版本（release / trial / develop）', group: 'wechat', required: false, secret: false, env: 'WECHAT_MINIPROGRAM_ENV_VERSION' },
   wechat_mch_id: { label: '微信支付商户号', group: 'wechatPay', required: true, secret: false, env: 'WECHAT_MCH_ID' },
   wechat_api_v3_key: { label: '微信支付 API v3 密钥', group: 'wechatPay', required: true, secret: true, env: 'WECHAT_API_V3_KEY' },
   wechat_merchant_serial: { label: '微信支付商户证书序列号', group: 'wechatPay', required: true, secret: false, env: 'WECHAT_MERCHANT_SERIAL' },
