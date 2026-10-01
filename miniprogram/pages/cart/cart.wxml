@@ -2,7 +2,7 @@
   <view class="title">确认本桌订单</view>
   <text class="muted">多人加入的商品一起结算，支付后可继续加单</text>
   <view wx:for="{{items}}" wx:key="id" class="item">
-    <image wx:if="{{item.image}}" class="pic" src="{{item.image}}" mode="aspectFill" />
+    <image wx:if="{{item.image}}" class="pic pic-image" src="{{item.image}}" mode="aspectFit" />
     <view wx:else class="pic">{{item.initial}}</view>
     <view class="info"><text>{{item.name}}</text><text class="muted">数量 {{item.quantity}}</text></view>
     <view class="item-prices"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">¥{{item.memberText}}</text><text wx:if="{{!isMember}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text></view>
