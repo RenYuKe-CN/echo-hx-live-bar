@@ -1,6 +1,6 @@
 const api = require('../../utils/api');
 Page({
-  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？', detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile' },
+  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？', detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
   onLoad() { this.tableVersion = -1; },
   onShow() { this.load(); },
   load() {
@@ -22,7 +22,7 @@ Page({
       app.globalData.sessionId = session.session.id;
       app.globalData.user = session.user;
       const profileReady = Boolean(session.user.phone && session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户');
-      this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.memberLevel || '会').charAt(0), appName: settings.app_name || 'Echo HX Live Bar', homeTitle: settings.home_title || '今晚喝点什么？', authVisible: !profileReady, authStep: session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户' ? 'phone' : 'profile', authError: '' });
+      this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.memberLevel || '会').charAt(0), appName: settings.app_name || 'Echo HX Live Bar', homeTitle: settings.home_title || '今晚喝点什么？', authVisible: !profileReady, authStep: session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户' ? 'phone' : 'profile', authAvatarPath: session.user.avatarUrl ? api.imageUrl(session.user.avatarUrl) : '', authAvatarUrl: session.user.avatarUrl || '', authNickname: session.user.nickname === '微信用户' ? '' : (session.user.nickname || ''), authError: '' });
       wx.setNavigationBarTitle({ title: settings.app_name || 'Echo HX Live Bar' });
       this.filter(); this.refreshCart();
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
@@ -54,26 +54,34 @@ Page({
   },
   preview() { if (!this.data.totalQty) return wx.showToast({ title: '请先选择商品', icon: 'none' }); wx.navigateTo({ url: '/pages/cart/cart' }); },
   closeAuth() { this.setData({ authVisible: false, authError: '' }); },
-  authorizeProfile() {
+  onAuthAvatar(e) {
+    const avatarPath = e.detail?.avatarUrl;
+    if (avatarPath) this.setData({ authAvatarPath: avatarPath, authAvatarUrl: '', authError: '' });
+    else this.setData({ authError: e.detail?.errMsg || '微信没有返回头像，请重新点击头像区域授权' });
+  },
+  onAuthNickname(e) {
+    this.setData({ authNickname: e.detail?.value || '', authError: '' });
+  },
+  saveAuthProfile() {
     if (this.data.authBusy) return;
+    const nickname = String(this.data.authNickname || '').trim();
+    if (!this.data.authAvatarPath) return this.setData({ authError: '请点击头像区域，使用微信官方组件选择头像' });
+    if (!nickname || nickname === '微信用户') return this.setData({ authError: '请使用昵称输入框填写有效昵称' });
     this.setData({ authBusy: true, authError: '' });
-    wx.getUserProfile({ desc: '用于展示会员头像和昵称', success: result => {
-      const profile = result.userInfo || {};
-      if (!profile.avatarUrl || !profile.nickName || profile.nickName === '微信用户') {
-        this.setData({ authBusy: false, authError: '没有获得有效的头像和昵称，请重新授权' });
-        return;
-      }
-      return new Promise((resolve, reject) => wx.downloadFile({ url: profile.avatarUrl, success: result => result.statusCode === 200 && result.tempFilePath ? resolve(result.tempFilePath) : reject(new Error('微信头像下载失败，请重试')), fail: reject })).then(filePath => api.uploadAvatar(filePath)).then(avatarUrl => api.request('/me/profile', { method: 'PATCH', data: { nickname: profile.nickName, avatarUrl } })).then(({ user }) => {
-        getApp().globalData.user = user;
-        getApp().globalData.profileComplete = Boolean(user.phone && user.avatarUrl && user.nickname && user.nickname !== '微信用户');
-        this.setData({ user, memberInitial: (user.memberLevel || '会').charAt(0), authStep: user.phone ? '' : 'phone', authError: '' });
-        if (user.phone) this.setData({ authVisible: false });
-      }).catch(error => this.setData({ authError: error.message || '头像昵称保存失败，请重试' })).finally(() => this.setData({ authBusy: false }));
-    }, fail: error => this.setData({ authError: error.errMsg?.includes('cancel') ? '你可以稍后再次点击授权' : '头像昵称授权失败，请重试', authBusy: false }) });
+    const upload = this.data.authAvatarUrl ? Promise.resolve(this.data.authAvatarUrl) : api.uploadAvatar(this.data.authAvatarPath);
+    upload.then(avatarUrl => api.request('/me/profile', { method: 'PATCH', data: { nickname, avatarUrl } })).then(({ user }) => {
+      getApp().globalData.user = user;
+      getApp().globalData.profileComplete = Boolean(user.phone && user.avatarUrl && user.nickname && user.nickname !== '微信用户');
+      this.setData({ user, memberInitial: (user.memberLevel || '会').charAt(0), authAvatarPath: api.imageUrl(user.avatarUrl || ''), authAvatarUrl: user.avatarUrl || '', authNickname: user.nickname, authStep: user.phone ? '' : 'phone', authError: '' });
+      if (user.phone) this.setData({ authVisible: false });
+    }).catch(error => this.setData({ authError: error.message || '头像昵称保存失败，请重试' })).finally(() => this.setData({ authBusy: false }));
   },
   onPhone(e) {
     if (this.data.authBusy) return;
-    if (!e.detail.code) return this.setData({ authError: '未获得手机号授权，请点击按钮重试' });
+    if (!e.detail?.code) {
+      const detail = e.detail?.errMsg || '';
+      return this.setData({ authError: detail.includes('deny') || detail.includes('cancel') ? '你没有同意手机号授权，可以点击按钮重新授权' : `未获得手机号授权${detail ? `：${detail}` : '，请点击按钮重试'}` });
+    }
     this.setData({ authBusy: true, authError: '' });
     api.request('/me/phone', { method: 'POST', data: { code: e.detail.code } }).then(({ user }) => {
       getApp().globalData.user = user;

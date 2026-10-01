@@ -251,7 +251,7 @@ https://你的域名/admin
 3. 生产代码中的 `BOOTSTRAP_API_URL` 已预置为项目正式 API 地址；如果使用其他域名，修改 `miniprogram/utils/api.js` 后，在微信开发者工具重新上传小程序代码，或保证旧地址能够访问 `/api/runtime-config` 并在后台设置新的 `public_api_base_url`。
 4. 在后台填写微信小程序 AppID、AppSecret、微信支付商户号、API v3 Key、证书和回调配置。
 
-首次打开点单页时，小程序会在当前页面弹出微信官方授权流程：先点击授权头像和昵称，再点击授权手机号。不会跳转到独立资料页；会员页仍有资料设置入口供用户后续修改。头像会通过 `uploadFile` 上传到 `/api/me/avatar`，所以 uploadFile 合法域名和 `data/uploads` 写权限必须同时正确。
+首次打开点单页时，小程序会在当前页面弹出微信官方授权流程：使用 `button open-type="chooseAvatar"` 选择头像、使用 `input type="nickname"` 填写昵称，再点击 `button open-type="getPhoneNumber"` 授权手机号。相关组件要求微信小程序基础库至少为 `2.21.2`；手机号按钮返回的一次性 `detail.code` 需要立即发送给服务端，不能拿 `wx.login` 的 code 代替。不会跳转到独立资料页；会员页仍有资料设置入口供用户后续修改。`wx.login` 只负责换取登录凭证，不能直接获得头像、昵称或手机号。头像会通过 `uploadFile` 上传到 `/api/me/avatar`，所以 uploadFile 合法域名和 `data/uploads` 写权限必须同时正确。
 
 只填写 AppID 不能完成微信登录或微信支付。桌台二维码使用微信官方接口生成，也需要有效的 AppID 和 AppSecret。
 

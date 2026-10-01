@@ -232,7 +232,7 @@ https://api.example.com
 
 小程序启动时会访问 `GET /api/runtime-config`，读取后台配置的 `public_api_base_url` 并缓存。因此调整 API 域名时不需要手动编辑 `miniprogram/utils/api.js`，但旧引导地址仍必须可访问，新旧地址都必须加入微信合法域名。`localhost` 只能用于开发工具本地调试。
 
-首页首次进入时会在当前小程序页面显示官方授权弹层。用户点击“授权头像和昵称”后调用 `wx.getUserProfile`，再点击“授权手机号”按钮调用官方手机号接口；不会跳转到独立资料页，也不会在没有用户点击的情况下静默获取真实资料。会员页的“资料设置”仅用于后续修改。线上必须把同一个 HTTPS API 主域名同时加入 request、uploadFile、downloadFile 三项，例如 `https://api.example.com`，不要填写 `https://api.example.com/api`，也不要填写具体接口路径。
+首页首次进入时会在当前小程序页面显示官方授权弹层。头像昵称使用微信当前官方组件 `button open-type="chooseAvatar"` 和 `input type="nickname"`，手机号使用用户点击后的 `button open-type="getPhoneNumber"`；不会跳转到独立资料页，也不会在没有用户点击的情况下静默获取真实资料。`wx.login` 只负责换取登录凭证和 openid，不会直接返回头像、昵称或手机号。上述头像、昵称组件要求微信小程序基础库至少为 `2.21.2`，手机号授权也必须用按钮事件返回的一次性 `detail.code`，不能复用 `wx.login` 的 code。会员页的“资料设置”仅用于后续修改。线上必须把同一个 HTTPS API 主域名同时加入 request、uploadFile、downloadFile 三项，例如 `https://api.example.com`，不要填写 `https://api.example.com/api`，也不要填写具体接口路径。
 
 小程序头像上传接口是 `POST /api/me/avatar`，后台商品图片上传接口是 `POST /api/admin/products/image`。上传域名必须配置到 uploadFile 合法域名；图片展示域名必须能通过 downloadFile 或 image 请求访问，因此 API 的 `/api/product-images/` 也必须由 HTTPS 反向代理转发到 Node 服务。
 
