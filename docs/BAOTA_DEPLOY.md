@@ -122,6 +122,16 @@ cd /www/wwwroot/echo-hx-live-bar
 bash scripts/manage.sh install
 ```
 
+项目已兼容宝塔的 `dist/.user.ini` 保护文件。Vite 构建时不会清空整个 `dist/`，因此不会因为宝塔锁定 `.user.ini` 而出现 `EPERM`。如果旧版本代码仍然报错，可先更新项目代码；临时处理方式如下：
+
+```bash
+cd /www/wwwroot/echo-hx-live-bar
+chattr -i dist/.user.ini 2>/dev/null || true
+npm run build
+```
+
+`dist/.user.ini` 是宝塔站点文件，不属于本项目运行所需的 Node 配置，不要把它提交到 Git。后续使用新版代码执行 `bash scripts/manage.sh update` 即可。
+
 ## 六、配置 Nginx 反向代理
 
 进入这个网站的“设置 -> 配置文件”，在 `server {}` 内确认有以下配置。已有同名配置时保留一份即可：
