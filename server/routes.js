@@ -278,9 +278,15 @@ function membershipProgress(userId) {
   const currentIndex = tiers.findIndex(tier => tier.id === user?.member_tier_id);
   const target = user?.member_pending_tier_id ? tiers.find(tier => tier.id === user.member_pending_tier_id) : tiers[currentIndex + 1] || null;
   const requirements = target ? tierRequirements(target) : { stored: 0, spend: 0 };
-  const storedProgress = requirements.stored ? Math.min(stored / requirements.stored, 1) : 1;
-  const spendProgress = requirements.spend ? Math.min(spend / requirements.spend, 1) : 1;
-  const progress = target ? (target.condition_mode === 'all' ? Math.min(storedProgress, spendProgress) : Math.max(storedProgress, spendProgress)) : 1;
+  // Only configured upgrade conditions participate in the progress. An omitted
+  // condition is not an already-completed condition, otherwise `any` would
+  // incorrectly become 100% whenever one threshold is left blank.
+  const progressValues = [];
+  if (requirements.stored > 0) progressValues.push(Math.min(stored / requirements.stored, 1));
+  if (requirements.spend > 0) progressValues.push(Math.min(spend / requirements.spend, 1));
+  const progress = !target ? 1 : progressValues.length
+    ? target.condition_mode === 'all' ? Math.min(...progressValues) : Math.max(...progressValues)
+    : 0;
   return {
     currentStored: centsToMoney(stored), currentSpend: centsToMoney(spend),
     currentTierId: user?.member_tier_id || null, targetTierId: target?.id || null,
