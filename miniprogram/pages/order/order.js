@@ -65,7 +65,7 @@ Page({
         storedText: Number(item.storedPaid).toFixed(2),
         bonusText: Number(item.bonusPaid).toFixed(2),
         wechatText: Number(item.wechatPaid).toFixed(2),
-        expireText: item.paymentStatus === 'pending' ? this.formatExpireText(item.paymentExpireAt, now) : ''
+        expireText: item.payment_status === 'pending' ? this.formatExpireText(item.paymentExpireAt, now) : ''
       })) });
       this.refreshCountdown();
       this.startCountdown();
@@ -105,5 +105,18 @@ Page({
         }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ busyOrderNo: '' }));
       }
     });
+  },
+
+  hideOrder(event) {
+    const orderNo = event.currentTarget.dataset.orderNo;
+    if (!orderNo || this.data.busyOrderNo) return;
+    wx.showModal({ title: '删除订单记录', content: '只会从你的订单列表隐藏，不会删除订单和支付记录。', confirmText: '隐藏', success: result => {
+      if (!result.confirm) return;
+      this.setData({ busyOrderNo: orderNo });
+      api.request(`/me/orders/${encodeURIComponent(orderNo)}/hide`, { method: 'POST' }).then(() => {
+        wx.showToast({ title: '已隐藏', icon: 'success' });
+        this.loadOrders();
+      }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ busyOrderNo: '' }));
+    } });
   }
 });

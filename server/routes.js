@@ -3,9 +3,10 @@ import express from 'express';
 import { Router } from 'express';
 import { db, centsToMoney } from './db.js';
 import { getIntegrationStatus, integrationDefinitions } from './config.js';
-import { getUnlimitedMiniProgramCode } from './wechat-mini-code.js';
+import { getUnlimitedMiniProgramCode, miniProgramCodeContentType } from './wechat-mini-code.js';
 import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment } from './integrations/wechat.js';
 import { localImageDir, saveUpload, readUpload, isAllowedImageUrl } from './storage.js';
+import { getBirthdayMatchInfo, normalizeBirthday } from './birthday.js';
 
 export const router = Router();
 const PAYMENT_EXPIRY_MS = 10 * 60 * 1000;
@@ -18,6 +19,19 @@ const orderCreatedAt = order => {
 const orderExpiryAt = order => order?.payment_expire_at || (orderCreatedAt(order) ? new Date(orderCreatedAt(order) + PAYMENT_EXPIRY_MS).toISOString() : null);
 const currentUserId = req => req.user?.id || (process.env.NODE_ENV !== 'production' && process.env.ALLOW_DEMO_USER !== 'false' ? Number(req.header('x-demo-user-id') || 1) : 0);
 const todayLocalDate = () => db.prepare("SELECT date('now', 'localtime') AS day").get().day;
+const parsePagination = (req, prefix = '') => {
+  const pageKey = prefix ? `${prefix}Page` : 'page';
+  const sizeKey = prefix ? `${prefix}PageSize` : 'pageSize';
+  const requestedPage = Math.max(1, Number.parseInt(req.query[pageKey] || '1', 10) || 1);
+  const requestedSize = Number.parseInt(req.query[sizeKey] || '20', 10) || 20;
+  const pageSize = requestedSize === 50 ? 50 : 20;
+  return { page: requestedPage, pageSize, offset: (requestedPage - 1) * pageSize };
+};
+const paginationView = (page, pageSize, total) => {
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, totalPages);
+  return { page: safePage, pageSize, total, totalPages, hasNext: safePage < totalPages, hasPrevious: safePage > 1 };
+};
 const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','reports','losses'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); const supplied = crypto.scryptSync(password, salt, 64); return hash?.length === 128 && crypto.timingSafeEqual(supplied, Buffer.from(hash, 'hex')); };
@@ -28,7 +42,10 @@ const syncProductAvailability = () => {
   db.prepare("UPDATE products SET status = 'inactive' WHERE stock <= 0 AND status = 'active'").run();
 };
 const tokenHash = token => crypto.createHash('sha256').update(token).digest('hex');
-const publicUser = row => ({ id: row.id, nickname: row.nickname, phone: row.phone, avatarUrl: row.avatar_url, memberLevel: row.member_level, points: row.points, memberExpiresAt: row.member_expires_at });
+const publicUser = row => {
+  const tier = row.member_tier_id ? db.prepare('SELECT badge_color FROM member_tiers WHERE id = ?').get(row.member_tier_id) : null;
+  return { id: row.id, nickname: row.nickname, phone: row.phone, avatarUrl: row.avatar_url, memberLevel: row.member_level, memberTierId: row.member_tier_id, memberColor: tier?.badge_color || '#C77F52', points: row.points, memberExpiresAt: row.member_expires_at, birthdayType: row.birthday_type || '', birthdayDate: row.birthday_date || '' };
+};
 
 router.post('/auth/wechat/login', async (req, res) => {
   const code = String(req.body?.code || '').trim();
@@ -85,7 +102,7 @@ router.post('/admin/change-password', (req, res) => {
   db.prepare('UPDATE staff_accounts SET password_hash = ? WHERE id = ?').run(hashPassword(req.body.newPassword), req.staff.id);
   audit(req, '修改密码'); res.json({ ok: true });
 });
-router.get('/admin/accounts', (_req, res) => res.json({ accounts: db.prepare('SELECT * FROM staff_accounts ORDER BY id').all().map(publicAccount), modules }));
+router.get('/admin/accounts', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM staff_accounts').get().value; return res.json({ accounts: db.prepare('SELECT * FROM staff_accounts ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset).map(publicAccount), modules, pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/accounts', (req, res) => {
   const { username, displayName, password, role, permissions = [] } = req.body || {};
   if (!/^[a-zA-Z0-9_]{3,32}$/.test(username || '') || String(password || '').length < 10 || !['manager','staff'].includes(role) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p))) return res.status(400).json({ message: '账号、密码或权限无效（密码至少 10 位）' });
@@ -101,7 +118,7 @@ router.patch('/admin/accounts/:id', (req, res) => {
   if (status === 'disabled' || password) db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(account.id);
   audit(req, '修改账号', account.username); res.json({ ok: true });
 });
-router.get('/admin/logs', (_req, res) => res.json({ logs: db.prepare('SELECT * FROM operation_logs ORDER BY id DESC LIMIT 300').all() }));
+router.get('/admin/logs', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM operation_logs').get().value; return res.json({ logs: db.prepare('SELECT * FROM operation_logs ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });
 router.get('/admin/settings', (_req, res) => {
   const status = getIntegrationStatus();
   res.json({ settings: Object.entries(integrationDefinitions).map(([key, definition]) => ({ key, label: definition.label, value: definition.secret && status.values[key] ? '' : status.values[key], configured: Boolean(status.values[key]), secret: definition.secret, source: process.env[definition.env] ? 'environment' : 'admin' })), groups: status.groups, integrationsActive: false });
@@ -178,14 +195,109 @@ function productView(row) {
   return product;
 }
 
+const validBadgeColor = value => /^#[0-9a-fA-F]{6}$/.test(String(value || ''));
+const tierRequirements = tier => ({
+  stored: Number(tier.stored_threshold_cents || (tier.upgrade_type === 'recharge' ? tier.threshold_cents : 0)),
+  spend: Number(tier.spend_threshold_cents || (['spend', 'monthly'].includes(tier.upgrade_type) ? tier.threshold_cents : 0))
+});
+const tierConditionMet = (tier, storedCents, spendCents) => {
+  const requirements = tierRequirements(tier);
+  const storedMet = requirements.stored <= 0 || storedCents >= requirements.stored;
+  const spendMet = requirements.spend <= 0 || spendCents >= requirements.spend;
+  if (tier.condition_mode === 'all') return storedMet && spendMet;
+  return (requirements.stored > 0 && storedCents >= requirements.stored) || (requirements.spend > 0 && spendCents >= requirements.spend);
+};
+const tierDuration = tier => tier.duration_days ? new Date(Date.now() + tier.duration_days * 86400000).toISOString() : null;
+const paidSpendSince = (userId, since) => {
+  if (!since) return Number(db.prepare("SELECT COALESCE(SUM(payable_amount_cents),0) AS amount FROM orders WHERE payer_user_id = ? AND payment_status = 'paid'").get(userId).amount);
+  return Number(db.prepare("SELECT COALESCE(SUM(payable_amount_cents),0) AS amount FROM orders WHERE payer_user_id = ? AND payment_status = 'paid' AND datetime(paid_at) >= datetime(?)").get(userId, since).amount);
+};
+const availableStored = userId => {
+  const wallet = db.prepare('SELECT stored_cents, stored_reserved_cents FROM wallet_accounts WHERE user_id = ?').get(userId);
+  return Math.max(0, Number(wallet?.stored_cents || 0) - Number(wallet?.stored_reserved_cents || 0));
+};
+const activeTiers = () => db.prepare("SELECT * FROM member_tiers WHERE store_id = 1 AND status = 'active' ORDER BY sort, id").all();
+
+// Membership changes are server-side and run whenever a user reaches a business boundary.
+// Expired members move down one tier at a time; the previous tier is kept as a recovery target.
+function syncMembership(userId) {
+  let user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  if (!user) return null;
+  const tiers = activeTiers();
+  if (!tiers.length) return user;
+  const stored = availableStored(userId);
+  const allSpend = paidSpendSince(userId, null);
+  const currentIndex = tiers.findIndex(tier => tier.id === user.member_tier_id);
+  const now = new Date();
+  const expiry = user.member_expires_at ? new Date(user.member_expires_at) : null;
+  const expired = Boolean(expiry && Number.isFinite(expiry.getTime()) && expiry <= now);
+  const updateTier = (tier, pendingTierId = null, cycleStartedAt = new Date().toISOString()) => {
+    const level = tier?.name || '普通会员';
+    db.prepare('UPDATE users SET member_tier_id = ?, member_pending_tier_id = ?, member_level = ?, member_discount = ?, member_expires_at = ?, member_cycle_started_at = ? WHERE id = ?').run(tier?.id || null, pendingTierId, level, tier?.discount || 1, tier ? tierDuration(tier) : null, cycleStartedAt, userId);
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  };
+
+  if (currentIndex < 0) {
+    const recovery = user.member_pending_tier_id ? tiers.find(tier => tier.id === user.member_pending_tier_id) : null;
+    if (recovery && tierConditionMet(recovery, stored, paidSpendSince(userId, user.member_cycle_started_at))) {
+      updateTier(recovery, null);
+      return user;
+    }
+    const target = !recovery ? [...tiers].reverse().find(tier => tierConditionMet(tier, stored, allSpend)) : null;
+    if (target) updateTier(target);
+    return user;
+  }
+
+  const currentTier = tiers[currentIndex];
+  const recoveryTier = user.member_pending_tier_id ? tiers.find(tier => tier.id === user.member_pending_tier_id) : null;
+  if (!expired) {
+    if (recoveryTier && tierConditionMet(recoveryTier, stored, paidSpendSince(userId, user.member_cycle_started_at))) {
+      updateTier(recoveryTier, null);
+      return user;
+    }
+    const higher = recoveryTier ? null : tiers.slice(currentIndex + 1).filter(tier => tierConditionMet(tier, stored, allSpend)).pop();
+    if (higher) updateTier(higher);
+    return user;
+  }
+
+  const renewalSpend = paidSpendSince(userId, expiry?.toISOString() || user.member_cycle_started_at);
+  if (currentTier && tierConditionMet(currentTier, stored, renewalSpend)) {
+    updateTier(currentTier, recoveryTier?.id || null);
+    return user;
+  }
+  const lower = tiers[currentIndex - 1] || null;
+  updateTier(lower, recoveryTier?.id || currentTier?.id || null);
+  return user;
+}
+
+function membershipProgress(userId) {
+  const user = syncMembership(userId) || db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  const tiers = activeTiers();
+  const stored = availableStored(userId);
+  const spend = user?.member_pending_tier_id ? paidSpendSince(userId, user.member_cycle_started_at) : paidSpendSince(userId, null);
+  const currentIndex = tiers.findIndex(tier => tier.id === user?.member_tier_id);
+  const target = user?.member_pending_tier_id ? tiers.find(tier => tier.id === user.member_pending_tier_id) : tiers[currentIndex + 1] || null;
+  const requirements = target ? tierRequirements(target) : { stored: 0, spend: 0 };
+  const storedProgress = requirements.stored ? Math.min(stored / requirements.stored, 1) : 1;
+  const spendProgress = requirements.spend ? Math.min(spend / requirements.spend, 1) : 1;
+  const progress = target ? (target.condition_mode === 'all' ? Math.min(storedProgress, spendProgress) : Math.max(storedProgress, spendProgress)) : 1;
+  return {
+    currentStored: centsToMoney(stored), currentSpend: centsToMoney(spend),
+    currentTierId: user?.member_tier_id || null, targetTierId: target?.id || null,
+    progress: Number(progress.toFixed(4)), conditionMode: target?.condition_mode || 'any',
+    targetTierName: target?.name || '',
+    conditions: { stored: centsToMoney(requirements.stored), spend: centsToMoney(requirements.spend) },
+    tiers: tiers.map(tier => ({ id: tier.id, name: tier.name, discount: tier.discount, discountLabel: `${Number(tier.discount * 10).toFixed(1)} 折`, pointsRate: tier.points_rate, durationDays: tier.duration_days, sort: tier.sort, badgeColor: validBadgeColor(tier.badge_color) ? tier.badge_color : '#C77F52', conditionMode: tier.condition_mode, storedThreshold: centsToMoney(tierRequirements(tier).stored), spendThreshold: centsToMoney(tierRequirements(tier).spend) }))
+  };
+}
+
 function memberPricing(userId) {
-  const user = db.prepare('SELECT member_level, member_tier_id, member_discount, member_expires_at FROM users WHERE id = ?').get(userId);
-  if (!user) return { active: false, discount: 1, pointsRate: 1 };
-  if (user.member_level === '普通会员') return { active: false, discount: 1, pointsRate: 1 };
-  const active = (!user.member_expires_at || new Date(user.member_expires_at) > new Date()) && (user.member_tier_id != null || user.member_discount < 1);
-  const tier = user.member_tier_id && db.prepare("SELECT discount, points_rate FROM member_tiers WHERE id = ? AND status = 'active'").get(user.member_tier_id);
-  const eligible = Boolean(active && (tier || user.member_tier_id == null));
-  return { active: eligible, discount: eligible ? tier?.discount ?? user.member_discount : 1, pointsRate: eligible ? tier?.points_rate ?? 1 : 1 };
+  const user = syncMembership(userId);
+  if (!user || user.member_level === '普通会员') return { active: false, discount: 1, pointsRate: 1, color: '#C77F52' };
+  const active = !user.member_expires_at || new Date(user.member_expires_at) > new Date();
+  const tier = user.member_tier_id && db.prepare("SELECT discount, points_rate, badge_color FROM member_tiers WHERE id = ? AND status = 'active'").get(user.member_tier_id);
+  const eligible = Boolean(active && tier);
+  return { active: eligible, discount: eligible ? tier.discount : 1, pointsRate: eligible ? tier.points_rate : 1, color: eligible && validBadgeColor(tier.badge_color) ? tier.badge_color : '#C77F52' };
 }
 function unitPrice(product, pricing) {
   if (!pricing.active) return product.price_cents;
@@ -273,16 +385,9 @@ function settleOrder(order, method, req) {
   const points = Math.floor(order.payable_amount_cents / 100 * memberPricing(order.payer_user_id).pointsRate);
   db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(points, order.payer_user_id);
   db.prepare('INSERT INTO points_ledger (user_id, order_id, points, reason) VALUES (?, ?, ?, ?)').run(order.payer_user_id, order.id, points, '订单消费');
-  const spent = db.prepare("SELECT COALESCE(SUM(payable_amount_cents),0) AS amount FROM orders WHERE payer_user_id = ? AND payment_status = 'paid'").get(order.payer_user_id).amount;
-  const tier = db.prepare("SELECT * FROM member_tiers WHERE store_id = 1 AND status = 'active' AND upgrade_type = 'spend' AND threshold_cents <= ? ORDER BY threshold_cents DESC, id DESC LIMIT 1").get(spent);
-  if (tier) {
-    const current = db.prepare('SELECT member_tier_id, member_discount FROM users WHERE id = ?').get(order.payer_user_id);
-    if (!current.member_tier_id || tier.discount < current.member_discount) {
-      const expiry = tier.duration_days ? new Date(Date.now() + tier.duration_days * 86400000).toISOString() : null;
-      db.prepare('UPDATE users SET member_tier_id = ?, member_level = ?, member_discount = ?, member_expires_at = ? WHERE id = ?').run(tier.id, tier.name, tier.discount, expiry, order.payer_user_id);
-      if (req.staff) audit(req, '会员自动升级', `ID ${order.payer_user_id}: ${tier.name}`);
-    }
-  }
+  const before = db.prepare('SELECT member_tier_id, member_level FROM users WHERE id = ?').get(order.payer_user_id);
+  const after = syncMembership(order.payer_user_id);
+  if (req.staff && before?.member_tier_id !== after?.member_tier_id) audit(req, '会员等级自动调整', `ID ${order.payer_user_id}: ${before?.member_level || '普通会员'} -> ${after?.member_level || '普通会员'}`);
 }
 
 function completeWechatOrder(orderNo, transactionId) {
@@ -490,8 +595,9 @@ router.post('/admin/pos/recharges', (req, res) => {
       db.prepare('INSERT OR IGNORE INTO wallet_accounts (user_id) VALUES (?)').run(member.id);
       db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents + ?, bonus_cents = bonus_cents + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(offer.stored_cents, offer.bonus_cents, member.id);
       const id = db.prepare('INSERT INTO wallet_transactions (user_id,type,pay_cents,stored_cents,bonus_cents,remark,pos_request_id) VALUES (?,\'recharge\',?,?,?,?,?)').run(member.id, offer.pay_cents, offer.stored_cents, offer.bonus_cents, `${offer.name} · ${paymentMethod} · ${req.staff.username}`, requestId).lastInsertRowid;
-      const tier = db.prepare("SELECT * FROM member_tiers WHERE store_id = 1 AND status = 'active' AND upgrade_type = 'recharge' AND threshold_cents <= ? ORDER BY threshold_cents DESC LIMIT 1").get(offer.pay_cents);
-      if (tier && (!member.member_tier_id || tier.discount < member.member_discount)) db.prepare('UPDATE users SET member_tier_id = ?, member_level = ?, member_discount = ?, member_expires_at = ? WHERE id = ?').run(tier.id, tier.name, tier.discount, tier.duration_days ? new Date(Date.now() + tier.duration_days * 86400000).toISOString() : null, member.id);
+      const before = db.prepare('SELECT member_tier_id, member_level FROM users WHERE id = ?').get(member.id);
+      const after = syncMembership(member.id);
+      if (before?.member_tier_id !== after?.member_tier_id) audit(req, '会员等级自动调整', `ID ${member.id}: ${before?.member_level || '普通会员'} -> ${after?.member_level || '普通会员'}`);
       audit(req, '收银储值', `${offer.name} 手机尾号 ${member.phone.slice(-4)} ${paymentMethod} ${centsToMoney(offer.pay_cents)}元`);
       return db.prepare('SELECT * FROM wallet_transactions WHERE id = ?').get(id);
     })();
@@ -608,7 +714,7 @@ router.get('/admin/summary', (req, res) => {
   res.json({ todayRevenue: centsToMoney(revenue), activeOrders, pendingPayment, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: centsToMoney(today.revenue), profit: centsToMoney(today.revenue - today.order_cost - todayLoss), recharge: centsToMoney(todayRecharge), offline: centsToMoney(today.offline), orderCost: centsToMoney(today.order_cost), lossCost: centsToMoney(todayLoss) }, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
 });
 
-router.get('/admin/products', (req, res) => { syncProductAvailability(); return res.json({ products: adminRows('SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id ORDER BY p.id DESC').map(row => { const product = adminMoney(row); if (req.staff.role !== 'super') delete product.cost_cents; return product; }), categories: adminRows('SELECT * FROM categories ORDER BY sort, id') }); });
+router.get('/admin/products', (req, res) => { syncProductAvailability(); const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM products').get().value; const all = req.query.all === '1' || req.query.all === 'true'; const products = db.prepare(`SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id ORDER BY p.id DESC${all ? '' : ' LIMIT ? OFFSET ?'}`).all(...(all ? [] : [pageSize, offset])).map(row => { const product = adminMoney(row); if (req.staff.role !== 'super') delete product.cost_cents; return product; }); return res.json({ products, categories: adminRows('SELECT * FROM categories ORDER BY sort, id'), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/products', (req, res) => {
   const body = req.body || {};
   if (req.staff.role !== 'super' && body.cost != null) return res.status(403).json({ message: '仅超级管理员可设置进货价' });
@@ -638,17 +744,19 @@ router.patch('/admin/products/:id', (req, res) => {
 });
 router.delete('/admin/products/:id', (req, res) => { db.prepare("UPDATE products SET status = 'inactive' WHERE id = ?").run(req.params.id); audit(req, '下架商品', req.params.id); res.json({ ok: true }); });
 
-router.get('/admin/categories', (_req, res) => res.json({ categories: adminRows('SELECT c.*, COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category_id = c.id GROUP BY c.id ORDER BY c.sort, c.id') }));
+router.get('/admin/categories', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM categories').get().value; return res.json({ categories: db.prepare('SELECT c.*, COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category_id = c.id GROUP BY c.id ORDER BY c.sort, c.id LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/categories', (req, res) => { if (!req.body.name) return res.status(400).json({ message: '分类名称不能为空' }); const r = db.prepare('INSERT INTO categories (store_id, name, sort) VALUES (1, ?, ?)').run(req.body.name, Number(req.body.sort || 0)); res.status(201).json({ category: db.prepare('SELECT * FROM categories WHERE id = ?').get(r.lastInsertRowid) }); });
 router.patch('/admin/categories/:id', (req, res) => { db.prepare('UPDATE categories SET name = COALESCE(?, name), sort = COALESCE(?, sort), status = COALESCE(?, status) WHERE id = ?').run(req.body.name, req.body.sort == null ? null : Number(req.body.sort), req.body.status, req.params.id); res.json({ ok: true }); });
 
-router.get('/admin/tables', (_req, res) => res.json({ tables: adminRows("SELECT t.*, ts.session_no, ts.status AS session_status, COALESCE(SUM(o.payable_amount_cents),0) AS order_total FROM tables t LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'open' LEFT JOIN orders o ON o.session_id = ts.id AND o.payment_status = 'paid' WHERE t.status != 'disabled' GROUP BY t.id ORDER BY t.table_no") .map(row => ({ ...row, orderTotal: centsToMoney(row.order_total) })) }));
+router.get('/admin/tables', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare("SELECT COUNT(*) AS value FROM tables WHERE status != 'disabled'").get().value; return res.json({ tables: db.prepare("SELECT t.*, ts.session_no, ts.status AS session_status, COALESCE(SUM(o.payable_amount_cents),0) AS order_total FROM tables t LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'open' LEFT JOIN orders o ON o.session_id = ts.id AND o.payment_status = 'paid' WHERE t.status != 'disabled' GROUP BY t.id ORDER BY t.table_no LIMIT ? OFFSET ?").all(pageSize, offset).map(row => ({ ...row, orderTotal: centsToMoney(row.order_total) })), pagination: paginationView(page, pageSize, total) }); });
 router.get('/admin/tables/:id/mini-code', async (req, res) => {
   const table = db.prepare("SELECT id, table_no FROM tables WHERE id = ? AND status != 'disabled'").get(req.params.id);
   if (!table) return res.status(404).json({ message: '桌台不存在或已停用' });
   try {
     const image = await getUnlimitedMiniProgramCode(`t_${table.id}`);
-    res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'private, no-store', 'Content-Disposition': `inline; filename="table-${table.id}.png"` });
+    const contentType = miniProgramCodeContentType(image);
+    const extension = contentType === 'image/jpeg' ? 'jpg' : 'png';
+    res.set({ 'Content-Type': contentType, 'Cache-Control': 'private, no-store', 'Content-Disposition': `inline; filename="table-${table.id}.${extension}"` });
     res.send(image);
   } catch (error) {
     res.status(502).json({ message: error.name === 'AbortError' ? '微信接口超时，请稍后重试' : error.message });
@@ -693,9 +801,11 @@ router.delete('/admin/tables/:id', (req, res) => {
 router.post('/admin/tables/:id/close', (req, res) => { const session = db.prepare("SELECT id FROM table_sessions WHERE table_id = ? AND status = 'open'").get(req.params.id); if (session) { db.prepare("UPDATE table_sessions SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = ?").run(session.id); audit(req, '结束桌台', req.params.id); } res.json({ ok: true }); });
 
 router.get('/admin/orders', (req, res) => {
-  const rows = adminRows("SELECT o.*, t.table_no, u.nickname, COALESCE((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id),0) AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT 100");
+  const { page, pageSize, offset } = parsePagination(req);
+  const total = db.prepare('SELECT COUNT(*) AS value FROM orders').get().value;
+  const rows = db.prepare("SELECT o.*, t.table_no, u.nickname, COALESCE((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id),0) AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?").all(pageSize, offset);
   const items = orderItems(rows.map(o => o.id));
-  res.json({ orders: rows.map(row => { const order = { ...row, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - row.cost_cents) : null; } return order; }) });
+  res.json({ orders: rows.map(row => { const order = { ...row, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
 });
 router.post('/admin/orders/:id/deliver', (req, res) => {
   const result = db.transaction(() => {
@@ -723,14 +833,24 @@ router.post('/admin/orders/:id/mark-paid', (req, res) => {
 });
 
 const validPhone = phone => /^1[3-9]\d{9}$/.test(phone);
-const memberView = row => ({ id: row.id, phone: row.phone, nickname: row.nickname, avatarUrl: row.avatar_url, wechatBound: Boolean(row.wechat_openid), memberTierId: row.member_tier_id, memberLevel: row.member_level, memberDiscount: row.member_discount, memberExpiresAt: row.member_expires_at, points: row.points, stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents), createdAt: row.created_at });
+const birthdayView = row => {
+  const match = getBirthdayMatchInfo(row.birthday_type, row.birthday_date);
+  return { id: row.id, phone: row.phone, nickname: row.nickname, memberLevel: row.member_level, birthdayType: row.birthday_type || '', birthdayDate: row.birthday_date || '', adminNote: row.admin_note || '', daysUntil: match.daysUntil, birthdayLabel: match.label };
+};
+const memberView = row => ({ id: row.id, phone: row.phone, nickname: row.nickname, avatarUrl: row.avatar_url, wechatBound: Boolean(row.wechat_openid), memberTierId: row.member_tier_id, memberLevel: row.member_level, memberColor: row.member_tier_id ? (db.prepare('SELECT badge_color FROM member_tiers WHERE id = ?').get(row.member_tier_id)?.badge_color || '#C77F52') : '#C77F52', memberDiscount: row.member_discount, memberExpiresAt: row.member_expires_at, points: row.points, stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents), adminNote: row.admin_note || '', birthdayType: row.birthday_type || '', birthdayDate: row.birthday_date || '', createdAt: row.created_at });
 const memberQuery = `SELECT u.*, COALESCE(w.stored_cents,0) AS stored_cents, COALESCE(w.bonus_cents,0) AS bonus_cents FROM users u LEFT JOIN wallet_accounts w ON w.user_id = u.id`;
-const tiers = () => db.prepare('SELECT * FROM member_tiers WHERE store_id = 1 ORDER BY sort, threshold_cents, id').all();
+const tiers = () => db.prepare('SELECT * FROM member_tiers WHERE store_id = 1 ORDER BY sort, id').all();
 router.get('/admin/members', (req, res) => {
   const phone = String(req.query.phone || '').trim();
   if (phone && !/^\d{1,11}$/.test(phone)) return res.status(400).json({ message: '请输入手机号数字' });
-  const rows = phone ? db.prepare(`${memberQuery} WHERE u.phone LIKE ? ORDER BY u.id DESC LIMIT 100`).all(`${phone}%`) : db.prepare(`${memberQuery} ORDER BY u.id DESC LIMIT 100`).all();
-  res.json({ members: rows.map(memberView), tiers: tiers() });
+  const { page, pageSize, offset } = parsePagination(req);
+  const where = phone ? ' WHERE u.phone LIKE ?' : '';
+  const args = phone ? [`${phone}%`] : [];
+  const total = db.prepare(`SELECT COUNT(*) AS value FROM users u${where}`).get(...args).value;
+  const rows = db.prepare(`${memberQuery}${where} ORDER BY u.id DESC LIMIT ? OFFSET ?`).all(...args, pageSize, offset);
+  const birthdayRows = db.prepare(`${memberQuery} WHERE u.birthday_type IS NOT NULL AND u.birthday_date IS NOT NULL`).all();
+  const birthdayMembers = birthdayRows.map(row => birthdayView({ ...row, ...syncMembership(row.id) })).filter(row => row.daysUntil != null && row.daysUntil <= 3).sort((a, b) => a.daysUntil - b.daysUntil || a.id - b.id);
+  res.json({ members: rows.map(row => memberView({ ...row, ...syncMembership(row.id) })), tiers: tiers(), birthdays: { today: birthdayMembers.filter(row => row.daysUntil === 0), upcoming: birthdayMembers.filter(row => row.daysUntil > 0) }, pagination: paginationView(page, pageSize, total) });
 });
 router.post('/admin/members', (req, res) => {
   const phone = String(req.body?.phone || '').trim(), nickname = String(req.body?.nickname || '').trim();
@@ -745,18 +865,21 @@ router.patch('/admin/members/:id', (req, res) => {
   const tierId = b.memberTierId === '' ? null : b.memberTierId == null ? current.member_tier_id : Number(b.memberTierId);
   const tier = tierId == null ? null : db.prepare("SELECT * FROM member_tiers WHERE id = ? AND store_id = 1 AND status = 'active'").get(tierId);
   const points = b.points == null ? current.points : Number(b.points);
+  const birthday = b.birthdayType == null && b.birthdayDate == null ? { type: current.birthday_type || '', date: current.birthday_date || '' } : normalizeBirthday(b.birthdayType, b.birthdayDate);
+  const adminNote = b.adminNote == null ? current.admin_note || '' : String(b.adminNote).trim();
   const moneyInput = value => value == null ? null : value === '' || !Number.isFinite(Number(value)) || !Number.isSafeInteger(Number(value) * 100) ? NaN : Math.round(Number(value) * 100);
   const stored = moneyInput(b.stored), bonus = moneyInput(b.bonus);
   const walletBefore = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(current.id) || { stored_cents: 0, bonus_cents: 0 };
   const moneyChanged = (stored != null && stored !== walletBefore.stored_cents) || (bonus != null && bonus !== walletBefore.bonus_cents);
+  const manualTierSelection = b.memberTierId != null;
   const changedTier = tierId !== current.member_tier_id;
   const defaultExpiry = changedTier ? (tier?.duration_days ? new Date(Date.now() + tier.duration_days * 86400000) : null) : current.member_expires_at;
   const expiry = b.memberExpiresAt ? new Date(`${b.memberExpiresAt}T23:59:59.999+08:00`) : defaultExpiry;
-  if (!validPhone(phone) || !nickname || nickname.length > 50 || (tierId != null && !tier) || !Number.isSafeInteger(points) || points < 0 || [stored,bonus].some(v => v != null && (!Number.isSafeInteger(v) || v < 0)) || (expiry instanceof Date && Number.isNaN(expiry.getTime()))) return res.status(400).json({ message: '会员信息、等级或余额无效' });
+  if ((phone && !validPhone(phone)) || !nickname || nickname.length > 50 || (tierId != null && !tier) || !birthday || adminNote.length > 500 || !Number.isSafeInteger(points) || points < 0 || [stored,bonus].some(v => v != null && (!Number.isSafeInteger(v) || v < 0)) || (expiry instanceof Date && Number.isNaN(expiry.getTime()))) return res.status(400).json({ message: '会员信息、等级、生日或余额无效' });
   if ((points !== current.points || moneyChanged) && !String(b.reason || '').trim()) return res.status(400).json({ message: '调整积分或钱包余额必须填写原因' });
   try {
     db.transaction(() => {
-      db.prepare('UPDATE users SET phone = ?, nickname = ?, member_tier_id = ?, member_level = ?, member_discount = ?, member_expires_at = ?, points = ? WHERE id = ?').run(phone, nickname, tierId, tier?.name || '普通会员', tier?.discount || 1, expiry instanceof Date ? expiry.toISOString() : expiry, points, current.id);
+      db.prepare('UPDATE users SET phone = ?, nickname = ?, member_tier_id = ?, member_pending_tier_id = ?, member_level = ?, member_discount = ?, member_expires_at = ?, member_cycle_started_at = ?, points = ?, admin_note = ?, birthday_type = ?, birthday_date = ? WHERE id = ?').run(phone || null, nickname, tierId, manualTierSelection ? null : current.member_pending_tier_id, tier?.name || '普通会员', tier?.discount || 1, expiry instanceof Date ? expiry.toISOString() : expiry, manualTierSelection ? new Date().toISOString() : current.member_cycle_started_at, points, adminNote, birthday.type || null, birthday.date || null, current.id);
       if (points !== current.points) db.prepare('INSERT INTO points_ledger (user_id, points, reason) VALUES (?, ?, ?)').run(current.id, points - current.points, `后台调整：${String(b.reason || '').trim()}`);
       if (stored != null || bonus != null) {
         db.prepare('INSERT OR IGNORE INTO wallet_accounts (user_id) VALUES (?)').run(current.id);
@@ -801,8 +924,8 @@ router.delete('/admin/members/:id', (req, res) => {
     res.status(409).json({ message: error.code === 'SQLITE_CONSTRAINT_FOREIGNKEY' ? '该会员存在关联数据，无法删除' : error.message });
   }
 });
-const ownProfile = req => db.prepare('SELECT id, nickname, phone, avatar_url, member_level, points, member_expires_at FROM users WHERE id = ?').get(currentUserId(req));
-router.get('/me', (req, res) => { const row = ownProfile(req); if (!row) return res.status(404).json({ message: '用户不存在' }); const wallet = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(row.id) || { stored_cents: 0, bonus_cents: 0 }; res.json({ user: publicUser(row), wallet: { stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents) } }); });
+const ownProfile = req => db.prepare('SELECT id, nickname, phone, avatar_url, member_level, member_tier_id, member_pending_tier_id, points, member_expires_at, birthday_type, birthday_date FROM users WHERE id = ?').get(currentUserId(req));
+router.get('/me', (req, res) => { const row = ownProfile(req); if (!row) return res.status(404).json({ message: '用户不存在' }); const synced = syncMembership(row.id); const wallet = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(row.id) || { stored_cents: 0, bonus_cents: 0 }; res.json({ user: publicUser(synced), wallet: { stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents) }, membership: membershipProgress(row.id) }); });
 router.post('/me/avatar', express.raw({ type: ['application/octet-stream', 'multipart/form-data'], limit: '3mb' }), async (req, res) => {
   let bytes = req.body;
   const contentType = req.header('content-type') || '';
@@ -827,10 +950,21 @@ router.post('/me/avatar', express.raw({ type: ['application/octet-stream', 'mult
 router.patch('/me/profile', (req, res) => {
   const user = ownProfile(req);
   if (!user) return res.status(404).json({ message: '用户不存在' });
-  const nickname = String(req.body?.nickname || '').trim();
-  const avatarUrl = String(req.body?.avatarUrl || '').trim();
-  if (!nickname || nickname === '微信用户' || nickname.length > 50 || !isAllowedImageUrl(avatarUrl)) return res.status(400).json({ message: '请填写昵称并选择有效头像' });
+  const body = req.body || {};
+  const hasIdentity = Object.hasOwn(body, 'nickname') || Object.hasOwn(body, 'avatarUrl');
+  const nickname = hasIdentity ? String(body.nickname || '').trim() : user.nickname;
+  const avatarUrl = hasIdentity ? String(body.avatarUrl || '').trim() : user.avatar_url;
+  if (hasIdentity && (!nickname || nickname === '微信用户' || nickname.length > 50 || !isAllowedImageUrl(avatarUrl))) return res.status(400).json({ message: '请填写昵称并选择有效头像' });
   db.prepare('UPDATE users SET nickname = ?, avatar_url = ? WHERE id = ?').run(nickname, avatarUrl, user.id);
+  res.json({ user: publicUser(ownProfile(req)) });
+});
+router.patch('/me/birthday', (req, res) => {
+  const user = ownProfile(req);
+  if (!user) return res.status(404).json({ message: '用户不存在' });
+  if (user.birthday_type && user.birthday_date) return res.status(409).json({ message: '生日已经设置，不能重复修改；如需调整请联系管理员' });
+  const birthday = normalizeBirthday(req.body?.birthdayType, req.body?.birthdayDate);
+  if (!birthday?.type || !birthday.date) return res.status(400).json({ message: '请选择生日类型和日期' });
+  db.prepare('UPDATE users SET birthday_type = ?, birthday_date = ? WHERE id = ?').run(birthday.type, birthday.date, user.id);
   res.json({ user: publicUser(ownProfile(req)) });
 });
 router.post('/me/phone', async (req, res) => {
@@ -887,12 +1021,19 @@ router.post('/rewards/:id/redeem', requireWechatUser, (req, res) => {
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
 router.get('/me/orders', (req, res) => {
-  const orders = db.prepare('SELECT * FROM orders WHERE payer_user_id = ? ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => {
+  const orders = db.prepare('SELECT * FROM orders WHERE payer_user_id = ? AND hidden_by_user = 0 ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => {
     const paymentExpireAt = orderExpiryAt(row);
     const isExpired = Boolean(row.payment_status === 'pending' && paymentExpireAt && new Date(paymentExpireAt) <= new Date());
-    return { ...row, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending' };
+    return { ...row, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending', canHide: row.payment_status !== 'pending' };
   });
   res.json({ orders });
+});
+router.post('/me/orders/:orderNo/hide', (req, res) => {
+  const order = db.prepare('SELECT id, payment_status FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, currentUserId(req));
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  if (order.payment_status === 'pending') return res.status(409).json({ message: '待支付订单不能隐藏，请先支付或取消' });
+  db.prepare('UPDATE orders SET hidden_by_user = 1 WHERE id = ?').run(order.id);
+  res.json({ ok: true });
 });
 function storageView(row) {
   const remainingDays = Math.max(0, Math.ceil((new Date(row.expires_at).getTime() - Date.now()) / 86400000));
@@ -902,7 +1043,7 @@ function storageView(row) {
 router.get('/me/storage', (req, res) => res.json({ records: db.prepare("SELECT s.*, p.image_url, p.color FROM storage_records s LEFT JOIN products p ON p.id = s.product_id WHERE s.user_id = ? AND s.status = 'stored' AND s.quantity > 0 ORDER BY s.id DESC").all(currentUserId(req)).map(storageView) }));
 router.get('/admin/inventory', (_req, res) => res.json({ products: adminRows('SELECT id, name, stock, status, allow_bonus FROM products ORDER BY stock, id').map(row => ({ ...row, warning: row.stock <= 20 })) }));
 router.post('/admin/inventory/:productId/adjust', (req, res) => { const product = db.prepare('SELECT stock FROM products WHERE id = ?').get(req.params.productId); if (!product) return res.status(404).json({ message: '商品不存在' }); const change = Number(req.body.change); if (!Number.isInteger(change) || change === 0 || !String(req.body.reason || '').trim()) return res.status(400).json({ message: '请输入非零变动数量和原因' }); const after = product.stock + change; if (after < 0) return res.status(400).json({ message: '库存不能小于零' }); db.transaction(() => { db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(after, req.params.productId); db.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason) VALUES (?, ?, ?, ?)').run(req.params.productId, change, after, req.body.reason.trim()); audit(req, '调整库存', `${req.params.productId}: ${change}, ${req.body.reason.trim()}`); })(); res.json({ ok: true, stock: after }); });
-router.get('/admin/losses', (req, res) => res.json({ records: db.prepare('SELECT l.*, p.name AS product_name, a.display_name AS operator FROM stock_losses l JOIN products p ON p.id = l.product_id JOIN staff_accounts a ON a.id = l.operator_id ORDER BY l.id DESC LIMIT 200').all().map(row => { const record = { ...row }; delete record.cost_cents; if (req.staff.role === 'super') record.cost = centsToMoney(row.cost_cents); return record; }) }));
+router.get('/admin/losses', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM stock_losses').get().value; return res.json({ records: db.prepare('SELECT l.*, p.name AS product_name, a.display_name AS operator FROM stock_losses l JOIN products p ON p.id = l.product_id JOIN staff_accounts a ON a.id = l.operator_id ORDER BY l.id DESC LIMIT ? OFFSET ?').all(pageSize, offset).map(row => { const record = { ...row }; delete record.cost_cents; if (req.staff.role === 'super') record.cost = centsToMoney(row.cost_cents); return record; }), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/losses', (req, res) => {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(req.body?.productId);
   const quantity = Number(req.body?.quantity), type = req.body?.type, reason = String(req.body?.reason || '').trim();
@@ -913,9 +1054,16 @@ router.post('/admin/losses', (req, res) => {
 router.get('/admin/storage', (req, res) => {
   const phone = String(req.query.phone || '').trim();
   if (phone && !/^\d{1,11}$/.test(phone)) return res.status(400).json({ message: '请输入手机号数字' });
-  const all = adminRows("SELECT s.*, u.nickname, u.phone FROM storage_records s JOIN users u ON u.id = s.user_id WHERE s.status = 'stored' AND s.quantity > 0 ORDER BY s.id DESC").map(row => ({ ...row, expired: new Date(row.expires_at) < new Date() }));
-  const movements = adminRows('SELECT m.*, s.product_name, u.nickname, u.phone FROM storage_movements m JOIN storage_records s ON s.id = m.record_id JOIN users u ON u.id = s.user_id ORDER BY m.id DESC LIMIT 100');
-  res.json({ records: phone ? all.filter(r => r.phone?.startsWith(phone)) : all, movements: phone ? movements.filter(r => r.phone?.startsWith(phone)) : movements, stats: { remaining: all.filter(r => r.status === 'stored' && !r.expired).reduce((n, r) => n + r.quantity, 0), expiring: all.filter(r => r.status === 'stored' && r.quantity > 0 && !r.expired && new Date(r.expires_at) < new Date(Date.now() + 7 * 86400000)).length } });
+  const { page, pageSize, offset } = parsePagination(req);
+  const where = phone ? ' AND u.phone LIKE ?' : '';
+  const args = phone ? [`${phone}%`] : [];
+  const total = db.prepare(`SELECT COUNT(*) AS value FROM storage_records s JOIN users u ON u.id = s.user_id WHERE s.status = 'stored' AND s.quantity > 0${where}`).get(...args).value;
+  const all = db.prepare(`SELECT s.*, u.nickname, u.phone FROM storage_records s JOIN users u ON u.id = s.user_id WHERE s.status = 'stored' AND s.quantity > 0${where} ORDER BY s.id DESC LIMIT ? OFFSET ?`).all(...args, pageSize, offset).map(row => ({ ...row, expired: new Date(row.expires_at) < new Date() }));
+  const statsRows = db.prepare("SELECT quantity, expires_at FROM storage_records WHERE status = 'stored' AND quantity > 0").all();
+  const movementPagination = parsePagination(req, 'movements');
+  const movements = db.prepare(`SELECT m.*, s.product_name, u.nickname, u.phone FROM storage_movements m JOIN storage_records s ON s.id = m.record_id JOIN users u ON u.id = s.user_id WHERE 1 = 1${where} ORDER BY m.id DESC LIMIT ? OFFSET ?`).all(...args, movementPagination.pageSize, movementPagination.offset);
+  const movementTotal = db.prepare(`SELECT COUNT(*) AS value FROM storage_movements m JOIN storage_records s ON s.id = m.record_id JOIN users u ON u.id = s.user_id WHERE 1 = 1${where}`).get(...args).value;
+  res.json({ records: all, movements, stats: { remaining: statsRows.filter(r => new Date(r.expires_at) >= new Date()).reduce((n, r) => n + r.quantity, 0), expiring: statsRows.filter(r => new Date(r.expires_at) >= new Date() && new Date(r.expires_at) < new Date(Date.now() + 7 * 86400000)).length }, pagination: paginationView(page, pageSize, total), movementsPagination: paginationView(movementPagination.page, movementPagination.pageSize, movementTotal) });
 });
 router.post('/admin/storage', (req, res) => {
   const { productId, note = '' } = req.body || {};
@@ -948,11 +1096,11 @@ router.post('/admin/storage/:id/withdraw', (req, res) => {
   res.json({ record: db.prepare('SELECT * FROM storage_records WHERE id = ?').get(record.id) });
 });
 
-router.get('/admin/group-buy', (_req, res) => res.json({ records: adminRows('SELECT * FROM group_buy_records ORDER BY id DESC') }));
+router.get('/admin/group-buy', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM group_buy_records').get().value; return res.json({ records: db.prepare('SELECT * FROM group_buy_records ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/group-buy/verify', (req, res) => { if (!req.body.platform || !req.body.voucherNo) return res.status(400).json({ message: '平台和券码不能为空' }); const existing = db.prepare('SELECT id FROM group_buy_records WHERE platform = ? AND voucher_no = ?').get(req.body.platform, req.body.voucherNo); if (existing) return res.status(409).json({ message: '该券码已核销' }); const r = db.prepare('INSERT INTO group_buy_records (store_id, platform, voucher_no, package_name, amount_cents, verified_by) VALUES (1, ?, ?, ?, ?, ?)').run(req.body.platform, req.body.voucherNo, req.body.packageName || '团购套餐', Math.round(Number(req.body.amount || 0) * 100), req.staff.username); audit(req, '录入团购券', `${req.body.platform}: ${req.body.voucherNo}`); res.status(201).json({ record: db.prepare('SELECT * FROM group_buy_records WHERE id = ?').get(r.lastInsertRowid), message: '核销记录已保存，真实平台查券接口需配置商户授权' }); });
 
-router.get('/admin/wallet-packages', (_req, res) => { const balance = db.prepare('SELECT COALESCE(SUM(stored_cents),0) AS stored, COALESCE(SUM(bonus_cents),0) AS bonus FROM wallet_accounts').get(); res.json({ packages: adminRows('SELECT * FROM wallet_packages ORDER BY id DESC').map(row => ({ ...row, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })), outstanding: { stored: centsToMoney(balance.stored), bonus: centsToMoney(balance.bonus) } }); });
-router.get('/admin/rewards', (_req, res) => res.json({ rewards: db.prepare(`${rewardQuery} ORDER BY r.id DESC`).all().map(rewardView), redemptions: db.prepare('SELECT rr.*, u.nickname, u.phone FROM reward_redemptions rr JOIN users u ON u.id = rr.user_id ORDER BY rr.id DESC LIMIT 100').all() }));
+router.get('/admin/wallet-packages', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const balance = db.prepare('SELECT COALESCE(SUM(stored_cents),0) AS stored, COALESCE(SUM(bonus_cents),0) AS bonus FROM wallet_accounts').get(); const total = db.prepare('SELECT COUNT(*) AS value FROM wallet_packages').get().value; return res.json({ packages: db.prepare('SELECT * FROM wallet_packages ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset).map(row => ({ ...row, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })), outstanding: { stored: centsToMoney(balance.stored), bonus: centsToMoney(balance.bonus) }, pagination: paginationView(page, pageSize, total) }); });
+router.get('/admin/rewards', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const redemptionPage = parsePagination(req, 'redemptions'); const total = db.prepare('SELECT COUNT(*) AS value FROM reward_items').get().value; const redemptionTotal = db.prepare('SELECT COUNT(*) AS value FROM reward_redemptions').get().value; return res.json({ rewards: db.prepare(`${rewardQuery} ORDER BY r.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset).map(rewardView), redemptions: db.prepare('SELECT rr.*, u.nickname, u.phone FROM reward_redemptions rr JOIN users u ON u.id = rr.user_id ORDER BY rr.id DESC LIMIT ? OFFSET ?').all(redemptionPage.pageSize, redemptionPage.offset), pagination: paginationView(page, pageSize, total), redemptionsPagination: paginationView(redemptionPage.page, redemptionPage.pageSize, redemptionTotal) }); });
 router.post('/admin/rewards/redemptions/:id/fulfill', (req, res) => {
   const record = db.prepare('SELECT * FROM reward_redemptions WHERE id = ?').get(req.params.id);
   if (!record) return res.status(404).json({ message: '兑换记录不存在' });
@@ -1002,17 +1150,24 @@ router.post('/admin/wallet-packages', (req, res) => { const r = db.prepare('INSE
 router.get('/admin/member-tiers', (_req, res) => res.json({ tiers: tiers() }));
 const tierInput = (body, current = {}) => {
   const name = String(body.name ?? current.name ?? '').trim(), upgradeType = body.upgradeType ?? current.upgrade_type ?? 'spend';
-  const thresholdValue = Number(body.threshold ?? centsToMoney(current.threshold_cents || 0));
-  const threshold = Math.round(thresholdValue * 100);
+  const moneyCents = (value, fallback = 0) => {
+    const number = Number(value ?? fallback);
+    return Number.isFinite(number) ? Math.round(number * 100) : NaN;
+  };
+  const legacyThreshold = moneyCents(body.threshold, centsToMoney(current.threshold_cents || 0));
+  const storedThreshold = moneyCents(body.storedThreshold, centsToMoney(current.stored_threshold_cents || (upgradeType === 'recharge' ? current.threshold_cents : 0)));
+  const spendThreshold = moneyCents(body.spendThreshold, centsToMoney(current.spend_threshold_cents || (['spend', 'monthly'].includes(upgradeType) ? current.threshold_cents : 0)));
+  const threshold = spendThreshold || storedThreshold || legacyThreshold;
   const discount = Number(body.discount ?? current.discount ?? 1), pointsRate = Number(body.pointsRate ?? current.points_rate ?? 1);
-  const duration = Number(body.durationDays ?? current.duration_days ?? 0), status = body.status ?? current.status ?? 'active';
-  if (!name || name.length > 30 || !['spend','recharge','monthly'].includes(upgradeType) || !Number.isSafeInteger(threshold) || threshold <= 0 || !Number.isFinite(discount) || discount <= 0 || discount > 1 || !Number.isFinite(pointsRate) || pointsRate < 0 || pointsRate > 100 || !Number.isInteger(duration) || duration < 0 || duration > 3650 || !['active','inactive'].includes(status)) return null;
-  return { name, upgradeType, threshold, discount, pointsRate, duration, status };
+  const duration = Number(body.durationDays ?? current.duration_days ?? 0), sort = Number(body.sort ?? current.sort ?? 0), conditionMode = body.conditionMode ?? current.condition_mode ?? 'any', status = body.status ?? current.status ?? 'active';
+  const badgeColor = String(body.badgeColor ?? current.badge_color ?? '#C77F52').trim();
+  if (!name || name.length > 30 || !['spend','recharge','monthly'].includes(upgradeType) || !Number.isSafeInteger(threshold) || threshold <= 0 || !Number.isSafeInteger(storedThreshold) || storedThreshold < 0 || !Number.isSafeInteger(spendThreshold) || spendThreshold < 0 || (storedThreshold <= 0 && spendThreshold <= 0) || !['any','all'].includes(conditionMode) || !validBadgeColor(badgeColor) || !Number.isFinite(discount) || discount <= 0 || discount > 1 || !Number.isFinite(pointsRate) || pointsRate < 0 || pointsRate > 100 || !Number.isInteger(duration) || duration < 0 || duration > 3650 || !Number.isInteger(sort) || sort < 0 || sort > 9999 || !['active','inactive'].includes(status)) return null;
+  return { name, upgradeType, threshold, storedThreshold, spendThreshold, conditionMode, badgeColor, discount, pointsRate, duration, sort, status };
 };
 router.post('/admin/member-tiers', (req, res) => {
   const t = tierInput(req.body || {});
   if (!t) return res.status(400).json({ message: '等级名称、升级条件或优惠无效' });
-  const id = db.prepare('INSERT INTO member_tiers (store_id, name, upgrade_type, threshold_cents, discount, points_rate, duration_days, status) VALUES (1, ?, ?, ?, ?, ?, ?, ?)').run(t.name, t.upgradeType, t.threshold, t.discount, t.pointsRate, t.duration, t.status).lastInsertRowid;
+  const id = db.prepare('INSERT INTO member_tiers (store_id, name, upgrade_type, threshold_cents, stored_threshold_cents, spend_threshold_cents, condition_mode, badge_color, discount, points_rate, duration_days, sort, status) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(t.name, t.upgradeType, t.threshold, t.storedThreshold, t.spendThreshold, t.conditionMode, t.badgeColor, t.discount, t.pointsRate, t.duration, t.sort, t.status).lastInsertRowid;
   audit(req, '新增会员等级', t.name); res.status(201).json({ tier: db.prepare('SELECT * FROM member_tiers WHERE id = ?').get(id) });
 });
 router.patch('/admin/member-tiers/:id', (req, res) => {
@@ -1021,7 +1176,7 @@ router.patch('/admin/member-tiers/:id', (req, res) => {
   const t = tierInput(req.body || {}, current);
   if (!t) return res.status(400).json({ message: '等级名称、升级条件或优惠无效' });
   db.transaction(() => {
-    db.prepare('UPDATE member_tiers SET name = ?, upgrade_type = ?, threshold_cents = ?, discount = ?, points_rate = ?, duration_days = ?, status = ? WHERE id = ?').run(t.name, t.upgradeType, t.threshold, t.discount, t.pointsRate, t.duration, t.status, current.id);
+    db.prepare('UPDATE member_tiers SET name = ?, upgrade_type = ?, threshold_cents = ?, stored_threshold_cents = ?, spend_threshold_cents = ?, condition_mode = ?, badge_color = ?, discount = ?, points_rate = ?, duration_days = ?, sort = ?, status = ? WHERE id = ?').run(t.name, t.upgradeType, t.threshold, t.storedThreshold, t.spendThreshold, t.conditionMode, t.badgeColor, t.discount, t.pointsRate, t.duration, t.sort, t.status, current.id);
     db.prepare('UPDATE users SET member_level = ?, member_discount = ? WHERE member_tier_id = ?').run(t.name, t.discount, current.id);
     audit(req, '修改会员等级', `${current.name} -> ${t.name}`);
   })();
@@ -1039,7 +1194,9 @@ router.get('/admin/reports', (req, res) => {
   const balance = db.prepare('SELECT COALESCE(SUM(stored_cents),0) AS stored, COALESCE(SUM(bonus_cents),0) AS bonus FROM wallet_accounts').get();
   const recharge = db.prepare("SELECT COALESCE(SUM(pay_cents),0) AS amount FROM wallet_transactions WHERE type = 'recharge'").get().amount;
   const daily = db.prepare(`SELECT days.day, COALESCE(o.orders,0) AS orders, COALESCE(o.revenue,0) AS revenue, COALESCE(o.order_cost,0) AS order_cost, COALESCE(o.offline,0) AS offline, COALESCE(r.recharge,0) AS recharge, COALESCE(l.loss_cost,0) AS loss_cost FROM (WITH RECURSIVE dates(day) AS (SELECT date(?) UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date(?)) SELECT day FROM dates) days LEFT JOIN (SELECT date(paid_at, 'localtime') AS day, COUNT(*) AS orders, SUM(payable_amount_cents - bonus_paid_cents) AS revenue, SUM((SELECT COALESCE(SUM(quantity * cost_price_cents),0) FROM order_items WHERE order_id = orders.id)) AS order_cost, SUM(CASE WHEN payment_method = 'offline' THEN offline_paid_cents ELSE 0 END) AS offline FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(paid_at, 'localtime')) o ON o.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(pay_cents) AS recharge FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) r ON r.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(cost_cents) AS loss_cost FROM stock_losses WHERE date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) l ON l.day = days.day ORDER BY days.day DESC`).all(start, end, start, end, start, end, start, end).map(row => ({ day: row.day, orders: row.orders, revenue: centsToMoney(row.revenue), profit: centsToMoney(row.revenue - row.order_cost - row.loss_cost), recharge: centsToMoney(row.recharge), offline: centsToMoney(row.offline), orderCost: centsToMoney(row.order_cost), lossCost: centsToMoney(row.loss_cost) }));
-  res.json({ dateRange: { start, end }, today: daily.find(row => row.day === today) || daily[0], ...(req.staff.role === 'super' ? { totals: { revenue: centsToMoney(totals.revenue), bonusUsed: centsToMoney(totals.bonus), storedUsed: centsToMoney(totals.stored), wechatReceived: centsToMoney(totals.wechat), offlineReceived: centsToMoney(totals.offline), rechargeReceived: centsToMoney(recharge), outstandingStored: centsToMoney(balance.stored), outstandingBonus: centsToMoney(balance.bonus), orderCost: centsToMoney(totals.cost), lossCost: centsToMoney(losses), profit: centsToMoney(totals.revenue - totals.cost - losses) } } : {}), daily, byProduct: adminRows("SELECT product_name, SUM(quantity) AS quantity, SUM(paid_price_cents * quantity) AS amount FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.payment_status = 'paid' GROUP BY product_id ORDER BY quantity DESC LIMIT 20").map(row => ({ ...row, amount: centsToMoney(row.amount) })) });
+  const dailyPage = parsePagination(req, 'daily');
+  const dailyRows = daily.slice(dailyPage.offset, dailyPage.offset + dailyPage.pageSize);
+  res.json({ dateRange: { start, end }, today: daily.find(row => row.day === today) || daily[0], ...(req.staff.role === 'super' ? { totals: { revenue: centsToMoney(totals.revenue), bonusUsed: centsToMoney(totals.bonus), storedUsed: centsToMoney(totals.stored), wechatReceived: centsToMoney(totals.wechat), offlineReceived: centsToMoney(totals.offline), rechargeReceived: centsToMoney(recharge), outstandingStored: centsToMoney(balance.stored), outstandingBonus: centsToMoney(balance.bonus), orderCost: centsToMoney(totals.cost), lossCost: centsToMoney(losses), profit: centsToMoney(totals.revenue - totals.cost - losses) } } : {}), daily, dailyRows, dailyPagination: paginationView(dailyPage.page, dailyPage.pageSize, daily.length), byProduct: adminRows("SELECT product_name, SUM(quantity) AS quantity, SUM(paid_price_cents * quantity) AS amount FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.payment_status = 'paid' GROUP BY product_id ORDER BY quantity DESC LIMIT 20").map(row => ({ ...row, amount: centsToMoney(row.amount) })) });
 });
 
 router.get('/admin/reports/export', (req, res) => {

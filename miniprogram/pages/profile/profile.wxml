@@ -1,5 +1,5 @@
 <view class="page">
-  <view class="heading"><text class="eyebrow">ECHO HX LIVE BAR</text><text class="title">资料设置</text><text class="intro">登录和点单不受资料设置影响。头像、昵称和手机号仅在您主动操作后保存到本店会员档案。</text></view>
+  <view class="heading"><text class="eyebrow">ECHO 回响 LIVE BAR</text><text class="title">资料设置</text><text class="intro">登录和点单不受资料设置影响。头像、昵称和手机号仅在您主动操作后保存到本店会员档案。</text></view>
   <view class="fields">
     <view class="field-label">会员头像</view>
     <button class="avatar-picker" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar" disabled="{{busy}}">
@@ -10,6 +10,20 @@
     <view class="field-label">会员昵称</view>
     <input class="nickname" type="nickname" value="{{nickname}}" maxlength="50" placeholder="输入您的昵称" bindinput="onNicknameInput" disabled="{{busy}}"/>
     <button class="primary" bindtap="saveProfile" loading="{{busy}}" disabled="{{busy}}">{{profileSaved ? '更新头像和昵称' : '保存头像和昵称'}}</button>
+  </view>
+  <view class="birthday-section">
+    <view class="field-label">生日（可选）</view>
+    <view wx:if="{{birthdayLocked}}" class="birthday-locked"><text>{{birthdayType === 'lunar' ? '农历' : '阳历'}} {{birthdayDate}}</text><text class="birthday-hint">生日已设置，如需调整请联系管理员。</text></view>
+    <block wx:else>
+      <picker mode="selector" range="{{birthdayTypes}}" value="{{birthdayTypeIndex}}" bindchange="onBirthdayTypeChange">
+        <view class="picker-value">{{birthdayTypes[birthdayTypeIndex]}} <text>⌄</text></view>
+      </picker>
+      <view wx:if="{{birthdayType === 'solar'}}" class="birthday-picker-row"><picker mode="date" fields="day" value="{{solarBirthday}}" start="1900-01-01" end="2100-12-31" bindchange="onSolarBirthdayChange"><view class="picker-value">{{birthdayDate}} <text>⌄</text></view></picker></view>
+      <view wx:if="{{birthdayType === 'lunar'}}" class="birthday-picker-row lunar-row"><picker mode="selector" range="{{lunarMonths}}" value="{{lunarMonthIndex}}" bindchange="onLunarMonthChange"><view class="picker-value">{{lunarMonth}} 月 <text>⌄</text></view></picker><picker mode="selector" range="{{lunarDays}}" value="{{lunarDayIndex}}" bindchange="onLunarDayChange"><view class="picker-value">{{lunarDay}} 日 <text>⌄</text></view></picker></view>
+      <text wx:if="{{birthdayType === 'lunar'}}" class="birthday-hint">闰月生日按对应的普通月份提醒。</text>
+      <text wx:if="{{birthdayType === 'solar' && birthdayDate === '02-29'}}" class="birthday-hint">2 月 29 日仅在闰年提醒。</text>
+      <view class="birthday-actions"><button class="primary birthday-save" bindtap="saveBirthday" loading="{{busy}}" disabled="{{busy}}">保存生日</button></view>
+    </block>
   </view>
   <view class="phone-section">
     <view class="field-label">会员手机号</view>

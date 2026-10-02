@@ -69,11 +69,18 @@ export async function getUnlimitedMiniProgramCode(scene) {
     if (error) throw new Error(`微信小程序码生成失败（错误码 ${error.errcode ?? '未知'}）：${error.errmsg || `HTTP ${response.status}`}`);
   }
   const isPng = bytes.length >= 100 && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
-  if (!response.ok || !isPng) {
+  const isJpeg = bytes.length >= 100 && bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'));
+  if (!response.ok || (!isPng && !isJpeg)) {
     const contentType = response.headers.get('content-type') || '未知';
     const preview = bytes.toString('utf8').replace(/\s+/g, ' ').slice(0, 240);
     const detail = preview ? `微信返回内容：${preview}` : `响应类型：${contentType}，响应长度：${bytes.length} 字节`;
     throw new Error(`微信小程序码返回异常：HTTP ${response.status}，环境版本 ${envVersion}，页面 ${page}，${detail}。请检查 AppID、AppSecret、对应版本是否已上传，以及页面路径是否存在`);
   }
   return bytes;
+}
+
+export function miniProgramCodeContentType(bytes) {
+  if (Buffer.isBuffer(bytes) && bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) return 'image/png';
+  if (Buffer.isBuffer(bytes) && bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex'))) return 'image/jpeg';
+  return 'application/octet-stream';
 }

@@ -1,0 +1,20 @@
+<view class="page">
+  <view class="current-card">
+    <view class="current-heading"><view><text class="eyebrow">MEMBER LEVEL</text><text class="current-name">{{user.memberLevel || '普通会员'}}</text></view><text class="current-badge" style="background: {{user.memberColor || '#C77F52'}}">{{user.memberLevel || '普通会员'}}</text></view>
+    <view wx:if="{{membership.targetTierId}}" class="progress-block">
+      <view class="progress-title"><text>升级进度</text><text>{{progressPercent}}%</text></view>
+      <progress percent="{{progressPercent}}" activeColor="#C77F52" backgroundColor="#e6ece8" stroke-width="8" />
+      <view class="progress-values"><text>储值余额 ¥{{membership.currentStored || '0.00'}}</text><text>周期消费 ¥{{membership.currentSpend || '0.00'}}</text></view>
+      <text class="target-hint">下一等级：{{membership.targetTierName || '目标等级'}} · {{membership.conditionMode === 'all' ? '储值和消费需同时达标' : '储值或消费任一达标'}}</text>
+      <view class="condition-list"><text wx:if="{{membership.conditions.stored}}">储值余额达到 ¥{{membership.conditions.stored}}</text><text wx:if="{{membership.conditions.spend}}">周期消费达到 ¥{{membership.conditions.spend}}</text></view>
+    </view>
+    <text wx:else class="ordinary-hint">当前已是最高等级，继续保持会员权益。</text>
+  </view>
+  <view class="section-title"><text>等级权益与升级条件</text><text>等级按排序从低到高</text></view>
+  <view wx:for="{{membership.tiers}}" wx:key="id" class="tier-card">
+    <view class="tier-head"><view class="tier-title"><text class="tier-dot" style="background: {{item.badgeColor}}"></text><text>{{item.name}}</text><text wx:if="{{item.id === user.memberTierId}}" class="current-label">当前等级</text></view><text class="tier-discount">{{item.discountLabel}}</text></view>
+    <view class="tier-meta"><text>积分 {{item.pointsRate}} 倍</text><text wx:if="{{item.durationDays}}">有效期 {{item.durationDays}} 天</text><text wx:else>长期有效</text></view>
+    <view class="tier-condition"><text wx:if="{{item.storedThreshold}}">储值余额 ≥ ¥{{item.storedThreshold}}</text><text wx:if="{{item.spendThreshold}}">累计消费 ≥ ¥{{item.spendThreshold}}</text><text wx:if="{{item.storedThreshold && item.spendThreshold}}">{{item.conditionMode === 'all' ? '需同时满足' : '满足任一即可'}}</text></view>
+  </view>
+  <view wx:if="{{!membership.tiers.length}}" class="empty">暂无可用会员等级</view>
+</view>

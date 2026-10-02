@@ -50,10 +50,19 @@ ensureColumn('users', 'phone', 'TEXT');
 ensureColumn('users', 'wechat_openid', 'TEXT');
 ensureColumn('users', 'avatar_url', 'TEXT');
 ensureColumn('users', 'member_tier_id', 'INTEGER REFERENCES member_tiers(id)');
+ensureColumn('users', 'member_cycle_started_at', 'TEXT');
+ensureColumn('users', 'member_pending_tier_id', 'INTEGER REFERENCES member_tiers(id)');
+ensureColumn('users', 'admin_note', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('users', 'birthday_type', 'TEXT');
+ensureColumn('users', 'birthday_date', 'TEXT');
 ensureColumn('member_tiers', 'upgrade_type', "TEXT NOT NULL DEFAULT 'spend'");
 ensureColumn('member_tiers', 'threshold_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('member_tiers', 'duration_days', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('member_tiers', 'sort', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('member_tiers', 'stored_threshold_cents', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('member_tiers', 'spend_threshold_cents', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('member_tiers', 'condition_mode', "TEXT NOT NULL DEFAULT 'any'");
+ensureColumn('member_tiers', 'badge_color', "TEXT NOT NULL DEFAULT '#C77F52'");
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_phone_unique ON users(phone) WHERE phone IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS users_wechat_unique ON users(wechat_openid) WHERE wechat_openid IS NOT NULL;');
 for (const account of db.prepare('SELECT id, permissions FROM staff_accounts WHERE role != ?').all('super')) {
   const permissions = JSON.parse(account.permissions);
@@ -76,6 +85,7 @@ ensureColumn('orders', 'wechat_prepay_id', 'TEXT');
 ensureColumn('orders', 'wechat_transaction_id', 'TEXT');
 ensureColumn('orders', 'payment_expire_at', 'TEXT');
 ensureColumn('orders', 'payment_error', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('orders', 'hidden_by_user', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('wallet_accounts', 'stored_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('wallet_accounts', 'bonus_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 db.exec(`
@@ -135,6 +145,8 @@ const seed = db.transaction(() => {
 });
 seed();
 db.prepare("UPDATE member_tiers SET threshold_cents = COALESCE((SELECT spend_target_cents FROM member_rules WHERE store_id = member_tiers.store_id), 100000) WHERE threshold_cents = 0 AND upgrade_type = 'spend'").run();
+db.prepare("UPDATE member_tiers SET spend_threshold_cents = threshold_cents WHERE spend_threshold_cents = 0 AND upgrade_type IN ('spend', 'monthly') AND threshold_cents > 0").run();
+db.prepare("UPDATE member_tiers SET stored_threshold_cents = threshold_cents WHERE stored_threshold_cents = 0 AND upgrade_type = 'recharge' AND threshold_cents > 0").run();
 db.prepare("UPDATE users SET member_tier_id = (SELECT id FROM member_tiers WHERE name = users.member_level AND status = 'active' ORDER BY id LIMIT 1) WHERE member_tier_id IS NULL AND member_level != '普通会员'").run();
 
 export function centsToMoney(cents) { return Number((cents / 100).toFixed(2)); }
