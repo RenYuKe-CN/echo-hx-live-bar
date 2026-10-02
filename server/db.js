@@ -3,12 +3,16 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 
-const dataDir = path.resolve(process.env.DATA_DIR || 'data');
+export const dataDir = path.resolve(process.env.DATA_DIR || 'data');
 fs.mkdirSync(dataDir, { recursive: true });
 
-export const db = new Database(path.join(dataDir, 'echo-hx.sqlite'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+export const databasePath = path.join(dataDir, 'echo-hx.sqlite');
+export let db = new Database(databasePath);
+const configureDatabase = database => {
+  database.pragma('journal_mode = WAL');
+  database.pragma('foreign_keys = ON');
+};
+configureDatabase(db);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS stores (id INTEGER PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -39,7 +43,17 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS reward_items (id INTEGER PRIMARY KEY, product_id INTEGER REFERENCES products(id), name TEXT NOT NULL, image_url TEXT NOT NULL DEFAULT '', points INTEGER NOT NULL CHECK(points > 0), stock INTEGER NOT NULL DEFAULT 0 CHECK(stock >= 0), status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
   CREATE TABLE IF NOT EXISTS reward_redemptions (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), reward_id INTEGER NOT NULL REFERENCES reward_items(id), reward_name TEXT NOT NULL, points INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
   CREATE TABLE IF NOT EXISTS mini_page_settings (key TEXT PRIMARY KEY, title TEXT NOT NULL, icon TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS backup_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    frequency TEXT NOT NULL DEFAULT 'daily',
+    run_time TEXT NOT NULL DEFAULT '04:00',
+    retention_days INTEGER NOT NULL DEFAULT 30,
+    last_run_at TEXT
+  );
 `);
+
+db.prepare('INSERT OR IGNORE INTO backup_settings (id) VALUES (1)').run();
 
 // Keep the first SQLite release useful after schema upgrades as well as on a fresh install.
 const ensureColumn = (table, column, definition) => {
@@ -148,5 +162,13 @@ db.prepare("UPDATE member_tiers SET threshold_cents = COALESCE((SELECT spend_tar
 db.prepare("UPDATE member_tiers SET spend_threshold_cents = threshold_cents WHERE spend_threshold_cents = 0 AND upgrade_type IN ('spend', 'monthly') AND threshold_cents > 0").run();
 db.prepare("UPDATE member_tiers SET stored_threshold_cents = threshold_cents WHERE stored_threshold_cents = 0 AND upgrade_type = 'recharge' AND threshold_cents > 0").run();
 db.prepare("UPDATE users SET member_tier_id = (SELECT id FROM member_tiers WHERE name = users.member_level AND status = 'active' ORDER BY id LIMIT 1) WHERE member_tier_id IS NULL AND member_level != '普通会员'").run();
+
+// Restore swaps the SQLite file while the API process stays online. Reopening
+// this singleton keeps all route modules pointed at the restored database.
+export function reopenDatabase() {
+  if (db.open) db.close();
+  db = new Database(databasePath);
+  configureDatabase(db);
+}
 
 export function centsToMoney(cents) { return Number((cents / 100).toFixed(2)); }

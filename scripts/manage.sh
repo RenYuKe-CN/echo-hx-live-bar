@@ -121,7 +121,6 @@ case "${1:-help}" in
     fi
     echo "更新前版本：$(git rev-parse --short HEAD)"
     if [[ -f data/echo-hx.sqlite ]]; then
-      command -v sqlite3 >/dev/null || { echo '请先安装 sqlite3 以备份营业数据库' >&2; exit 1; }
       bash scripts/backup.sh
     fi
     git reset --hard origin/main >/dev/null

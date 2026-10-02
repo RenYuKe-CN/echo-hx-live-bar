@@ -1,14 +1,29 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import { Router } from 'express';
+import multer from 'multer';
 import { db, centsToMoney } from './db.js';
 import { getIntegrationStatus, integrationDefinitions } from './config.js';
 import { getUnlimitedMiniProgramCode, miniProgramCodeContentType } from './wechat-mini-code.js';
 import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment } from './integrations/wechat.js';
 import { localImageDir, saveUpload, readUpload, isAllowedImageUrl } from './storage.js';
 import { getBirthdayMatchInfo, normalizeBirthday } from './birthday.js';
+import { backupSettings, listBackups, createBackup, restoreBackup, backupFile } from './backup.js';
+import { beginRestore, endRestore } from './maintenance.js';
 
 export const router = Router();
+const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
+fs.mkdirSync(backupUploadDir, { recursive: true });
+const backupUpload = multer({
+  storage: multer.diskStorage({
+    destination: backupUploadDir,
+    filename: (_req, _file, callback) => callback(null, `restore-${crypto.randomUUID()}.tar.gz`)
+  }),
+  limits: { fileSize: 1024 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => callback(null, file.mimetype === 'application/gzip' || file.mimetype === 'application/x-gzip' || file.originalname.endsWith('.tar.gz'))
+});
 const PAYMENT_EXPIRY_MS = 10 * 60 * 1000;
 const orderCreatedAt = order => {
   if (!order?.created_at) return null;
@@ -32,7 +47,7 @@ const paginationView = (page, pageSize, total) => {
   const safePage = Math.min(page, totalPages);
   return { page: safePage, pageSize, total, totalPages, hasNext: safePage < totalPages, hasPrevious: safePage > 1 };
 };
-const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','reports','losses'];
+const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','reports','losses','backups'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); const supplied = crypto.scryptSync(password, salt, 64); return hash?.length === 128 && crypto.timingSafeEqual(supplied, Buffer.from(hash, 'hex')); };
 const normalizePermissions = permissions => [...new Set(permissions.map(permission => permission === 'inventory' ? 'products' : permission).filter(permission => modules.includes(permission)))];
@@ -89,6 +104,7 @@ router.use('/admin', (req, res, next) => {
   if (['session','logout','change-password'].includes(segment)) return next();
   const allowed = row.role === 'super' || JSON.parse(row.permissions).includes(section);
   if (!allowed) return res.status(403).json({ message: '当前账号没有此模块权限' });
+  if (section === 'backups' && row.role !== 'super') return res.status(403).json({ message: '仅超级管理员可管理备份与恢复' });
   if (req.method !== 'GET' && row.role !== 'super') {
     const managerOnly = ['accounts','settings','logs'];
     if (managerOnly.includes(section)) return res.status(403).json({ message: '仅超级管理员可修改此模块' });
@@ -119,6 +135,47 @@ router.patch('/admin/accounts/:id', (req, res) => {
   audit(req, '修改账号', account.username); res.json({ ok: true });
 });
 router.get('/admin/logs', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM operation_logs').get().value; return res.json({ logs: db.prepare('SELECT * FROM operation_logs ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });
+router.get('/admin/backups', (_req, res) => res.json({ settings: backupSettings(), backups: listBackups() }));
+router.post('/admin/backups', async (req, res) => {
+  try {
+    const result = await createBackup();
+    audit(req, '创建数据备份', result.name);
+    res.status(201).json({ backup: { ...result, createdAt: new Date().toISOString() } });
+  } catch (error) { res.status(409).json({ message: error.message }); }
+});
+router.patch('/admin/backups/settings', (req, res) => {
+  const body = req.body || {};
+  const enabled = body.enabled === true || body.enabled === 1 || body.enabled === '1' ? 1 : body.enabled === false || body.enabled === 0 || body.enabled === '0' ? 0 : null;
+  const frequency = String(body.frequency || '');
+  const runTime = String(body.runTime || '');
+  const retentionDays = Number(body.retentionDays);
+  if (enabled === null || !['daily', 'weekly'].includes(frequency) || !/^([01]\d|2[0-3]):[0-5]\d$/.test(runTime) || !Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 3650) {
+    return res.status(400).json({ message: '定时备份配置无效，请检查开关、频率、执行时间和保留天数' });
+  }
+  db.prepare('UPDATE backup_settings SET enabled = ?, frequency = ?, run_time = ?, retention_days = ? WHERE id = 1').run(enabled, frequency, runTime, retentionDays);
+  audit(req, '更新备份计划', `${enabled ? '开启' : '关闭'} ${frequency} ${runTime}，保留 ${retentionDays} 天`);
+  res.json({ settings: backupSettings() });
+});
+router.get('/admin/backups/:name/download', (req, res) => {
+  const file = backupFile(req.params.name);
+  if (!file) return res.status(404).json({ message: '备份文件不存在' });
+  res.download(file, req.params.name, error => { if (error && !res.headersSent) res.status(500).json({ message: '备份下载失败' }); });
+});
+router.post('/admin/backups/restore', (req, res) => {
+  backupUpload.single('backup')(req, res, async error => {
+    if (error) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ message: error.message || '备份文件上传失败' });
+    if (!req.file) return res.status(400).json({ message: '请选择 .tar.gz 备份文件' });
+    let locked = false;
+    try {
+      await beginRestore();
+      locked = true;
+      const result = await restoreBackup(req.file.path);
+      audit(req, '恢复数据备份', `${req.file.originalname}，安全备份 ${result.safetyBackup}`);
+      res.json(result);
+    } catch (restoreError) { res.status(400).json({ message: restoreError.message }); }
+    finally { if (locked) endRestore(); fs.rmSync(req.file.path, { force: true }); }
+  });
+});
 router.get('/admin/settings', (_req, res) => {
   const status = getIntegrationStatus();
   res.json({ settings: Object.entries(integrationDefinitions).map(([key, definition]) => ({ key, label: definition.label, value: definition.secret && status.values[key] ? '' : status.values[key], configured: Boolean(status.values[key]), secret: definition.secret, source: process.env[definition.env] ? 'environment' : 'admin' })), groups: status.groups, integrationsActive: false });

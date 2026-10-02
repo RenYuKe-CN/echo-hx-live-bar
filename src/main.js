@@ -199,7 +199,7 @@ const adminState = { section: 'dashboard', data: null, toast: '', dialog: null, 
 let adminRenderVersion = 0;
 let lastPendingOrderCount = null;
 let adminPolling = false;
-const adminModules = [['dashboard','经营概览'],['mini-page','小程序页面'],['pos','收银点单'],['orders','订单管理'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['settings','接口配置']];
+const adminModules = [['dashboard','经营概览'],['mini-page','小程序页面'],['pos','收银点单'],['orders','订单管理'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['settings','接口配置'],['backups','备份与恢复']];
 const adminApi = (path, options = {}) => api(`/admin${path}`, options);
 const adminTitles = Object.fromEntries(adminModules);
 const adminGroups = [
@@ -208,7 +208,7 @@ const adminGroups = [
   { title: '桌台管理', sections: ['tables'] },
   { title: '会员中心', sections: ['members', 'storage', 'wallet', 'rewards'] },
   { title: '商品与库存', sections: ['products', 'losses'] },
-  { title: '系统设置', sections: ['mini-page', 'accounts', 'logs', 'settings'] }
+  { title: '系统设置', sections: ['mini-page', 'accounts', 'logs', 'settings', 'backups'] }
 ];
 
 function organizeAdminNavigation() {
@@ -301,6 +301,7 @@ function adminListPath(section) {
   if (section === 'storage') return `/storage?phone=${encodeURIComponent(adminState.storagePhone)}&${query('storage')}&movementsPage=${adminState.pages.storageMovements || 1}&movementsPageSize=${adminState.pageSizes.storageMovements || 20}`;
   if (section === 'rewards') return `/rewards?${query('rewards')}&redemptionsPage=${adminState.pages.redemptions || 1}&redemptionsPageSize=${adminState.pageSizes.redemptions || 20}`;
   if (section === 'losses') return `/losses?${query('losses')}`;
+  if (section === 'backups') return '/backups';
   return `/${section}`;
 }
 function adminPaginationKey(section) {
@@ -372,6 +373,15 @@ function adminContent(section, data) {
   if (section === 'accounts') return `<div class="toolbar"><button class="primary-small" data-action="new-account">新增账号</button></div>${adminTable(['账号','名称','角色','状态','授权模块','操作'], data.accounts.map(a => `<tr><td>${escapeHtml(a.username)}</td><td>${escapeHtml(a.displayName)}</td><td>${{super:'超级管理员',manager:'管理员',staff:'店员'}[a.role]}</td><td>${a.status === 'active' ? '启用' : '停用'}</td><td>${a.role === 'super' ? '全部' : a.permissions.map(p => adminTitles[p]).join('、')}</td><td>${a.role === 'super' ? '-' : `<button class="table-action" data-edit-account="${a.id}">编辑权限</button>`}</td></tr>`).join(''))}${adminPagination('accounts', data.pagination)}`;
   if (section === 'logs') return `${adminTable(['时间','账号','操作','详情'], data.logs.map(l => `<tr><td>${l.created_at}</td><td>${escapeHtml(l.operator)}</td><td>${escapeHtml(l.action)}</td><td>${escapeHtml(l.detail)}</td></tr>`).join(''))}${adminPagination('logs', data.pagination)}`;
   if (section === 'settings') return `<section class="panel"><div class="panel-heading"><div><h2>第三方接口配置</h2><span>保存后会被服务端运行时读取；密钥建议通过服务器环境变量注入</span></div><button class="outline-button" id="check-integrations">检查配置</button></div><div class="integration-status">${Object.entries(data.groups || {}).map(([key, value]) => `<span class="status-chip ${value.configured ? 'ready' : 'warning'}">${key}: ${value.configured ? '配置完整' : `缺少 ${value.missing.length} 项`}</span>`).join('')}</div><form id="settings-form" class="settings-grid">${data.settings.map(s => `<label class="admin-field"><span>${escapeHtml(s.label || configLabels[s.key] || s.key)} ${s.configured ? `· 已配置（${s.source === 'environment' ? '环境变量' : '后台'}）` : ''}</span>${s.key === 'wechat_miniprogram_env_version' ? `<select name="${s.key}"><option value="release" ${s.value === 'release' || !s.value ? 'selected' : ''}>release · 正式版</option><option value="trial" ${s.value === 'trial' ? 'selected' : ''}>trial · 体验版</option><option value="develop" ${s.value === 'develop' ? 'selected' : ''}>develop · 开发版</option></select>` : `<input name="${s.key}" type="${s.secret ? 'password' : 'text'}" value="${escapeHtml(s.value)}" placeholder="${s.secret && s.configured ? '留空保持原值' : ''}">`}</label>`).join('')}<button class="primary-small">保存配置</button><p class="dialog-error"></p></form><p class="muted">完整性检查通过后，还需在微信、美团、抖音后台完成商户授权，并用真实回调地址做支付和核销联调。</p></section>`;
+  if (section === 'backups') {
+    const settings = data.settings || {};
+    const size = bytes => { const value = Number(bytes || 0); return value >= 1024 * 1024 ? `${(value / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(value / 1024))} KB`; };
+    const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-';
+    return `<section class="backup-intro"><div><span class="eyebrow">DATA SAFETY</span><h2>备份你的营业数据</h2><p>备份包含营业数据库、商品图片和会员头像；接口密钥与登录会话会自动排除。更换服务器时，安装新版本后上传备份即可恢复。</p></div><button class="primary-small" data-action="create-backup">立即备份</button></section>
+      <section class="panel backup-settings-panel"><div class="panel-heading"><div><h2>自动备份计划</h2><span>由 API 服务进程执行，宝塔 Node 项目需要保持运行</span></div><span class="backup-last-run">最近执行：${escapeHtml(date(settings.lastRunAt))}</span></div><form id="backup-settings-form" class="backup-settings-form"><label class="backup-toggle"><input type="checkbox" name="enabled" value="1" ${settings.enabled ? 'checked' : ''}><span>开启自动备份</span></label><label class="admin-field"><span>备份频率</span><select name="frequency"><option value="daily" ${settings.frequency === 'daily' ? 'selected' : ''}>每天</option><option value="weekly" ${settings.frequency === 'weekly' ? 'selected' : ''}>每周一</option></select></label><label class="admin-field"><span>执行时间</span><input type="time" name="runTime" value="${escapeHtml(settings.runTime || '04:00')}" required></label><label class="admin-field"><span>保留天数</span><input type="number" name="retentionDays" value="${Number(settings.retentionDays || 30)}" min="1" max="3650" required></label><button class="outline-button">保存计划</button><p class="dialog-error"></p></form></section>
+      <section class="panel"><div class="panel-heading"><div><h2>备份历史</h2><span>旧备份会按保留天数自动清理</span></div></div>${adminTable(['文件名','大小','生成时间','操作'], (data.backups || []).map(item => `<tr><td><code>${escapeHtml(item.name)}</code></td><td>${size(item.size)}</td><td>${escapeHtml(date(item.createdAt))}</td><td><button class="table-action" data-download-backup="${escapeHtml(item.name)}">下载</button></td></tr>`).join(''))}</section>
+      <section class="panel backup-restore-panel"><div class="panel-heading"><div><h2>从备份恢复</h2><span>适用于更换服务器或回滚数据</span></div></div><p class="backup-warning">恢复会覆盖当前数据库和本地上传文件。系统会先自动保存当前数据，恢复完成后当前登录会话将失效，请重新登录。</p><form id="backup-restore-form" class="backup-restore-form"><label class="backup-file-picker"><span>选择备份文件</span><input type="file" name="backup" accept=".tar.gz,application/gzip,application/x-gzip" required><small>仅支持系统生成的 .tar.gz 文件，最大 1GB</small></label><button class="danger-button">上传并恢复</button><p class="dialog-error"></p></form></section>`;
+  }
   return '<div class="panel">该模块已就绪，等待配置数据。</div>';
 }
 function bindAdminActions() {
@@ -431,6 +441,49 @@ function bindAdminActions() {
   document.querySelector('#settings-form')?.addEventListener('submit', async event => { event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); button.disabled = true; try { await adminApi('/settings', { method:'PUT', body:JSON.stringify(Object.fromEntries(new FormData(form))) }); await renderAdmin(); adminNotice('配置已保存，请继续完成平台授权和联调'); } catch (error) { form.querySelector('.dialog-error').textContent = error.message; button.disabled = false; } });
   document.querySelector('#check-integrations')?.addEventListener('click', async event => { const button = event.currentTarget; button.disabled = true; try { const result = await adminApi('/settings/check', { method:'POST' }); adminNotice(result.message); } catch (error) { adminNotice(error.message); } finally { button.disabled = false; } });
   document.querySelector('#mini-page-form')?.addEventListener('submit', async event => { event.preventDefault(); const form = event.currentTarget; const values = Object.fromEntries(new FormData(form)); const entries = adminState.data.entries.map(({ key }) => ({ key, title: values[`title-${key}`], icon: values[`icon-${key}`] })); const button = form.querySelector('button'); button.disabled = true; try { await adminApi('/mini-page', { method:'PUT', body:JSON.stringify({ entries }) }); await renderAdmin(); adminNotice('页面设置已保存'); } catch (error) { form.querySelector('.dialog-error').textContent = error.message; button.disabled = false; } });
+  document.querySelector('[data-action="create-backup"]')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    try { const result = await adminApi('/backups', { method: 'POST', body: '{}' }); await renderAdmin(); adminNotice(`备份完成：${result.backup.name}`); }
+    catch (error) { adminNotice(error.message); button.disabled = false; }
+  });
+  document.querySelectorAll('[data-download-backup]').forEach(button => button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/admin/backups/${encodeURIComponent(button.dataset.downloadBackup)}/download`, { headers: { Authorization: `Bearer ${sessionStorage.getItem('adminToken')}` } });
+      if (!response.ok) { const result = await response.json().catch(() => ({})); throw new Error(result.message || '备份下载失败'); }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a'); link.href = url; link.download = button.dataset.downloadBackup; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { adminNotice(error.message); }
+    finally { button.disabled = false; }
+  });
+  document.querySelector('#backup-settings-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const values = Object.fromEntries(new FormData(form));
+    values.enabled = form.elements.enabled.checked ? 1 : 0;
+    const button = form.querySelector('button'); button.disabled = true;
+    try { await adminApi('/backups/settings', { method: 'PATCH', body: JSON.stringify(values) }); await renderAdmin(); adminNotice('自动备份计划已保存'); }
+    catch (error) { form.querySelector('.dialog-error').textContent = error.message; button.disabled = false; }
+  });
+  document.querySelector('#backup-restore-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const file = form.elements.backup.files[0];
+    if (!file) return;
+    if (!window.confirm('恢复会覆盖当前数据库和上传文件，系统会先保留当前安全备份。确定继续吗？')) return;
+    const button = form.querySelector('button'); button.disabled = true; form.querySelector('.dialog-error').textContent = '正在上传并校验备份，请不要关闭页面...';
+    try {
+      const formData = new FormData(); formData.append('backup', file);
+      const response = await fetch('/api/admin/backups/restore', { method: 'POST', headers: { Authorization: `Bearer ${sessionStorage.getItem('adminToken')}` }, body: formData });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.message || '备份恢复失败');
+      form.querySelector('.dialog-error').textContent = `恢复成功，安全备份为 ${result.safetyBackup}。页面即将重新登录。`;
+      setTimeout(() => { sessionStorage.removeItem('adminToken'); location.reload(); }, 1400);
+    } catch (error) { form.querySelector('.dialog-error').textContent = error.message; button.disabled = false; }
+  });
 }
 
 async function openTableCode(table) {

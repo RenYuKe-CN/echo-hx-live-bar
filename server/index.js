@@ -1,13 +1,15 @@
 import express from 'express';
 import './db.js';
 import { router } from './routes.js';
+import { startBackupScheduler } from './backup.js';
+import { trackApiRequest } from './maintenance.js';
 
 const app = express();
 const port = process.env.PORT || 3001;
 const host = process.env.HOST || '127.0.0.1';
 
 app.use(express.json({ verify: (req, _res, buffer) => { req.rawBody = buffer.toString('utf8'); } }));
-app.use('/api', router);
+app.use('/api', trackApiRequest, router);
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'echo-hx-live-bar-api', time: new Date().toISOString() });
@@ -19,6 +21,7 @@ app.get('/api/dashboard/summary', (_req, res) => {
 
 const server = app.listen(port, host, () => {
   console.log(`Echo HX API listening on http://${host}:${port}`);
+  startBackupScheduler();
 });
 
 const shutdown = signal => {

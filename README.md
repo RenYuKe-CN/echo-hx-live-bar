@@ -65,6 +65,7 @@ Echo HX Live Bar 是面向酒吧、餐吧和 live house 场景的点单与会员
 - **管理后台**：位于 `src/`，包含经营、收银、会员、库存、订单、报表和系统配置页面。
 - **后端 API**：Node.js 服务，主要路由位于 `server/`，负责认证、权限、业务校验、支付、库存、报表和 SQLite 数据持久化。
 - **数据与文件**：默认使用 SQLite 数据库；商品图片和上传文件位于 `data/uploads/`，生产环境应纳入备份策略。
+- **备份与迁移**：超级管理员可在“系统设置 -> 备份与恢复”立即生成、下载和恢复包含数据库与本地图片的 `.tar.gz` 备份，也可设置每日或每周自动备份。恢复前系统会自动保留当前数据，恢复完成后重新登录即可继续使用。
 
 ### 已实现与上线前仍需完成
 
@@ -74,14 +75,14 @@ Echo HX Live Bar 是面向酒吧、餐吧和 live house 场景的点单与会员
 
 ## 一、服务器要求（非宝塔手工部署）
 
-需要公网服务器、域名、HTTPS 证书、Node.js 20+、npm、Git、Nginx、sqlite3。建议至少 2 GB 内存。开放 22、80、443 端口，3001 只允许本机访问。
+需要公网服务器、域名、HTTPS 证书、Node.js 20+、npm、Git、Nginx。SQLite 由 Node.js 依赖直接读写，不需要额外安装 sqlite3 命令行工具。建议至少 2 GB 内存。开放 22、80、443 端口，3001 只允许本机访问。
 
 ## 二、安装服务器
 
 ```bash
 ssh root@你的服务器公网IP
 apt update
-apt install -y git nginx sqlite3 curl ca-certificates build-essential
+apt install -y git nginx curl ca-certificates build-essential
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt install -y nodejs
 node --version
@@ -254,21 +255,36 @@ cd /var/www/echo-hx-live-bar
 ./scripts/update.sh
 ```
 
-更新脚本会自动备份本地代码改动和 SQLite 数据库，然后以 GitHub `main` 为准执行同步、`npm ci --include=dev` 和 `npm run build`。数据库是 `data/echo-hx.sqlite`，图片在 `data/uploads/`，备份在 `backups/`。
+更新脚本会自动备份本地代码改动和营业数据，然后以 GitHub `main` 为准执行同步、`npm ci --include=dev` 和 `npm run build`。数据库是 `data/echo-hx.sqlite`，图片在 `data/uploads/`，后台可恢复备份在 `data/backups/`。
 
 服务器如果存在直接修改过的源代码，代码改动会自动保存到 `backups/update-时间/`：已跟踪文件为 `local-changes.patch`，未跟踪文件为 `untracked-files.tar.gz`，清单为 `status.txt`。`.env`、`data/`、数据库和上传图片不会被覆盖。需要保留的业务改动应在开发电脑合并并推送，不建议继续直接修改生产代码。
 
-每天凌晨自动备份：
+### 后台备份与换服务器
+
+登录 `/admin`，进入“系统设置 -> 备份与恢复”：
+
+1. 点击“立即备份”生成完整 `.tar.gz` 文件。
+2. 在备份历史中点击“下载”，把文件保存到电脑或另一台服务器。
+3. 可开启每日/每周自动备份并设置执行时间和保留天数。Node 服务必须持续运行，定时任务才会执行。
+4. 新服务器完成代码、依赖、`.env` 和 Node 项目安装后，登录同一页面上传 `.tar.gz` 并确认恢复。
+5. 恢复完成后页面会退出登录，重新登录并检查商品、图片、会员、订单和设置。
+
+备份包含 SQLite 业务数据库和本地 `data/uploads/` 图片，但会自动移除微信 AppSecret、微信支付 API v3 密钥/私钥/平台证书、美团和抖音密钥、对象存储密钥，以及后台和小程序登录会话。换服务器恢复后，旧服务器的管理员账号密码仍会保留，但所有人都需要重新登录；接口密钥需要在新服务器的 `.env` 或“接口配置”中重新填写。若已经切换到对象存储，备份只包含本地历史图片，远程对象需要使用对象存储自己的复制或生命周期备份策略。请把下载的备份文件当作敏感营业数据保管。
+
+命令行完整备份（与后台格式相同）：
 
 ```bash
-crontab -e
+cd /var/www/echo-hx-live-bar
+bash scripts/backup.sh
 ```
 
-```cron
-15 4 * * * cd /var/www/echo-hx-live-bar && ./scripts/backup.sh >> logs/backup.log 2>&1
+输出文件位于 `data/backups/echo-hx-*.tar.gz`，可以直接上传到后台恢复。也可以在宝塔“计划任务”添加每天一次的 Shell 任务：
+
+```bash
+cd /var/www/echo-hx-live-bar && bash scripts/backup.sh >> logs/backup.log 2>&1
 ```
 
-建议将重要备份同步到另一台服务器或对象存储。
+建议将下载的备份同步到另一台服务器或对象存储；不要只把备份留在当前服务器上。
 
 ## 十一、故障排查
 
