@@ -61,6 +61,8 @@ Page({
         fulfillmentLabel: item.status === 'completed' ? '已送达' : item.paymentStatusLabel === '已支付' ? '待送达' : item.paymentStatusLabel,
         payableText: Number(item.payableAmount).toFixed(2),
         discountText: Number(item.discountAmount).toFixed(2),
+        memberDiscountText: Number(item.memberDiscount || 0).toFixed(2),
+        couponDiscountText: Number(item.couponDiscount || 0).toFixed(2),
         originalText: Number(item.originalAmount).toFixed(2),
         storedText: Number(item.storedPaid).toFixed(2),
         bonusText: Number(item.bonusPaid).toFixed(2),

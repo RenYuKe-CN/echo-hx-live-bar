@@ -19,6 +19,31 @@ export async function wechatLogin(code) {
 
 let phoneAccessToken = null;
 let phoneAccessTokenExpiresAt = 0;
+let appAccessToken = null;
+let appAccessTokenExpiresAt = 0;
+async function getAppAccessToken() {
+  const values = requireIntegration('wechat_app_id', 'wechat_app_secret');
+  if (!appAccessToken || Date.now() >= appAccessTokenExpiresAt) {
+    const url = new URL('https://api.weixin.qq.com/cgi-bin/token');
+    url.search = new URLSearchParams({ grant_type: 'client_credential', appid: values.wechat_app_id, secret: values.wechat_app_secret });
+    const token = await fetch(url).then(json);
+    if (token.errcode || !token.access_token) throw Object.assign(new Error(token.errmsg || '获取微信接口令牌失败'), { code: token.errcode || 'WECHAT_TOKEN_ERROR' });
+    appAccessToken = token.access_token;
+    appAccessTokenExpiresAt = Date.now() + Math.max(Number(token.expires_in || 7200) - 300, 60) * 1000;
+  }
+  return appAccessToken;
+}
+export async function sendSubscribeMessage({ openid, templateId, page = 'pages/member/member', data }) {
+  const accessToken = await getAppAccessToken();
+  const result = await fetch(`https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token=${encodeURIComponent(accessToken)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ touser: openid, template_id: templateId, page, data })
+  }).then(json);
+  if (result.errcode) {
+    if ([40001, 42001].includes(result.errcode)) { appAccessToken = null; appAccessTokenExpiresAt = 0; }
+    throw Object.assign(new Error(result.errmsg || '微信订阅消息发送失败'), { code: result.errcode });
+  }
+  return result;
+}
 export async function getWechatPhoneNumber(code) {
   const values = requireIntegration('wechat_app_id', 'wechat_app_secret');
   if (!phoneAccessToken || Date.now() >= phoneAccessTokenExpiresAt) {
@@ -89,5 +114,25 @@ export async function queryPayment(orderNo) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const nonce = crypto.randomBytes(16).toString('hex');
   const signature = signMessage(`GET\n${path}\n${timestamp}\n${nonce}\n\n`, privateKey);
-  return fetch(`https://api.mch.weixin.qq.com${path}`, { headers: { Authorization: `WECHATPAY2-SHA256-RSA2048 mchid="${values.wechat_mch_id}",nonce_str="${nonce}",signature="${signature}",timestamp="${timestamp}",serial_no="${values.wechat_merchant_serial}"`, Accept: 'application/json' } }).then(json);
+  try {
+    return await fetch(`https://api.mch.weixin.qq.com${path}`, { headers: { Authorization: `WECHATPAY2-SHA256-RSA2048 mchid="${values.wechat_mch_id}",nonce_str="${nonce}",signature="${signature}",timestamp="${timestamp}",serial_no="${values.wechat_merchant_serial}"`, Accept: 'application/json' } }).then(json);
+  } catch (error) {
+    // 微信商户侧可能已经清理了未支付交易。这个状态不是网络故障，
+    // 调用方可以据此释放本地订单占用的余额、优惠券和购物车商品。
+    if (error.status === 404) error.code = 'WECHAT_ORDER_NOT_FOUND';
+    throw error;
+  }
+}
+
+export async function closePayment(orderNo) {
+  const values = requireIntegration('wechat_mch_id', 'wechat_merchant_serial', 'wechat_private_key');
+  const path = `/v3/pay/transactions/out-trade-no/${encodeURIComponent(orderNo)}/close`;
+  const body = JSON.stringify({ mchid: values.wechat_mch_id });
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const signature = signMessage(`POST\n${path}\n${timestamp}\n${nonce}\n${body}\n`, readPrivateKey(values.wechat_private_key));
+  return fetch(`https://api.mch.weixin.qq.com${path}`, { method: 'POST', headers: {
+    Authorization: `WECHATPAY2-SHA256-RSA2048 mchid="${values.wechat_mch_id}",nonce_str="${nonce}",signature="${signature}",timestamp="${timestamp}",serial_no="${values.wechat_merchant_serial}"`,
+    Accept: 'application/json', 'Content-Type': 'application/json'
+  }, body }).then(json);
 }

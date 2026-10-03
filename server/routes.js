@@ -7,7 +7,7 @@ import multer from 'multer';
 import { db, centsToMoney } from './db.js';
 import { getIntegrationStatus, integrationDefinitions } from './config.js';
 import { getUnlimitedMiniProgramCode, miniProgramCodeContentType } from './wechat-mini-code.js';
-import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment } from './integrations/wechat.js';
+import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment, closePayment, sendSubscribeMessage } from './integrations/wechat.js';
 import { localImageDir, saveUpload, readUpload, isAllowedImageUrl } from './storage.js';
 import { getBirthdayMatchInfo, normalizeBirthday } from './birthday.js';
 import { backupSettings, listBackups, createBackup, restoreBackup, backupFile } from './backup.js';
@@ -47,14 +47,15 @@ const paginationView = (page, pageSize, total) => {
   const safePage = Math.min(page, totalPages);
   return { page: safePage, pageSize, total, totalPages, hasNext: safePage < totalPages, hasPrevious: safePage > 1 };
 };
-const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','reports','losses','backups'];
+const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','coupons','messages','reports','losses','backups'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); const supplied = crypto.scryptSync(password, salt, 64); return hash?.length === 128 && crypto.timingSafeEqual(supplied, Buffer.from(hash, 'hex')); };
 const normalizePermissions = permissions => [...new Set(permissions.map(permission => permission === 'inventory' ? 'products' : permission).filter(permission => modules.includes(permission)))];
 const publicAccount = row => ({ id: row.id, username: row.username, displayName: row.display_name, role: row.role, permissions: row.role === 'super' ? [...modules, 'accounts', 'settings', 'logs', 'mini-page'] : normalizePermissions(JSON.parse(row.permissions)), status: row.status });
 const audit = (req, action, detail = '') => db.prepare('INSERT INTO operation_logs (operator, action, detail) VALUES (?, ?, ?)').run(req.staff.username, action, String(detail));
 const syncProductAvailability = () => {
-  db.prepare("UPDATE products SET status = 'inactive' WHERE stock <= 0 AND status = 'active'").run();
+  db.prepare("UPDATE products SET status = 'inactive', auto_unlisted = 1 WHERE stock - reserved_stock <= 0 AND status = 'active'").run();
+  db.prepare("UPDATE products SET status = 'active', auto_unlisted = 0 WHERE stock - reserved_stock > 0 AND status = 'inactive' AND auto_unlisted = 1").run();
 };
 const tokenHash = token => crypto.createHash('sha256').update(token).digest('hex');
 const publicUser = row => {
@@ -84,6 +85,15 @@ router.use((req, _res, next) => {
   if (bearer) req.user = db.prepare("SELECT u.* FROM wechat_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?").get(tokenHash(bearer), new Date().toISOString());
   next();
 });
+// These routes are declared before the broad /me middleware below because the
+// notification and coupon APIs are kept near their supporting helpers. Keep
+// their authentication explicit so production requests cannot use the demo
+// user fallback accidentally.
+const requireWechatUser = (req, res, next) => {
+  const demoAllowed = process.env.NODE_ENV !== 'production' && currentUserId(req) > 0;
+  if (!req.user && !demoAllowed) return res.status(401).json({ message: '请先完成微信登录' });
+  next();
+};
 router.get('/auth/me', (req, res) => req.user ? res.json({ user: publicUser(req.user) }) : res.status(401).json({ message: '请先完成微信登录' }));
 
 router.post('/admin/login', (req, res) => {
@@ -133,6 +143,17 @@ router.patch('/admin/accounts/:id', (req, res) => {
   db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ? WHERE id = ?').run(role, status, JSON.stringify(permissions), displayName, password ? hashPassword(password) : account.password_hash, account.id);
   if (status === 'disabled' || password) db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(account.id);
   audit(req, '修改账号', account.username); res.json({ ok: true });
+});
+router.post('/admin/accounts/:id/reset-password', (req, res) => {
+  if (req.staff.role !== 'super') return res.status(403).json({ message: '仅超级管理员可重置账号密码' });
+  const account = db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(req.params.id);
+  if (!account || account.role === 'super') return res.status(400).json({ message: '只能重置管理员或店员账号密码' });
+  const password = String(req.body?.password || '');
+  if (password.length < 10) return res.status(400).json({ message: '新密码至少需要 10 位' });
+  db.prepare('UPDATE staff_accounts SET password_hash = ? WHERE id = ?').run(hashPassword(password), account.id);
+  db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(account.id);
+  audit(req, '重置账号密码', account.username);
+  res.json({ ok: true });
 });
 router.get('/admin/logs', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM operation_logs').get().value; return res.json({ logs: db.prepare('SELECT * FROM operation_logs ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });
 router.get('/admin/backups', (_req, res) => res.json({ settings: backupSettings(), backups: listBackups() }));
@@ -215,6 +236,248 @@ router.post('/admin/settings/check', (_req, res) => {
   const checks = Object.fromEntries(Object.entries(status.groups).map(([group, value]) => [group, { status: value.configured ? 'ready_for_auth' : 'missing_config', missing: value.missing }]));
   res.json({ ok: true, checks, integrationsActive: Boolean(status.groups.wechat?.configured && status.groups.wechatPay?.configured), message: '配置完整性检查完成；美团和抖音仍需平台授权后进行真实券码联调' });
 });
+
+function renderMessageTemplate(template, values = {}) {
+  return String(template || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ''));
+}
+function createSiteMessage(userId, type, values = {}, relatedType = null, relatedId = null) {
+  const template = db.prepare('SELECT * FROM message_templates WHERE template_key = ? AND enabled = 1').get(type) || db.prepare("SELECT * FROM message_templates WHERE template_key = 'system_notice' AND enabled = 1").get();
+  if (!template) return null;
+  const title = renderMessageTemplate(template.title_template, values);
+  const content = renderMessageTemplate(template.content_template, values);
+  return db.prepare('INSERT INTO user_messages (user_id, type, title, content, related_type, related_id) VALUES (?, ?, ?, ?, ?, ?)').run(userId, type, title, content, relatedType, relatedId).lastInsertRowid;
+}
+function queueUserMessage(userId, type, values = {}, relatedType = null, relatedId = null, campaignName = '') {
+  if (!userId) return null;
+  if (relatedType && relatedId != null) {
+    const existing = db.prepare(`SELECT id FROM user_messages
+      WHERE user_id = ? AND type = ? AND related_type = ? AND related_id = ? LIMIT 1`)
+      .get(userId, type, relatedType, relatedId);
+    if (existing) return existing.id;
+  }
+  const template = db.prepare('SELECT * FROM message_templates WHERE template_key = ? AND enabled = 1').get(type) || db.prepare("SELECT * FROM message_templates WHERE template_key = 'system_notice' AND enabled = 1").get();
+  const messageId = createSiteMessage(userId, type, values, relatedType, relatedId);
+  if (!template || !messageId) return null;
+  const campaignId = db.prepare('INSERT INTO message_campaigns (name, message_template_id, audience_type, audience_filter, status) VALUES (?, ?, ?, ?, ?)')
+    .run(campaignName || template.name, template.id, 'selected', JSON.stringify({ userIds: [userId], event: type }), 'sent').lastInsertRowid;
+  db.prepare('INSERT INTO message_recipients (campaign_id, user_id, channel, status, sent_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)')
+    .run(campaignId, userId, 'site', 'sent');
+  // Site delivery is synchronous. WeChat is best-effort and must never delay or
+  // roll back the business transaction if the user did not authorize a template.
+  setImmediate(() => queueWechatCampaign(campaignId, template, [{ id: userId }], values).catch(error => console.error('微信订阅消息发送失败', error)));
+  return messageId;
+}
+function couponUserView(row) {
+  const definition = couponDefinitionView(row);
+  const expired = (row.expired_at && new Date(row.expired_at) <= new Date()) || (row.valid_until && new Date(row.valid_until) <= new Date());
+  return { ...definition, id: row.id, couponCode: row.coupon_code, definitionStatus: row.definition_status || definition.status, status: expired && row.status === 'available' ? 'expired' : row.status, issuedAt: row.issued_at, usedAt: row.used_at, expiredAt: row.expired_at || row.valid_until };
+}
+
+router.get('/me/notification-summary', requireWechatUser, (req, res) => {
+  const userId = currentUserId(req);
+  const couponCount = db.prepare("SELECT COUNT(*) AS value FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id WHERE uc.user_id = ? AND uc.status = 'available' AND cd.status = 'active' AND (cd.valid_from IS NULL OR datetime(cd.valid_from) <= datetime('now')) AND (uc.expired_at IS NULL OR datetime(uc.expired_at) > datetime('now')) AND (cd.valid_until IS NULL OR datetime(cd.valid_until) > datetime('now'))").get(userId).value;
+  // Keep the badge aligned with the order countdown. A scheduler may be a few
+  // seconds late, so an expired pending order must not keep showing as unpaid
+  // in the member centre while it is waiting to be closed.
+  const pendingOrderCount = db.prepare(`SELECT COUNT(*) AS value FROM orders
+    WHERE payer_user_id = ? AND payment_status = 'pending'
+      AND ((payment_expire_at IS NOT NULL AND datetime(payment_expire_at) > datetime('now'))
+        OR (payment_expire_at IS NULL AND datetime(created_at, '+10 minutes') > datetime('now')))`).get(userId).value;
+  const unreadMessageCount = db.prepare('SELECT COUNT(*) AS value FROM user_messages WHERE user_id = ? AND read_at IS NULL').get(userId).value;
+  res.json({ couponCount, pendingOrderCount, unreadMessageCount });
+});
+router.get('/me/coupons', requireWechatUser, (req, res) => {
+  const rows = db.prepare(`SELECT uc.*, cd.name, cd.type, cd.amount_cents, cd.discount_rate, cd.min_order_cents, cd.product_id, cd.category_id,
+    cd.member_tier_id, cd.total_quantity, cd.issued_quantity, cd.per_user_limit, cd.valid_from, cd.valid_until, cd.icon_url, cd.description, cd.status AS definition_status
+    FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id WHERE uc.user_id = ? ORDER BY uc.id DESC`).all(currentUserId(req));
+  const coupons = rows.map(row => couponUserView({ ...row, status: row.definition_status === 'inactive' ? 'cancelled' : row.status }));
+  res.json({ coupons });
+});
+router.get('/me/messages', requireWechatUser, (req, res) => {
+  const { page, pageSize, offset } = parsePagination(req);
+  const total = db.prepare('SELECT COUNT(*) AS value FROM user_messages WHERE user_id = ?').get(currentUserId(req)).value;
+  const messages = db.prepare('SELECT * FROM user_messages WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?').all(currentUserId(req), pageSize, offset);
+  res.json({ messages, pagination: paginationView(page, pageSize, total) });
+});
+router.patch('/me/messages/:id/read', requireWechatUser, (req, res) => { db.prepare('UPDATE user_messages SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP) WHERE id = ? AND user_id = ?').run(req.params.id, currentUserId(req)); res.json({ ok: true }); });
+router.patch('/me/messages/read-all', requireWechatUser, (req, res) => { db.prepare('UPDATE user_messages SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP) WHERE user_id = ?').run(currentUserId(req)); res.json({ ok: true }); });
+router.post('/me/subscription-authorizations', requireWechatUser, (req, res) => {
+  const authorizations = Array.isArray(req.body?.authorizations) ? req.body.authorizations.slice(0, 50) : [];
+  const userId = currentUserId(req);
+  db.transaction(() => authorizations.forEach(item => {
+    const templateKey = String(item?.templateKey || '').trim();
+    const status = ['accept', 'reject', 'ban'].includes(String(item?.status)) ? String(item.status) : 'reject';
+    const template = db.prepare('SELECT template_key, wechat_template_id FROM message_templates WHERE template_key = ?').get(templateKey);
+    if (template && status === 'accept' && template.wechat_template_id) db.prepare(`INSERT INTO user_subscription_authorizations (user_id, template_key, wechat_template_id, status) VALUES (?, ?, ?, 'authorized')
+      ON CONFLICT(user_id, template_key) DO UPDATE SET status = 'authorized', wechat_template_id = excluded.wechat_template_id, authorized_at = CURRENT_TIMESTAMP`).run(userId, template.template_key, String(item?.wechatTemplateId || template.wechat_template_id));
+    else if (template) db.prepare(`INSERT INTO user_subscription_authorizations (user_id, template_key, wechat_template_id, status, last_checked_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, template_key) DO UPDATE SET status = excluded.status, last_checked_at = CURRENT_TIMESTAMP`).run(userId, template.template_key, String(item?.wechatTemplateId || template.wechat_template_id || ''), status);
+  })());
+  res.json({ ok: true });
+});
+router.get('/message-subscription-templates', (_req, res) => {
+  const templates = db.prepare(`SELECT template_key AS templateKey, wechat_template_id AS wechatTemplateId
+    FROM message_templates
+    WHERE enabled = 1 AND wechat_template_id IS NOT NULL AND wechat_template_id != ''
+    ORDER BY id`).all();
+  res.json({ templates });
+});
+
+router.get('/admin/coupons', (req, res) => {
+  const { page, pageSize, offset } = parsePagination(req);
+  const total = db.prepare('SELECT COUNT(*) AS value FROM coupon_definitions').get().value;
+  const definitions = db.prepare('SELECT * FROM coupon_definitions ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset).map(couponDefinitionView);
+  const issued = db.prepare(`SELECT uc.*, u.nickname, u.phone, cd.name AS coupon_name FROM user_coupons uc JOIN users u ON u.id = uc.user_id JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id ORDER BY uc.id DESC LIMIT 50`).all();
+  res.json({ coupons: definitions, issued, pagination: paginationView(page, pageSize, total) });
+});
+const couponInput = (body, current = {}) => {
+  const name = String(body.name ?? current.name ?? '').trim();
+  const type = body.type ?? current.type ?? 'fixed';
+  const amount = Number(body.amount ?? (Number(current.amount_cents || 0) / 100));
+  const discountRate = Number(body.discountRate ?? current.discount_rate ?? 1);
+  const minOrder = Number(body.minOrder ?? (Number(current.min_order_cents || 0) / 100));
+  const totalQuantity = Number(body.totalQuantity ?? current.total_quantity ?? 0);
+  const perUserLimit = Number(body.perUserLimit ?? current.per_user_limit ?? 1);
+  const validDays = Number(body.validDays ?? current.valid_days ?? 0);
+  const validFrom = body.validFrom ?? current.valid_from ?? null;
+  const validUntil = body.validUntil ?? current.valid_until ?? null;
+  const productId = body.productId === '' ? null : body.productId == null ? current.product_id || null : Number(body.productId);
+  const categoryId = body.categoryId === '' ? null : body.categoryId == null ? current.category_id || null : Number(body.categoryId);
+  const memberTierId = body.memberTierId === '' ? null : body.memberTierId == null ? current.member_tier_id || null : Number(body.memberTierId);
+  const status = body.status ?? current.status ?? 'active';
+  const validFromTime = validFrom ? new Date(validFrom).getTime() : null;
+  const validUntilTime = validUntil ? new Date(validUntil).getTime() : null;
+  const validDatesOk = (!validFrom || Number.isFinite(validFromTime)) && (!validUntil || Number.isFinite(validUntilTime)) && (!validFromTime || !validUntilTime || validFromTime < validUntilTime);
+  const fixedAmountOk = type === 'discount' || (Number.isFinite(amount) && amount > 0);
+  const discountRateOk = type === 'fixed' || (Number.isFinite(discountRate) && discountRate > 0 && discountRate < 1);
+  const productOk = productId == null || Boolean(db.prepare('SELECT id FROM products WHERE id = ?').get(productId));
+  const categoryOk = categoryId == null || Boolean(db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId));
+  const tierOk = memberTierId == null || Boolean(db.prepare('SELECT id FROM member_tiers WHERE id = ?').get(memberTierId));
+  if (!name || name.length > 50 || !['fixed', 'discount'].includes(type) || !fixedAmountOk || !discountRateOk || !Number.isFinite(minOrder) || minOrder < 0 || !Number.isInteger(totalQuantity) || totalQuantity < 0 || !Number.isInteger(perUserLimit) || perUserLimit < 1 || perUserLimit > 99 || !Number.isInteger(validDays) || validDays < 0 || validDays > 3650 || !validDatesOk || !productOk || !categoryOk || !tierOk || !['active', 'inactive'].includes(status)) return null;
+  return { name, type, amountCents: Math.round(amount * 100), discountRate, minOrderCents: Math.round(minOrder * 100), totalQuantity, perUserLimit, validDays, validFrom, validUntil, productId, categoryId, memberTierId, iconUrl: String(body.iconUrl ?? current.icon_url ?? '').trim(), description: String(body.description ?? current.description ?? '').trim(), status };
+};
+router.post('/admin/coupons', (req, res) => {
+  const item = couponInput(req.body || {});
+  if (!item) return res.status(400).json({ message: '优惠券参数无效' });
+  const id = db.prepare(`INSERT INTO coupon_definitions (store_id, name, type, amount_cents, discount_rate, min_order_cents, product_id, category_id, member_tier_id, total_quantity, per_user_limit, valid_from, valid_until, valid_days, icon_url, description, status)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(item.name, item.type, item.amountCents, item.discountRate, item.minOrderCents, item.productId, item.categoryId, item.memberTierId, item.totalQuantity, item.perUserLimit, item.validFrom, item.validUntil, item.validDays, item.iconUrl, item.description, item.status).lastInsertRowid;
+  audit(req, '新增优惠券', item.name); res.status(201).json({ coupon: couponDefinitionView(db.prepare('SELECT * FROM coupon_definitions WHERE id = ?').get(id)) });
+});
+router.patch('/admin/coupons/:id', (req, res) => {
+  const current = db.prepare('SELECT * FROM coupon_definitions WHERE id = ?').get(req.params.id);
+  if (!current) return res.status(404).json({ message: '优惠券不存在' });
+  const item = couponInput(req.body || {}, current);
+  if (!item) return res.status(400).json({ message: '优惠券参数无效' });
+  db.prepare(`UPDATE coupon_definitions SET name=?, type=?, amount_cents=?, discount_rate=?, min_order_cents=?, product_id=?, category_id=?, member_tier_id=?, total_quantity=?, per_user_limit=?, valid_from=?, valid_until=?, valid_days=?, icon_url=?, description=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(item.name, item.type, item.amountCents, item.discountRate, item.minOrderCents, item.productId, item.categoryId, item.memberTierId, item.totalQuantity, item.perUserLimit, item.validFrom, item.validUntil, item.validDays, item.iconUrl, item.description, item.status, current.id);
+  audit(req, '修改优惠券', item.name); res.json({ coupon: couponDefinitionView(db.prepare('SELECT * FROM coupon_definitions WHERE id = ?').get(current.id)) });
+});
+router.post('/admin/coupons/:id/issue', (req, res) => {
+  const coupon = db.prepare('SELECT * FROM coupon_definitions WHERE id = ? AND status = \'active\'').get(req.params.id);
+  if (!coupon) return res.status(404).json({ message: '优惠券不存在或已下架' });
+  const audience = req.body?.audience === 'all' ? 'all' : 'selected';
+  const ids = Array.isArray(req.body?.userIds) ? req.body.userIds.map(Number).filter(Number.isInteger) : [];
+  const users = audience === 'all' ? db.prepare('SELECT id FROM users ORDER BY id').all() : db.prepare(`SELECT id FROM users WHERE id IN (${ids.length ? ids.map(() => '?').join(',') : 'NULL'})`).all(...ids);
+  const issued = [];
+  let campaignId;
+  try {
+    db.transaction(() => {
+      const eligible = users.filter(user => db.prepare("SELECT COUNT(*) AS value FROM user_coupons WHERE user_id = ? AND coupon_definition_id = ? AND status != 'cancelled'").get(user.id, coupon.id).value < coupon.per_user_limit);
+      if (coupon.total_quantity > 0 && coupon.issued_quantity + eligible.length > coupon.total_quantity) throw new Error('优惠券剩余发放数量不足');
+      const template = db.prepare("SELECT id FROM message_templates WHERE template_key = 'coupon_issued' AND enabled = 1").get();
+      campaignId = db.prepare('INSERT INTO message_campaigns (name, message_template_id, audience_type, audience_filter, status, created_by) VALUES (?, ?, ?, ?, ?, ?)').run(`发放优惠券：${coupon.name}`, template?.id || null, audience, JSON.stringify({ userIds: ids }), 'sent', req.staff.id).lastInsertRowid;
+      for (const user of eligible) {
+        const expiredAt = coupon.valid_days > 0 ? new Date(Date.now() + coupon.valid_days * 86400000).toISOString() : coupon.valid_until;
+        const code = `CP${Date.now().toString(36).toUpperCase()}${crypto.randomBytes(4).toString('hex')}`;
+        const userCoupon = db.prepare('INSERT INTO user_coupons (user_id, coupon_definition_id, coupon_code, expired_at, source_id) VALUES (?, ?, ?, ?, ?)').run(user.id, coupon.id, code, expiredAt, campaignId);
+        // Link the notification to this issued coupon, not the definition. A
+        // member may receive the same coupon definition more than once.
+        const messageId = createSiteMessage(user.id, 'coupon_issued', { couponName: coupon.name }, 'user_coupon', userCoupon.lastInsertRowid);
+        db.prepare('INSERT INTO message_recipients (campaign_id, user_id, channel, status, sent_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)').run(campaignId, user.id, 'site', messageId ? 'sent' : 'failed');
+        issued.push(user.id);
+      }
+      db.prepare('UPDATE coupon_definitions SET issued_quantity = issued_quantity + ? WHERE id = ?').run(issued.length, coupon.id);
+      audit(req, '发放优惠券', `${coupon.name}，成功 ${issued.length} 人`);
+    })();
+  } catch (error) { return res.status(409).json({ message: error.message }); }
+  const notificationTemplate = db.prepare("SELECT * FROM message_templates WHERE template_key = 'coupon_issued' AND enabled = 1").get();
+  if (notificationTemplate && issued.length) queueWechatCampaign(campaignId, notificationTemplate, issued.map(id => ({ id })), { couponName: coupon.name }).catch(error => console.error('优惠券微信通知失败', error));
+  res.json({ ok: true, issued: issued.length, skipped: users.length - issued.length });
+});
+
+router.get('/admin/messages/templates', (_req, res) => res.json({ templates: db.prepare('SELECT * FROM message_templates ORDER BY id').all() }));
+router.patch('/admin/messages/templates/:id', (req, res) => {
+  const current = db.prepare('SELECT * FROM message_templates WHERE id = ?').get(req.params.id);
+  if (!current) return res.status(404).json({ message: '消息模板不存在' });
+  const name = String(req.body?.name ?? current.name).trim();
+  const title = String(req.body?.titleTemplate ?? current.title_template).trim();
+  const content = String(req.body?.contentTemplate ?? current.content_template).trim();
+  const wechatTemplateId = String(req.body?.wechatTemplateId ?? current.wechat_template_id).trim();
+  const enabled = req.body?.enabled === undefined ? current.enabled : (req.body.enabled === true || req.body.enabled === 1 || req.body.enabled === '1' ? 1 : 0);
+  let fieldMapping = current.field_mapping || '{}';
+  if (req.body?.fieldMapping !== undefined) {
+    try {
+      const parsed = typeof req.body.fieldMapping === 'string' ? JSON.parse(req.body.fieldMapping || '{}') : req.body.fieldMapping;
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('字段映射必须是 JSON 对象');
+      const entries = Object.entries(parsed).filter(([key, source]) => /^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(String(key)) && /^[A-Za-z0-9_]+$/.test(String(source)));
+      if (entries.length !== Object.keys(parsed).length) throw new Error('字段映射的键和值只能使用字母、数字和下划线');
+      fieldMapping = JSON.stringify(Object.fromEntries(entries));
+    } catch (error) { return res.status(400).json({ message: error.message || '字段映射 JSON 无效' }); }
+  }
+  if (!name || !title || !content || name.length > 50 || title.length > 100 || content.length > 500) return res.status(400).json({ message: '模板内容无效' });
+  db.prepare('UPDATE message_templates SET name=?, title_template=?, content_template=?, wechat_template_id=?, field_mapping=?, enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(name, title, content, wechatTemplateId, fieldMapping, enabled, current.id);
+  audit(req, '修改消息模板', current.template_key); res.json({ ok: true });
+});
+router.post('/admin/messages/send', (req, res) => {
+  const template = db.prepare('SELECT * FROM message_templates WHERE enabled = 1 AND (id = ? OR template_key = ?)').get(req.body?.templateId || 0, req.body?.templateKey || 'system_notice');
+  if (!template) return res.status(404).json({ message: '消息模板不存在' });
+  const audience = req.body?.audience === 'all' ? 'all' : 'selected';
+  const ids = Array.isArray(req.body?.userIds) ? req.body.userIds.map(Number).filter(Number.isInteger) : [];
+  const users = audience === 'all' ? db.prepare('SELECT id FROM users').all() : db.prepare(`SELECT id FROM users WHERE id IN (${ids.length ? ids.map(() => '?').join(',') : 'NULL'})`).all(...ids);
+  const values = req.body?.values && typeof req.body.values === 'object' ? req.body.values : { content: String(req.body?.content || '').trim() };
+  try {
+    const campaignId = db.transaction(() => {
+      const id = db.prepare('INSERT INTO message_campaigns (name, message_template_id, audience_type, audience_filter, status, created_by) VALUES (?, ?, ?, ?, ?, ?)').run(String(req.body?.name || template.name), template.id, audience, JSON.stringify({ userIds: ids }), 'sent', req.staff.id).lastInsertRowid;
+      for (const user of users) {
+        const messageId = createSiteMessage(user.id, template.template_key, values, 'campaign', id);
+        db.prepare('INSERT INTO message_recipients (campaign_id, user_id, channel, status, sent_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)').run(id, user.id, 'site', messageId ? 'sent' : 'failed');
+      }
+      audit(req, '发送站内消息', `${template.name}，${users.length} 人`);
+      return id;
+    })();
+    queueWechatCampaign(campaignId, template, users, values);
+    res.status(201).json({ campaignId, sent: users.length });
+  } catch (error) { res.status(409).json({ message: error.message }); }
+});
+async function queueWechatCampaign(campaignId, template, users, values) {
+  if (!template.wechat_template_id) return;
+  for (const user of users) {
+    const authorization = db.prepare(`SELECT usa.*, u.wechat_openid FROM user_subscription_authorizations usa JOIN users u ON u.id = usa.user_id
+      WHERE usa.user_id = ? AND usa.template_key = ? AND usa.status = 'authorized' AND usa.wechat_template_id = ? AND u.wechat_openid IS NOT NULL`).get(user.id, template.template_key, template.wechat_template_id);
+    if (!authorization) continue;
+    try {
+      const mapping = (() => { try { return JSON.parse(template.field_mapping || '{}'); } catch { return {}; } })();
+      const data = Object.fromEntries(Object.entries(mapping).map(([key, source]) => [key, { value: String(values[source] ?? values[key] ?? '') }]));
+      if (!Object.keys(data).length) throw Object.assign(new Error('未配置微信订阅消息字段映射，请在后台填写与微信模板完全一致的字段 key'), { code: 'WECHAT_FIELD_MAPPING_MISSING' });
+      const result = await sendSubscribeMessage({ openid: authorization.wechat_openid, templateId: template.wechat_template_id, data });
+      db.prepare("UPDATE message_recipients SET channel = 'site,wechat', status = 'sent', wechat_message_id = ?, sent_at = CURRENT_TIMESTAMP WHERE campaign_id = ? AND user_id = ?").run(result?.msgid ? String(result.msgid) : null, campaignId, user.id);
+      db.prepare('UPDATE user_subscription_authorizations SET status = \'consumed\', last_checked_at = CURRENT_TIMESTAMP WHERE id = ?').run(authorization.id);
+    } catch (error) {
+      db.prepare("UPDATE message_recipients SET channel = 'site,wechat', status = 'wechat_failed', error_code = ?, error_message = ? WHERE campaign_id = ? AND user_id = ?").run(String(error.code || 'WECHAT_MESSAGE_ERROR'), error.message, campaignId, user.id);
+    }
+  }
+}
+router.get('/admin/messages', (req, res) => {
+  const { page, pageSize, offset } = parsePagination(req);
+  const total = db.prepare('SELECT COUNT(*) AS value FROM message_campaigns').get().value;
+  const campaigns = db.prepare(`SELECT mc.*, mt.name AS template_name, COUNT(mr.id) AS recipient_count FROM message_campaigns mc LEFT JOIN message_templates mt ON mt.id = mc.message_template_id LEFT JOIN message_recipients mr ON mr.campaign_id = mc.id GROUP BY mc.id ORDER BY mc.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset);
+  res.json({ templates: db.prepare('SELECT * FROM message_templates ORDER BY id').all(), campaigns, pagination: paginationView(page, pageSize, total) });
+});
+router.get('/admin/messages/campaigns', (req, res) => {
+  const { page, pageSize, offset } = parsePagination(req);
+  const total = db.prepare('SELECT COUNT(*) AS value FROM message_campaigns').get().value;
+  const campaigns = db.prepare(`SELECT mc.*, mt.name AS template_name, COUNT(mr.id) AS recipient_count FROM message_campaigns mc LEFT JOIN message_templates mt ON mt.id = mc.message_template_id LEFT JOIN message_recipients mr ON mr.campaign_id = mc.id GROUP BY mc.id ORDER BY mc.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset);
+  res.json({ campaigns, pagination: paginationView(page, pageSize, total) });
+});
 router.get('/runtime-config', (_req, res) => {
   const { values } = getIntegrationStatus();
   const apiBaseUrl = values.public_api_base_url || (process.env.NODE_ENV !== 'production' ? 'http://localhost:3001/api' : '');
@@ -225,13 +488,6 @@ router.get('/runtime-config', (_req, res) => {
   res.json({ apiBaseUrl: apiBaseUrl.replace(/\/$/, '') });
 });
 
-// Customer business data must come from a real WeChat session in production.
-// The demo-user fallback is intentionally limited to local development.
-const requireWechatUser = (req, res, next) => {
-  const demoAllowed = process.env.NODE_ENV !== 'production' && currentUserId(req) > 0;
-  if (!req.user && !demoAllowed) return res.status(401).json({ message: '请先完成微信登录' });
-  next();
-};
 router.use('/sessions', requireWechatUser);
 router.use('/me', requireWechatUser);
 
@@ -247,7 +503,8 @@ function getOrCreateSession(storeId, tableId, userId) {
 }
 
 function productView(row) {
-  const product = { ...row, price: centsToMoney(row.price_cents), memberPrice: centsToMoney(row.member_price_cents ?? row.price_cents) };
+  const availableStock = Math.max(Number(row.stock || 0) - Number(row.reserved_stock || 0), 0);
+  const product = { ...row, stock: availableStock, physicalStock: Number(row.stock || 0), reservedStock: Number(row.reserved_stock || 0), availableStock, price: centsToMoney(row.price_cents), memberPrice: centsToMoney(row.member_price_cents ?? row.price_cents) };
   delete product.cost_cents;
   return product;
 }
@@ -367,10 +624,95 @@ function unitPrice(product, pricing) {
   return Math.min(product.member_price_cents ?? product.price_cents, Math.round(product.price_cents * pricing.discount));
 }
 
+function couponDefinitionView(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    amount: centsToMoney(row.amount_cents),
+    discountRate: row.discount_rate,
+    minOrder: centsToMoney(row.min_order_cents),
+    productId: row.product_id,
+    categoryId: row.category_id,
+    memberTierId: row.member_tier_id,
+    totalQuantity: row.total_quantity,
+    issuedQuantity: row.issued_quantity,
+    perUserLimit: row.per_user_limit,
+    validFrom: row.valid_from,
+    validUntil: row.valid_until,
+    validDays: row.valid_days,
+    iconUrl: row.icon_url,
+    description: row.description,
+    status: row.status
+  };
+}
+
+function couponUsable(coupon, userId, items = [], options = {}) {
+  if (!coupon || coupon.user_id !== userId || coupon.status !== 'available' || coupon.definition_status === 'inactive' || coupon.status === 'cancelled') return { ok: false, message: '优惠券不可用' };
+  const now = Date.now();
+  if (coupon.valid_from && new Date(coupon.valid_from).getTime() > now) return { ok: false, message: '优惠券尚未生效' };
+  if (coupon.expired_at && new Date(coupon.expired_at).getTime() <= now) return { ok: false, message: '优惠券已过期' };
+  if (coupon.valid_until && new Date(coupon.valid_until).getTime() <= now) return { ok: false, message: '优惠券已过期' };
+  const base = items.reduce((sum, item) => sum + Number(item.price_cents || 0) * Number(item.quantity || 0), 0);
+  if (base < coupon.min_order_cents) return { ok: false, message: `订单满 ${centsToMoney(coupon.min_order_cents)} 元可用` };
+  const definition = coupon;
+  if (definition.member_tier_id) {
+    const user = db.prepare('SELECT member_tier_id FROM users WHERE id = ?').get(userId);
+    if (Number(user?.member_tier_id) !== Number(definition.member_tier_id)) return { ok: false, message: '当前会员等级不满足优惠券使用条件' };
+  }
+  const eligibleItems = items.filter(item => (!definition.product_id || Number(item.product_id) === Number(definition.product_id)) && (!definition.category_id || Number(item.category_id) === Number(definition.category_id)));
+  if (!eligibleItems.length) return { ok: false, message: '当前商品不满足优惠券使用范围' };
+  const eligibleAmount = eligibleItems.reduce((sum, item) => sum + Number(item.price_cents || 0) * Number(item.quantity || 0), 0);
+  const discount = definition.type === 'discount'
+    ? Math.min(eligibleAmount, Math.max(0, Math.round(eligibleAmount * (1 - Number(definition.discount_rate)))))
+    : Math.min(eligibleAmount, Math.max(0, Number(definition.amount_cents)));
+  if (discount <= 0) return { ok: false, message: '当前优惠券无法抵扣' };
+  return { ok: true, discount, eligibleAmount, definition };
+}
+
+function getCouponForOrder(userId, userCouponId, items, options = {}) {
+  if (!userCouponId) return null;
+  const coupon = db.prepare(`SELECT uc.*, cd.name, cd.type, cd.amount_cents, cd.discount_rate, cd.min_order_cents,
+    cd.product_id, cd.category_id, cd.member_tier_id, cd.valid_from, cd.valid_until, cd.icon_url, cd.description, cd.status AS definition_status
+    FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id
+    WHERE uc.id = ?`).get(userCouponId);
+  const result = couponUsable(coupon, userId, items, options);
+  if (!result.ok) throw new Error(result.message);
+  return { ...coupon, ...result };
+}
+
+function lockCoupon(orderId, couponId, userId) {
+  if (!couponId) return;
+  const changed = db.prepare("UPDATE user_coupons SET status = 'locked', order_id = ? WHERE id = ? AND user_id = ? AND status = 'available'").run(orderId, couponId, userId).changes;
+  if (!changed) throw new Error('优惠券已被使用或锁定，请重新选择');
+}
+
+function consumeCoupon(order) {
+  if (!order.coupon_id) return;
+  const changed = db.prepare("UPDATE user_coupons SET status = 'used', used_at = CURRENT_TIMESTAMP WHERE id = ? AND order_id = ? AND status = 'locked'").run(order.coupon_id, order.id).changes;
+  if (!changed) throw new Error('优惠券状态异常，无法完成订单');
+}
+
+function releaseCoupon(order) {
+  if (!order?.coupon_id) return;
+  db.prepare("UPDATE user_coupons SET status = 'available', order_id = NULL WHERE id = ? AND order_id = ? AND status = 'locked'").run(order.coupon_id, order.id);
+}
+
+function orderTotals(items, userId, selectedCouponId) {
+  const pricing = memberPricing(userId);
+  const original = items.reduce((sum, item) => sum + item.price_cents * item.quantity, 0);
+  const coupon = selectedCouponId ? getCouponForOrder(userId, selectedCouponId, items) : null;
+  const member = items.reduce((sum, item) => sum + unitPrice(item, pricing) * item.quantity, 0);
+  const payableBeforeCoupon = coupon ? original : member;
+  const couponDiscount = coupon?.discount || 0;
+  const payable = Math.max(0, payableBeforeCoupon - couponDiscount);
+  return { pricing, original, member, payable, couponDiscount, coupon, usingCoupon: Boolean(coupon) };
+}
+
 router.get('/products', (req, res) => {
   syncProductAvailability();
   const storeId = Number(req.query.storeId || 1);
-  const rows = db.prepare("SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id WHERE p.store_id = ? AND p.status = 'active' AND p.stock > 0 ORDER BY c.sort, p.sort, p.id").all(storeId);
+  const rows = db.prepare("SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id WHERE p.store_id = ? AND p.status = 'active' AND p.stock - p.reserved_stock > 0 ORDER BY c.sort, p.sort, p.id").all(storeId);
   const pricing = memberPricing(currentUserId(req));
   res.json({ membership: pricing, products: rows.map(row => ({ ...productView(row), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) })), categories: [...new Set(rows.map(row => row.category))] });
 });
@@ -394,10 +736,10 @@ router.get('/tables/:tableNo/session', requireWechatUser, (req, res) => {
 });
 
 router.get('/sessions/:sessionId/cart', (req, res) => {
-  const rows = db.prepare("SELECT ci.id, ci.product_id, ci.quantity, ci.added_by_user_id, p.name, p.detail, p.price_cents, p.member_price_cents, p.image_url, p.color, p.stock FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending' ORDER BY ci.id").all(req.params.sessionId);
+  const rows = db.prepare("SELECT ci.id, ci.product_id, ci.quantity, ci.added_by_user_id, p.name, p.detail, p.price_cents, p.member_price_cents, p.image_url, p.color, p.stock, p.reserved_stock FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending' ORDER BY ci.id").all(req.params.sessionId);
   const pricing = memberPricing(currentUserId(req));
   const totals = rows.reduce((sum, row) => { sum.original += row.price_cents * row.quantity; sum.member += unitPrice(row, pricing) * row.quantity; return sum; }, { original: 0, member: 0 });
-  res.json({ membership: pricing, items: rows.map(row => ({ ...row, price: centsToMoney(row.price_cents), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) })), totals: { original: centsToMoney(totals.original), member: centsToMoney(totals.member), discount: centsToMoney(totals.original - totals.member), points: Math.floor(totals.member / 100 * pricing.pointsRate) } });
+  res.json({ membership: pricing, items: rows.map(row => ({ ...row, stock: Math.max(row.stock - row.reserved_stock, 0), physicalStock: row.stock, reservedStock: row.reserved_stock, availableStock: Math.max(row.stock - row.reserved_stock, 0), price: centsToMoney(row.price_cents), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) })), totals: { original: centsToMoney(totals.original), member: centsToMoney(totals.member), discount: centsToMoney(totals.original - totals.member), points: Math.floor(totals.member / 100 * pricing.pointsRate) } });
 });
 
 router.post('/sessions/:sessionId/cart/items', (req, res) => {
@@ -408,10 +750,11 @@ router.post('/sessions/:sessionId/cart/items', (req, res) => {
   try {
     db.transaction(() => {
       const session = db.prepare("SELECT * FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
-      const product = db.prepare("SELECT * FROM products WHERE id = ? AND status = 'active' AND stock > 0").get(productId);
+      const product = db.prepare("SELECT * FROM products WHERE id = ? AND status = 'active' AND stock - reserved_stock > 0").get(productId);
       if (!session || !product) throw new Error('商品已下架或库存不足');
       const inCart = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS quantity FROM cart_items WHERE session_id = ? AND product_id = ? AND status = 'pending'").get(session.id, product.id).quantity;
-      if (inCart + requested > product.stock) throw new Error(`库存不足，当前最多还可下单 ${Math.max(product.stock - inCart, 0)} 件`);
+      const available = Math.max(product.stock - product.reserved_stock, 0);
+      if (inCart + requested > available) throw new Error(`库存不足，当前最多还可下单 ${Math.max(available - inCart, 0)} 件`);
       db.prepare('INSERT OR IGNORE INTO session_members (session_id, user_id) VALUES (?, ?)').run(session.id, userId);
       const existing = db.prepare("SELECT id FROM cart_items WHERE session_id = ? AND product_id = ? AND added_by_user_id = ? AND status = 'pending'").get(session.id, product.id, userId);
       if (existing) db.prepare('UPDATE cart_items SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(requested, existing.id);
@@ -426,11 +769,12 @@ router.patch('/sessions/:sessionId/cart/items/:itemId', (req, res) => {
   if (!Number.isInteger(quantity) || quantity < 0) return res.status(400).json({ message: '数量无效' });
   try {
     db.transaction(() => {
-      const item = db.prepare("SELECT ci.*, p.stock, p.status AS product_status FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.id = ? AND ci.session_id = ? AND ci.status = 'pending'").get(req.params.itemId, req.params.sessionId);
+      const item = db.prepare("SELECT ci.*, p.stock, p.reserved_stock, p.status AS product_status FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.id = ? AND ci.session_id = ? AND ci.status = 'pending'").get(req.params.itemId, req.params.sessionId);
       if (!item) throw new Error('购物车商品不存在或已下架');
       if (quantity > 0) {
         const other = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS quantity FROM cart_items WHERE session_id = ? AND product_id = ? AND status = 'pending' AND id != ?").get(req.params.sessionId, item.product_id, item.id).quantity;
-        if (item.product_status !== 'active' || item.stock <= 0 || other + quantity > item.stock) throw new Error(`库存不足，当前最多可下单 ${Math.max(item.stock - other, 0)} 件`);
+        const available = Math.max(item.stock - item.reserved_stock, 0);
+        if (item.product_status !== 'active' || available <= 0 || other + quantity > available) throw new Error(`库存不足，当前最多可下单 ${Math.max(available - other, 0)} 件`);
         db.prepare("UPDATE cart_items SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(quantity, item.id);
       } else db.prepare("UPDATE cart_items SET status = 'removed', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.id);
     })();
@@ -438,19 +782,32 @@ router.patch('/sessions/:sessionId/cart/items/:itemId', (req, res) => {
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
 
-function settleOrder(order, method, req) {
+function settleOrder(order, method, req, reserved = true) {
   const items = db.prepare('SELECT product_id, quantity, cart_item_id FROM order_items WHERE order_id = ?').all(order.id);
   for (const item of items) {
-    if (!db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?').run(item.quantity, item.product_id, item.quantity).changes) throw new Error('库存不足，无法完成支付');
-    db.prepare("UPDATE cart_items SET status = 'settled' WHERE id = ?").run(item.cart_item_id);
+    const statement = reserved
+      ? 'UPDATE products SET stock = stock - ?, reserved_stock = reserved_stock - ? WHERE id = ? AND stock >= ? AND reserved_stock >= ?'
+      : 'UPDATE products SET stock = stock - ? WHERE id = ? AND stock - reserved_stock >= ?';
+    const params = reserved
+      ? [item.quantity, item.quantity, item.product_id, item.quantity, item.quantity]
+      : [item.quantity, item.product_id, item.quantity];
+    if (!db.prepare(statement).run(...params).changes) throw new Error('库存不足，无法完成支付');
+    if (item.cart_item_id) db.prepare("UPDATE cart_items SET status = 'settled' WHERE id = ?").run(item.cart_item_id);
   }
   db.prepare("UPDATE orders SET status = 'awaiting_delivery', payment_status = 'paid', payment_method = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ?").run(method, order.id);
+  consumeCoupon(order);
   const points = Math.floor(order.payable_amount_cents / 100 * memberPricing(order.payer_user_id).pointsRate);
   db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(points, order.payer_user_id);
   db.prepare('INSERT INTO points_ledger (user_id, order_id, points, reason) VALUES (?, ?, ?, ?)').run(order.payer_user_id, order.id, points, '订单消费');
   const before = db.prepare('SELECT member_tier_id, member_level FROM users WHERE id = ?').get(order.payer_user_id);
   const after = syncMembership(order.payer_user_id);
   if (req.staff && before?.member_tier_id !== after?.member_tier_id) audit(req, '会员等级自动调整', `ID ${order.payer_user_id}: ${before?.member_level || '普通会员'} -> ${after?.member_level || '普通会员'}`);
+  const orderNo = order.order_no || db.prepare('SELECT order_no FROM orders WHERE id = ?').get(order.id)?.order_no;
+  queueUserMessage(order.payer_user_id, 'order_paid', { orderNo }, 'order', order.id, `订单已支付：${orderNo}`);
+  queueUserMessage(order.payer_user_id, 'order_awaiting_delivery', { orderNo }, 'order_delivery', order.id, `订单待送达：${orderNo}`);
+  if (before?.member_tier_id !== after?.member_tier_id && after?.member_tier_id) {
+    queueUserMessage(order.payer_user_id, 'member_upgraded', { memberLevel: after.member_level }, 'member', after.member_tier_id, `会员升级：${after.member_level}`);
+  }
 }
 
 function completeWechatOrder(orderNo, transactionId) {
@@ -466,7 +823,7 @@ function completeWechatOrder(orderNo, transactionId) {
       db.prepare('INSERT INTO wallet_transactions (user_id, type, stored_cents, bonus_cents, remark) VALUES (?, ?, ?, ?, ?)').run(order.payer_user_id, 'order_payment', -order.stored_paid_cents, -order.bonus_paid_cents, order.order_no);
     }
     db.prepare('UPDATE orders SET wechat_transaction_id = ? WHERE id = ?').run(transactionId || null, order.id);
-    settleOrder({ ...order, payable_amount_cents: order.payable_amount_cents }, order.payment_method, {});
+    settleOrder({ ...order, payable_amount_cents: order.payable_amount_cents }, order.payment_method, {}, true);
     return db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
   })();
 }
@@ -475,15 +832,51 @@ function releasePendingOrder(orderId, reason) {
   return db.transaction(() => {
     const order = db.prepare("SELECT * FROM orders WHERE id = ? AND payment_status = 'pending'").get(orderId);
     if (!order) return null;
-    const items = db.prepare('SELECT cart_item_id FROM order_items WHERE order_id = ?').all(order.id);
+    const items = db.prepare('SELECT cart_item_id, product_id, quantity FROM order_items WHERE order_id = ?').all(order.id);
+    const releaseReserved = db.prepare('UPDATE products SET reserved_stock = MAX(reserved_stock - ?, 0) WHERE id = ?');
+    items.forEach(item => releaseReserved.run(item.quantity, item.product_id));
     if (order.payment_method === 'mixed') {
       db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = MAX(stored_reserved_cents - ?, 0), bonus_reserved_cents = MAX(bonus_reserved_cents - ?, 0), updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(order.stored_paid_cents, order.bonus_paid_cents, order.payer_user_id);
     }
     const restoreCartItem = db.prepare("UPDATE cart_items SET status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'checking_out'");
     items.forEach(item => restoreCartItem.run(item.cart_item_id));
     db.prepare("UPDATE orders SET payment_status = 'closed', status = 'cancelled', payment_error = ? WHERE id = ? AND payment_status = 'pending'").run(reason, order.id);
+    releaseCoupon(order);
     return db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
   })();
+}
+
+async function closePendingWechatOrder(order, reason) {
+  if (order.wechat_prepay_id) {
+    let result;
+    try {
+      result = await queryPayment(order.order_no);
+    } catch (error) {
+      if (error.code === 'WECHAT_ORDER_NOT_FOUND') return { cancelled: releasePendingOrder(order.id, reason) };
+      throw error;
+    }
+    if (result.trade_state === 'SUCCESS') {
+      completeWechatOrder(order.order_no, result.transaction_id);
+      return { paid: true };
+    }
+    if (result.trade_state === 'NOTPAY') {
+      // Querying NOTPAY is only a snapshot. Close the trade at WeChat before
+      // giving back the locally reserved money, coupon and cart items.
+      try { await closePayment(order.order_no); }
+      catch (error) {
+        if (error.status === 404 || error.code === 'WECHAT_ORDER_NOT_FOUND') return { cancelled: releasePendingOrder(order.id, reason) };
+        const latest = await queryPayment(order.order_no);
+        if (latest.trade_state === 'SUCCESS') {
+          completeWechatOrder(order.order_no, latest.transaction_id);
+          return { paid: true };
+        }
+        if (!['CLOSED', 'REVOKED', 'PAYERROR'].includes(latest.trade_state)) throw error;
+      }
+    } else if (!['CLOSED', 'REVOKED', 'PAYERROR'].includes(result.trade_state)) {
+      throw new Error('微信支付状态尚未确认，请稍后重试');
+    }
+  }
+  return { cancelled: releasePendingOrder(order.id, reason) };
 }
 
 function reconcilePendingWalletReservations() {
@@ -531,18 +924,12 @@ router.post('/me/orders/:orderNo/pay', async (req, res) => {
 
   const paymentExpireAt = orderExpiryAt(order);
   if (paymentExpireAt && new Date(paymentExpireAt) <= new Date()) {
-    if (!order.wechat_prepay_id) {
-      releasePendingOrder(order.id, '微信支付订单已过期关闭');
-      return res.status(409).json({ message: '订单已过期，请重新下单' });
-    }
     try {
-      const result = await queryPayment(order.order_no);
-      if (result.trade_state === 'SUCCESS') {
-        completeWechatOrder(order.order_no, result.transaction_id);
+      const result = await closePendingWechatOrder(order, '微信支付订单已过期关闭');
+      if (result.paid) {
         return res.json({ order: db.prepare('SELECT payment_status, status FROM orders WHERE id = ?').get(order.id), payment: null });
       }
-      if (['NOTPAY', 'CLOSED', 'REVOKED', 'PAYERROR'].includes(result.trade_state)) releasePendingOrder(order.id, '微信支付订单已过期关闭');
-      else return res.status(409).json({ message: '订单支付状态尚未确认，请稍后重试' });
+      if (result.cancelled) queueUserMessage(userId, 'order_cancelled', { orderNo: order.order_no }, 'order', order.id);
       return res.status(409).json({ message: '订单已过期，请重新下单' });
     } catch (error) {
       return res.status(error.status || 503).json({ message: error.message, code: error.code || 'WECHAT_QUERY_ERROR' });
@@ -553,40 +940,41 @@ router.post('/me/orders/:orderNo/pay', async (req, res) => {
     const user = db.prepare('SELECT wechat_openid FROM users WHERE id = ?').get(userId);
     if (!user?.wechat_openid) return res.status(409).json({ message: '当前微信账号尚未完成登录绑定，请重新进入小程序' });
     const result = await createJsapiPayment({ orderNo: order.order_no, description: `酒吧订单 ${order.order_no}`, totalCents: order.wechat_paid_cents, openid: user.wechat_openid });
-    db.prepare('UPDATE orders SET wechat_prepay_id = ?, payment_expire_at = ?, payment_error = \'\' WHERE id = ? AND payment_status = \'pending\'').run(result.prepayId, new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString(), order.id);
+    db.prepare('UPDATE orders SET wechat_prepay_id = ?, payment_error = \'\' WHERE id = ? AND payment_status = \'pending\'').run(result.prepayId, order.id);
     res.json({ payment: result.payment, message: order.payment_method === 'mixed' ? `余额抵扣 ${centsToMoney(order.stored_paid_cents + order.bonus_paid_cents)}，请完成微信支付` : '请完成微信支付' });
   } catch (error) {
     res.status(error.status || 502).json({ message: error.message, code: error.code || 'WECHAT_PAYMENT_ERROR' });
   }
 });
 
-router.post('/me/orders/:orderNo/cancel', (req, res) => {
+router.post('/me/orders/:orderNo/cancel', async (req, res) => {
   const userId = currentUserId(req);
   if (!userId) return res.status(401).json({ message: '请先登录' });
   const order = db.prepare('SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, userId);
   if (!order) return res.status(404).json({ message: '订单不存在' });
   if (order.payment_status !== 'pending') return res.status(409).json({ message: order.payment_status === 'paid' ? '已支付订单不能取消' : '订单已关闭，不能重复取消' });
-  const cancelled = releasePendingOrder(order.id, '用户取消支付');
+  let result;
+  try { result = await closePendingWechatOrder(order, '用户取消支付'); }
+  catch (error) { return res.status(error.status || 503).json({ message: error.message, code: error.code || 'WECHAT_CLOSE_ERROR' }); }
+  if (result.paid) return res.status(409).json({ message: '订单已经支付，不能取消' });
+  const cancelled = result.cancelled;
   if (!cancelled) return res.status(409).json({ message: '订单状态已发生变化，请刷新订单列表' });
+  queueUserMessage(userId, 'order_cancelled', { orderNo: cancelled.order_no }, 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
   res.json({ ok: true, order: { orderNo: cancelled.order_no, paymentStatus: cancelled.payment_status, status: cancelled.status } });
 });
 
 function releaseExpiredWechatOrders() {
   return Promise.all(db.prepare("SELECT * FROM orders WHERE payment_status = 'pending' AND ((payment_expire_at IS NOT NULL AND payment_expire_at < ?) OR (payment_expire_at IS NULL AND datetime(created_at, '+10 minutes') < datetime('now')))").all(new Date().toISOString()).map(async order => {
-    if (!order.wechat_prepay_id) {
-      releasePendingOrder(order.id, '微信支付订单已过期关闭');
-      return;
-    }
     try {
-      const result = await queryPayment(order.order_no);
-      if (result.trade_state === 'SUCCESS') completeWechatOrder(order.order_no, result.transaction_id);
-      else if (['NOTPAY', 'CLOSED', 'REVOKED', 'PAYERROR'].includes(result.trade_state)) releasePendingOrder(order.id, '微信支付超时关闭');
+      const result = await closePendingWechatOrder(order, '微信支付超时关闭');
+      if (result.cancelled) queueUserMessage(result.cancelled.payer_user_id, 'order_cancelled', { orderNo: order.order_no }, 'order', order.id, `订单已取消：${order.order_no}`);
     } catch (error) {
       // 本地演示环境没有微信商户配置，不能让测试订单永久卡在待支付。
       // 生产环境仍保留查询失败不自动关闭的保护，避免网络抖动误取消真实订单。
       const { groups } = getIntegrationStatus();
-      if (!groups.wechatPay?.configured) {
-        releasePendingOrder(order.id, '微信支付未配置，订单超时关闭');
+      if (!groups.wechatPay?.configured && !order.wechat_prepay_id) {
+        const cancelled = releasePendingOrder(order.id, '微信支付未配置，订单超时关闭');
+        if (cancelled) queueUserMessage(cancelled.payer_user_id, 'order_cancelled', { orderNo: cancelled.order_no }, 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
       } else {
         console.error(`[wechat] 查询超时订单 ${order.order_no} 失败: ${error.message}`);
       }
@@ -597,6 +985,22 @@ reconcilePendingWalletReservations();
 releaseExpiredWechatOrders().catch(error => console.error(`[wechat] 启动时检查超时订单失败: ${error.message}`));
 setInterval(() => releaseExpiredWechatOrders(), 60 * 1000).unref();
 
+function notifyExpiringStorage() {
+  const now = new Date();
+  const limit = new Date(now.getTime() + 3 * 86400000);
+  const records = db.prepare(`SELECT id, user_id, product_name, expires_at
+    FROM storage_records
+    WHERE status = 'stored' AND quantity > 0
+      AND datetime(expires_at) > datetime(?)
+      AND datetime(expires_at) <= datetime(?)`).all(now.toISOString(), limit.toISOString());
+  records.forEach(record => queueUserMessage(record.user_id, 'storage_expiring', {
+    productName: record.product_name,
+    expireAt: String(record.expires_at).slice(0, 10)
+  }, 'storage_expiry', record.id, `存酒即将到期：${record.id}`));
+}
+notifyExpiringStorage();
+setInterval(notifyExpiringStorage, 60 * 60 * 1000).unref();
+
 const posMember = row => row && ({ id: row.id, phone: row.phone, nickname: row.nickname, level: row.member_level, stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) });
 const posMemberSql = 'SELECT u.*, COALESCE(w.stored_cents,0) AS stored_cents, COALESCE(w.bonus_cents,0) AS bonus_cents FROM users u LEFT JOIN wallet_accounts w ON w.user_id = u.id WHERE u.phone = ?';
 router.get('/admin/pos', (req, res) => {
@@ -604,7 +1008,7 @@ router.get('/admin/pos', (req, res) => {
   const phone = String(req.query.phone || '').trim();
   if (phone && !/^1[3-9]\d{9}$/.test(phone)) return res.status(400).json({ message: '请输入完整会员手机号' });
   const member = phone ? db.prepare(posMemberSql).get(phone) : null;
-  res.json({ member: posMember(member), tables: db.prepare("SELECT id, table_no FROM tables WHERE status != 'disabled' ORDER BY table_no").all(), products: db.prepare("SELECT id, name, image_url, price_cents, member_price_cents, stock, category_id FROM products WHERE status = 'active' AND stock > 0 ORDER BY sort,id").all().map(row => ({ ...row, price: centsToMoney(row.price_cents), memberPrice: member ? centsToMoney(unitPrice(row, memberPricing(member.id))) : centsToMoney(row.price_cents) })), packages: db.prepare("SELECT id,name,pay_cents,stored_cents,bonus_cents FROM wallet_packages WHERE status = 'active' ORDER BY pay_cents").all().map(row => ({ ...row, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })) });
+  res.json({ member: posMember(member), tables: db.prepare("SELECT id, table_no FROM tables WHERE status != 'disabled' ORDER BY table_no").all(), products: db.prepare("SELECT id, name, image_url, price_cents, member_price_cents, stock, reserved_stock, category_id FROM products WHERE status = 'active' AND stock - reserved_stock > 0 ORDER BY sort,id").all().map(row => ({ ...row, physicalStock: row.stock, reservedStock: row.reserved_stock, availableStock: Math.max(row.stock - row.reserved_stock, 0), stock: Math.max(row.stock - row.reserved_stock, 0), price: centsToMoney(row.price_cents), memberPrice: member ? centsToMoney(unitPrice(row, memberPricing(member.id))) : centsToMoney(row.price_cents) })), packages: db.prepare("SELECT id,name,pay_cents,stored_cents,bonus_cents FROM wallet_packages WHERE status = 'active' ORDER BY pay_cents").all().map(row => ({ ...row, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })) });
 });
 
 router.post('/admin/pos/orders', (req, res) => {
@@ -618,7 +1022,7 @@ router.post('/admin/pos/orders', (req, res) => {
       const prior = db.prepare('SELECT * FROM orders WHERE pos_request_id = ?').get(requestId);
       if (prior) return prior;
       const rows = items.map(item => ({ ...item, product: db.prepare("SELECT * FROM products WHERE id = ? AND status = 'active'").get(item.productId) }));
-      if (rows.some(i => !i.product || i.product.stock < i.quantity)) throw new Error('商品已下架或库存不足');
+      if (rows.some(i => !i.product || i.product.stock - i.product.reserved_stock < i.quantity)) throw new Error('商品已下架或可售库存不足');
       const pricing = memberPricing(member.id);
       const original = rows.reduce((n, i) => n + i.product.price_cents * i.quantity, 0);
       const payable = rows.reduce((n, i) => n + unitPrice(i.product, pricing) * i.quantity, 0);
@@ -634,10 +1038,11 @@ router.post('/admin/pos/orders', (req, res) => {
       const insert = db.prepare('INSERT INTO order_items (order_id,product_id,product_name,quantity,original_price_cents,paid_price_cents,cost_price_cents) VALUES (?,?,?,?,?,?,?)');
       rows.forEach(i => insert.run(id, i.product.id, i.product.name, i.quantity, i.product.price_cents, unitPrice(i.product, pricing), i.product.cost_cents));
       if (method === 'balance') {
-        db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents - ?, bonus_cents = bonus_cents - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(stored, bonus, member.id);
+        const changed = db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents - ?, bonus_cents = bonus_cents - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND stored_cents >= ? AND bonus_cents >= ?').run(stored, bonus, member.id, stored, bonus).changes;
+        if (!changed) throw new Error('储值余额不足，请刷新后重试');
         db.prepare('INSERT INTO wallet_transactions (user_id,type,stored_cents,bonus_cents,remark) VALUES (?,?,?,?,?)').run(member.id, 'order_payment', -stored, -bonus, orderNo);
       }
-      settleOrder({ id, payer_user_id: member.id, payable_amount_cents: payable }, method, req);
+      settleOrder({ id, payer_user_id: member.id, payable_amount_cents: payable }, method, req, false);
       audit(req, '收银点单', `${orderNo} 桌号 ${table.table_no} 手机尾号 ${member.phone.slice(-4)} ${paymentMethod}`);
       return db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
     })();
@@ -664,6 +1069,7 @@ router.post('/admin/pos/recharges', (req, res) => {
       audit(req, '收银储值', `${offer.name} 手机尾号 ${member.phone.slice(-4)} ${paymentMethod} ${centsToMoney(offer.pay_cents)}元`);
       return db.prepare('SELECT * FROM wallet_transactions WHERE id = ?').get(id);
     })();
+    queueUserMessage(member.id, 'wallet_recharged', { stored: centsToMoney(transaction.stored_cents), bonus: centsToMoney(transaction.bonus_cents) }, 'wallet_transaction', transaction.id, `储值到账：${transaction.id}`);
     res.status(201).json({ transactionId: transaction.id, pay: centsToMoney(transaction.pay_cents), stored: centsToMoney(transaction.stored_cents), bonus: centsToMoney(transaction.bonus_cents) });
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
@@ -671,54 +1077,69 @@ router.post('/admin/pos/recharges', (req, res) => {
 router.get('/sessions/:sessionId/checkout', (req, res) => {
   const session = db.prepare("SELECT id FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
   if (!session) return res.status(404).json({ message: '桌台会话不存在' });
-  const rows = db.prepare("SELECT ci.quantity, p.price_cents, p.member_price_cents, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(session.id);
-  const pricing = memberPricing(currentUserId(req));
-  const payable = rows.reduce((n, item) => n + unitPrice(item, pricing) * item.quantity, 0);
-  const bonusEligible = rows.reduce((n, item) => n + (item.allow_bonus ? unitPrice(item, pricing) * item.quantity : 0), 0);
-  const wallet = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(currentUserId(req)) || { stored_cents: 0, bonus_cents: 0 };
-  const bonusUsable = Math.min(wallet.bonus_cents, bonusEligible, payable);
-  const storedUsable = Math.min(wallet.stored_cents, payable - bonusUsable);
+  const userId = currentUserId(req);
+  const rows = db.prepare("SELECT ci.quantity, p.id AS product_id, p.category_id, p.price_cents, p.member_price_cents, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(session.id);
+  let totals;
+  try { totals = orderTotals(rows, userId, req.query.userCouponId ? Number(req.query.userCouponId) : null); }
+  catch (error) { return res.status(409).json({ message: error.message }); }
+  const pricing = totals.pricing;
+  const payable = totals.payable;
+  const bonusEligible = totals.usingCoupon ? 0 : rows.reduce((n, item) => n + (item.allow_bonus ? unitPrice(item, pricing) * item.quantity : 0), 0);
+  const wallet = db.prepare('SELECT stored_cents, bonus_cents, stored_reserved_cents, bonus_reserved_cents FROM wallet_accounts WHERE user_id = ?').get(currentUserId(req)) || { stored_cents: 0, bonus_cents: 0, stored_reserved_cents: 0, bonus_reserved_cents: 0 };
+  const bonusUsable = totals.usingCoupon ? 0 : Math.min(Math.max(wallet.bonus_cents - wallet.bonus_reserved_cents, 0), bonusEligible, payable);
+  const storedUsable = Math.min(Math.max(wallet.stored_cents - wallet.stored_reserved_cents, 0), payable - bonusUsable);
   const balanceDeduction = bonusUsable + storedUsable;
   const wechatDue = payable - balanceDeduction;
-  res.json({ payable: centsToMoney(payable), stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0 });
+  res.json({ original: centsToMoney(totals.original), member: centsToMoney(totals.member), payable: centsToMoney(payable), discount: centsToMoney(totals.original - payable), memberDiscount: totals.usingCoupon ? 0 : centsToMoney(totals.original - totals.member), couponDiscount: centsToMoney(totals.couponDiscount), coupon: totals.coupon ? { id: totals.coupon.id, name: totals.coupon.name, discount: centsToMoney(totals.couponDiscount) } : null, usingCoupon: totals.usingCoupon, stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0, couponCannotUseBonus: totals.usingCoupon });
 });
 
 router.post('/sessions/:sessionId/orders', async (req, res) => {
   const userId = currentUserId(req);
   const method = req.body?.paymentMethod;
+  const selectedCouponId = req.body?.userCouponId ? Number(req.body.userCouponId) : null;
   const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
   if (note.length > 200) return res.status(400).json({ message: '订单备注不能超过 200 个字' });
   if (!['balance','wechat','mixed'].includes(method)) return res.status(400).json({ message: '请选择支付方式' });
-  if (method !== 'balance') {
-    const user = db.prepare('SELECT wechat_openid FROM users WHERE id = ?').get(userId);
-    if (!user?.wechat_openid) return res.status(409).json({ message: '当前微信账号尚未完成登录绑定，请重新进入小程序' });
-  }
   const session = db.prepare("SELECT * FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
-  const items = db.prepare("SELECT ci.*, p.name, p.price_cents, p.member_price_cents, p.cost_cents, p.stock, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(req.params.sessionId);
+  const items = db.prepare("SELECT ci.*, p.name, p.price_cents, p.member_price_cents, p.cost_cents, p.stock, p.reserved_stock, p.allow_bonus, p.category_id FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(req.params.sessionId);
   if (!session || !items.length) return res.status(400).json({ message: '桌台没有待支付商品' });
   const existing = db.prepare("SELECT o.* FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.session_id = ? AND o.payment_status = 'pending' AND oi.cart_item_id IN (SELECT id FROM cart_items WHERE session_id = ? AND status = 'pending') ORDER BY o.id DESC LIMIT 1").get(session.id, session.id);
   if (existing) return res.status(409).json({ message: `订单 ${existing.order_no} 正在等待支付，请勿重复提交` });
-  if (items.some(item => item.quantity > item.stock)) return res.status(409).json({ message: '部分商品库存不足' });
-  const pricing = memberPricing(userId);
-  const totals = items.reduce((sum, item) => { sum.original += item.price_cents * item.quantity; sum.member += unitPrice(item, pricing) * item.quantity; return sum; }, { original: 0, member: 0 });
-  const eligible = items.reduce((n, item) => n + (item.allow_bonus ? unitPrice(item, pricing) * item.quantity : 0), 0);
+  if (items.some(item => item.quantity > Math.max(item.stock - item.reserved_stock, 0))) return res.status(409).json({ message: '部分商品库存不足，请减少数量后重试' });
+  let totals;
+  try { totals = orderTotals(items, userId, selectedCouponId); }
+  catch (error) { return res.status(409).json({ message: error.message }); }
+  if (method !== 'balance' && totals.payable > 0) {
+    const user = db.prepare('SELECT wechat_openid FROM users WHERE id = ?').get(userId);
+    if (!user?.wechat_openid) return res.status(409).json({ message: '当前微信账号尚未完成登录绑定，请重新进入小程序' });
+  }
+  const pricing = totals.pricing;
+  const eligible = totals.usingCoupon ? 0 : items.reduce((n, item) => n + (item.allow_bonus ? unitPrice(item, pricing) * item.quantity : 0), 0);
   const orderNo = `EH${Date.now()}${crypto.randomInt(100, 999)}`;
   try { const order = db.transaction(() => {
-    const wallet = db.prepare('SELECT stored_cents, bonus_cents FROM wallet_accounts WHERE user_id = ?').get(userId) || { stored_cents: 0, bonus_cents: 0 };
-    const bonus = method === 'wechat' ? 0 : Math.min(wallet.bonus_cents, eligible, totals.member);
-    const stored = method === 'wechat' ? 0 : Math.min(wallet.stored_cents, totals.member - bonus);
-    const wechat = totals.member - bonus - stored;
+    const wallet = db.prepare('SELECT stored_cents, bonus_cents, stored_reserved_cents, bonus_reserved_cents FROM wallet_accounts WHERE user_id = ?').get(userId) || { stored_cents: 0, bonus_cents: 0, stored_reserved_cents: 0, bonus_reserved_cents: 0 };
+    const bonus = totals.usingCoupon || method === 'wechat' ? 0 : Math.min(Math.max(wallet.bonus_cents - wallet.bonus_reserved_cents, 0), eligible, totals.payable);
+    const stored = method === 'wechat' ? 0 : Math.min(Math.max(wallet.stored_cents - wallet.stored_reserved_cents, 0), totals.payable - bonus);
+    const wechat = totals.payable - bonus - stored;
     if (method === 'balance' && wechat > 0) throw new Error('余额不足，请选择组合支付或微信支付');
     if (method === 'mixed' && (wechat <= 0 || bonus + stored <= 0)) throw new Error('当前订单不需要组合支付');
-    const paymentExpireAt = method === 'balance' ? null : new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString();
-    const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents, payment_expire_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.member, totals.member, method, stored, bonus, wechat, paymentExpireAt, note);
+    const paymentExpireAt = method === 'balance' || totals.payable === 0 ? null : new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString();
+    const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, coupon_id, coupon_discount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents, payment_expire_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.payable, totals.payable, totals.coupon?.id || null, totals.couponDiscount, method, stored, bonus, wechat, paymentExpireAt, note);
     const insertItem = db.prepare('INSERT INTO order_items (order_id, cart_item_id, product_id, product_name, quantity, original_price_cents, paid_price_cents, cost_price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-    items.forEach(item => insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, item.quantity, item.price_cents, unitPrice(item, pricing), item.cost_cents));
+    items.forEach(item => insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, item.quantity, item.price_cents, totals.usingCoupon ? item.price_cents : unitPrice(item, pricing), item.cost_cents));
+    lockCoupon(result.lastInsertRowid, totals.coupon?.id, userId);
     db.prepare(`UPDATE cart_items SET status = 'checking_out' WHERE session_id = ? AND status = 'pending'`).run(session.id);
-    if (method === 'balance') {
-      db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents - ?, bonus_cents = bonus_cents - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(stored, bonus, userId);
-      db.prepare('INSERT INTO wallet_transactions (user_id, type, stored_cents, bonus_cents, remark) VALUES (?, ?, ?, ?, ?)').run(userId, 'order_payment', -stored, -bonus, orderNo);
-      settleOrder({ id: result.lastInsertRowid, payer_user_id: userId, payable_amount_cents: totals.member }, method, req);
+    const reserve = db.prepare("UPDATE products SET reserved_stock = reserved_stock + ? WHERE id = ? AND status = 'active' AND stock - reserved_stock >= ?");
+    for (const item of items) {
+      if (!reserve.run(item.quantity, item.product_id, item.quantity).changes) throw new Error(`商品“${item.name}”库存不足，请刷新后重试`);
+    }
+    if (method === 'balance' || totals.payable === 0) {
+      if (stored || bonus) {
+        const changed = db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents - ?, bonus_cents = bonus_cents - ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND stored_cents - stored_reserved_cents >= ? AND bonus_cents - bonus_reserved_cents >= ?').run(stored, bonus, userId, stored, bonus).changes;
+        if (!changed) throw new Error('余额不足，请重新获取支付金额');
+        db.prepare('INSERT INTO wallet_transactions (user_id, type, stored_cents, bonus_cents, remark) VALUES (?, ?, ?, ?, ?)').run(userId, 'order_payment', -stored, -bonus, orderNo);
+      }
+      settleOrder({ id: result.lastInsertRowid, payer_user_id: userId, payable_amount_cents: totals.payable, coupon_id: totals.coupon?.id || null }, method, req, true);
     }
     if (method === 'mixed') {
       const changed = db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = stored_reserved_cents + ?, bonus_reserved_cents = bonus_reserved_cents + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND stored_cents - stored_reserved_cents >= ? AND bonus_cents - bonus_reserved_cents >= ?').run(stored, bonus, userId, stored, bonus).changes;
@@ -726,19 +1147,21 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
     }
     return db.prepare('SELECT * FROM orders WHERE id = ?').get(result.lastInsertRowid);
   })();
-  let payment = { provider: 'balance', status: 'paid', message: '余额支付成功' };
-  if (method !== 'balance') {
+  let payment = { provider: order.payable_amount_cents === 0 ? 'coupon' : 'balance', status: 'paid', message: order.payable_amount_cents === 0 ? '优惠券抵扣成功' : '余额支付成功' };
+  if (method !== 'balance' && order.payable_amount_cents > 0) {
     try {
       const user = db.prepare('SELECT wechat_openid FROM users WHERE id = ?').get(userId);
       const result = await createJsapiPayment({ orderNo: order.order_no, description: `酒吧订单 ${order.order_no}`, totalCents: order.wechat_paid_cents, openid: user.wechat_openid });
-      db.prepare('UPDATE orders SET wechat_prepay_id = ?, payment_expire_at = ? WHERE id = ?').run(result.prepayId, new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString(), order.id);
+      db.prepare('UPDATE orders SET wechat_prepay_id = ? WHERE id = ? AND payment_status = \'pending\'').run(result.prepayId, order.id);
       payment = { provider: 'wechat', status: 'pending', payment: result.payment, message: method === 'mixed' ? `余额抵扣 ${centsToMoney(order.stored_paid_cents + order.bonus_paid_cents)}，请完成微信支付` : '请完成微信支付' };
     } catch (error) {
-      if (method === 'mixed') db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = MAX(stored_reserved_cents - ?, 0), bonus_reserved_cents = MAX(bonus_reserved_cents - ?, 0) WHERE user_id = ?').run(order.stored_paid_cents, order.bonus_paid_cents, userId);
-      db.prepare("UPDATE cart_items SET status = 'pending' WHERE session_id = ? AND status = 'checking_out'").run(session.id);
-      db.prepare('UPDATE orders SET payment_status = \'failed\', status = \'cancelled\', payment_error = ? WHERE id = ?').run(error.message, order.id);
+      const cancelled = releasePendingOrder(order.id, error.message);
+      if (cancelled) queueUserMessage(userId, 'order_cancelled', { orderNo: cancelled.order_no }, 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
       return res.status(error.code === 'INTEGRATION_NOT_CONFIGURED' ? 503 : 502).json({ message: error.message, code: error.code || 'WECHAT_PAYMENT_ERROR' });
     }
+  }
+  if (order.payment_status === 'pending') {
+    queueUserMessage(userId, 'order_pending_payment', { orderNo: order.order_no, minutes: Math.ceil(PAYMENT_EXPIRY_MS / 60000) }, 'order_pending', order.id, `订单待支付：${order.order_no}`);
   }
   res.status(201).json({ order: { ...order, originalAmount: centsToMoney(order.original_amount_cents), discountAmount: centsToMoney(order.discount_amount_cents), payableAmount: centsToMoney(order.payable_amount_cents), storedPaid: centsToMoney(order.stored_paid_cents), bonusPaid: centsToMoney(order.bonus_paid_cents), wechatPaid: centsToMoney(order.wechat_paid_cents) }, payment });
   } catch (error) { res.status(409).json({ message: error.message }); }
@@ -766,8 +1189,8 @@ router.get('/admin/summary', (req, res) => {
   const totalTables = db.prepare("SELECT COUNT(*) AS value FROM tables WHERE status != 'disabled'").get().value;
   const idleTables = Math.max(totalTables - activeTables, 0);
   const members = db.prepare("SELECT COUNT(*) AS value FROM users WHERE member_level != '普通会员'").get().value;
-  const lowStock = db.prepare("SELECT COUNT(*) AS value FROM products WHERE stock <= 0 OR (stock <= 20 AND status = 'active')").get().value;
-  const outOfStock = db.prepare('SELECT COUNT(*) AS value FROM products WHERE stock <= 0').get().value;
+  const lowStock = db.prepare("SELECT COUNT(*) AS value FROM products WHERE stock - reserved_stock <= 0 OR (stock - reserved_stock <= 20 AND status = 'active')").get().value;
+  const outOfStock = db.prepare('SELECT COUNT(*) AS value FROM products WHERE stock - reserved_stock <= 0').get().value;
   const canViewOrders = req.staff.role === 'super' || JSON.parse(req.staff.permissions).includes('orders');
   const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, o.note, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
   const items = orderItems(pendingOrders.map(o => o.id));
@@ -777,7 +1200,7 @@ router.get('/admin/summary', (req, res) => {
   res.json({ todayRevenue: centsToMoney(revenue), activeOrders, pendingPayment, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: centsToMoney(today.revenue), profit: centsToMoney(today.revenue - today.order_cost - todayLoss), recharge: centsToMoney(todayRecharge), offline: centsToMoney(today.offline), orderCost: centsToMoney(today.order_cost), lossCost: centsToMoney(todayLoss) }, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
 });
 
-router.get('/admin/products', (req, res) => { syncProductAvailability(); const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM products').get().value; const all = req.query.all === '1' || req.query.all === 'true'; const products = db.prepare(`SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id ORDER BY p.id DESC${all ? '' : ' LIMIT ? OFFSET ?'}`).all(...(all ? [] : [pageSize, offset])).map(row => { const product = adminMoney(row); if (req.staff.role !== 'super') delete product.cost_cents; return product; }); return res.json({ products, categories: adminRows('SELECT * FROM categories ORDER BY sort, id'), pagination: paginationView(page, pageSize, total) }); });
+router.get('/admin/products', (req, res) => { syncProductAvailability(); const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM products').get().value; const all = req.query.all === '1' || req.query.all === 'true'; const products = db.prepare(`SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id ORDER BY p.id DESC${all ? '' : ' LIMIT ? OFFSET ?'}`).all(...(all ? [] : [pageSize, offset])).map(row => { const product = { ...adminMoney(row), physicalStock: row.stock, reservedStock: row.reserved_stock, availableStock: Math.max(row.stock - row.reserved_stock, 0) }; if (req.staff.role !== 'super') delete product.cost_cents; return product; }); return res.json({ products, categories: adminRows('SELECT * FROM categories ORDER BY sort, id'), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/products', (req, res) => {
   const body = req.body || {};
   if (req.staff.role !== 'super' && body.cost != null) return res.status(403).json({ message: '仅超级管理员可设置进货价' });
@@ -798,14 +1221,17 @@ router.patch('/admin/products/:id', (req, res) => {
   const category = body.categoryId ? db.prepare('SELECT id FROM categories WHERE id = ?').get(Number(body.categoryId)) : null;
   if (body.stock != null && (!Number.isInteger(Number(body.stock)) || Number(body.stock) < 0)) return res.status(400).json({ message: '库存数量无效' });
   if (body.cost != null && (!Number.isFinite(Number(body.cost)) || Number(body.cost) < 0)) return res.status(400).json({ message: '进货价无效' });
-  if (body.status === 'active' && Number(body.stock ?? current.stock) <= 0) return res.status(409).json({ message: '库存为零，请先补货再上架' });
-  db.prepare('UPDATE products SET name = ?, detail = ?, image_url = ?, price_cents = ?, member_price_cents = ?, cost_cents = ?, stock = ?, allow_bonus = ?, status = ?, tag = ?, color = ?, category_id = COALESCE(?, category_id) WHERE id = ?').run(body.name ?? current.name, body.detail ?? current.detail, body.imageUrl ?? current.image_url, body.price == null ? current.price_cents : Math.round(Number(body.price) * 100), body.memberPrice === '' ? null : body.memberPrice == null ? current.member_price_cents : Math.round(Number(body.memberPrice) * 100), body.cost == null ? current.cost_cents : Math.round(Number(body.cost) * 100), body.stock == null ? current.stock : Number(body.stock), body.allowBonus == null ? current.allow_bonus : (body.allowBonus ? 1 : 0), body.status ?? current.status, body.tag ?? current.tag, body.color ?? current.color, category?.id || null, req.params.id);
+  const nextStock = body.stock == null ? current.stock : Number(body.stock);
+  const nextStatus = body.status ?? current.status;
+  if (nextStock < current.reserved_stock) return res.status(409).json({ message: `实际库存不能低于待支付订单已占用的 ${current.reserved_stock} 件` });
+  if (nextStatus === 'active' && nextStock - current.reserved_stock <= 0) return res.status(409).json({ message: '可售库存为零，请先补货或取消待支付订单' });
+  db.prepare('UPDATE products SET name = ?, detail = ?, image_url = ?, price_cents = ?, member_price_cents = ?, cost_cents = ?, stock = ?, allow_bonus = ?, status = ?, auto_unlisted = 0, tag = ?, color = ?, category_id = COALESCE(?, category_id) WHERE id = ?').run(body.name ?? current.name, body.detail ?? current.detail, body.imageUrl == null ? current.image_url : body.imageUrl, body.price == null ? current.price_cents : Math.round(Number(body.price) * 100), body.memberPrice === '' ? null : body.memberPrice == null ? current.member_price_cents : Math.round(Number(body.memberPrice) * 100), body.cost == null ? current.cost_cents : Math.round(Number(body.cost) * 100), nextStock, body.allowBonus == null ? current.allow_bonus : (body.allowBonus ? 1 : 0), nextStatus, body.tag ?? current.tag, body.color ?? current.color, category?.id || null, req.params.id);
   audit(req, '修改商品', `${current.name} #${current.id}`);
   const product = adminMoney(db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id));
   if (req.staff.role !== 'super') delete product.cost_cents;
   res.json({ product });
 });
-router.delete('/admin/products/:id', (req, res) => { db.prepare("UPDATE products SET status = 'inactive' WHERE id = ?").run(req.params.id); audit(req, '下架商品', req.params.id); res.json({ ok: true }); });
+router.delete('/admin/products/:id', (req, res) => { db.prepare("UPDATE products SET status = 'inactive', auto_unlisted = 0 WHERE id = ?").run(req.params.id); audit(req, '下架商品', req.params.id); res.json({ ok: true }); });
 
 router.get('/admin/categories', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM categories').get().value; return res.json({ categories: db.prepare('SELECT c.*, COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category_id = c.id GROUP BY c.id ORDER BY c.sort, c.id LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/categories', (req, res) => { if (!req.body.name) return res.status(400).json({ message: '分类名称不能为空' }); const r = db.prepare('INSERT INTO categories (store_id, name, sort) VALUES (1, ?, ?)').run(req.body.name, Number(req.body.sort || 0)); res.status(201).json({ category: db.prepare('SELECT * FROM categories WHERE id = ?').get(r.lastInsertRowid) }); });
@@ -868,7 +1294,7 @@ router.get('/admin/orders', (req, res) => {
   const total = db.prepare('SELECT COUNT(*) AS value FROM orders').get().value;
   const rows = db.prepare("SELECT o.*, t.table_no, u.nickname, COALESCE((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id),0) AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?").all(pageSize, offset);
   const items = orderItems(rows.map(o => o.id));
-  res.json({ orders: rows.map(row => { const order = { ...row, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
+  res.json({ orders: rows.map(row => { const order = { ...row, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
 });
 router.post('/admin/orders/:id/deliver', (req, res) => {
   const result = db.transaction(() => {
@@ -880,6 +1306,10 @@ router.post('/admin/orders/:id/deliver', (req, res) => {
     audit(req, '确认订单送达', order.order_no);
     return { code: 200 };
   })();
+  if (result.code === 200 && !result.message) {
+    const order = db.prepare('SELECT payer_user_id, order_no FROM orders WHERE id = ?').get(req.params.id);
+    if (order) queueUserMessage(order.payer_user_id, 'order_completed', { orderNo: order.order_no }, 'order_completed', req.params.id, `订单已送达：${order.order_no}`);
+  }
   res.status(result.code).json(result.message ? { message: result.message } : { ok: true });
 });
 router.post('/admin/orders/:id/mark-paid', (req, res) => {
@@ -1050,7 +1480,9 @@ const miniEntries = {
   rewards: { title: '兑换中心', icon: 'gift', type: 'entry' },
   storage: { title: '我的存酒', icon: 'bottle', type: 'entry' },
   recharge: { title: '会员充值', icon: 'wallet', type: 'entry' },
-  orders: { title: '我的订单', icon: 'receipt', type: 'entry' }
+  orders: { title: '我的订单', icon: 'receipt', type: 'entry' },
+  coupons: { title: '我的券包', icon: 'gift', type: 'entry' },
+  messages: { title: '消息中心', icon: 'card', type: 'entry' }
 };
 const miniIcons = ['gift','bottle','wallet','receipt','star','glass','card','bag'];
 router.get('/mini-page', (_req, res) => {
@@ -1068,18 +1500,22 @@ router.post('/rewards/:id/redeem', requireWechatUser, (req, res) => {
       const reward = db.prepare("SELECT * FROM reward_items WHERE id = ? AND status = 'active'").get(req.params.id);
       if (!reward) throw new Error('奖品已下架');
       if (reward.product_id) {
-        const product = db.prepare("SELECT stock FROM products WHERE id = ? AND status = 'active'").get(reward.product_id);
-        if (!product || product.stock < 1) throw new Error('商品库存不足');
+        const product = db.prepare("SELECT stock, reserved_stock FROM products WHERE id = ? AND status = 'active'").get(reward.product_id);
+        if (!product || product.stock - product.reserved_stock < 1) throw new Error('商品可售库存不足');
       }
       const user = db.prepare('UPDATE users SET points = points - ? WHERE id = ? AND points >= ?').run(reward.points, currentUserId(req), reward.points);
       if (!user.changes) throw new Error('积分不足');
       const stock = db.prepare('UPDATE reward_items SET stock = stock - 1 WHERE id = ? AND stock > 0').run(reward.id);
       if (!stock.changes) throw new Error('奖品库存不足');
-      if (reward.product_id) db.prepare('UPDATE products SET stock = stock - 1 WHERE id = ?').run(reward.product_id);
+      if (reward.product_id) {
+        const changed = db.prepare('UPDATE products SET stock = stock - 1 WHERE id = ? AND stock - reserved_stock >= 1').run(reward.product_id);
+        if (!changed.changes) throw new Error('商品可售库存不足');
+      }
       const id = db.prepare('INSERT INTO reward_redemptions (user_id, reward_id, reward_name, points) VALUES (?, ?, ?, ?)').run(currentUserId(req), reward.id, reward.name, reward.points).lastInsertRowid;
       db.prepare('INSERT INTO points_ledger (user_id, points, reason) VALUES (?, ?, ?)').run(currentUserId(req), -reward.points, `兑换奖品：${reward.name}`);
       return db.prepare('SELECT * FROM reward_redemptions WHERE id = ?').get(id);
     })();
+    queueUserMessage(currentUserId(req), 'reward_redeemed', { rewardName: record.reward_name }, 'redemption', record.id, `积分兑换成功：${record.reward_name}`);
     res.status(201).json({ redemption: record });
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
@@ -1087,7 +1523,7 @@ router.get('/me/orders', (req, res) => {
   const orders = db.prepare('SELECT * FROM orders WHERE payer_user_id = ? AND hidden_by_user = 0 ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => {
     const paymentExpireAt = orderExpiryAt(row);
     const isExpired = Boolean(row.payment_status === 'pending' && paymentExpireAt && new Date(paymentExpireAt) <= new Date());
-    return { ...row, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending', canHide: row.payment_status !== 'pending' };
+    return { ...row, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(row.discount_amount_cents - row.coupon_discount_cents), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending', canHide: row.payment_status !== 'pending' };
   });
   res.json({ orders });
 });
@@ -1104,14 +1540,33 @@ function storageView(row) {
   return { ...row, expiresAt: row.expires_at, expiresDate, remainingDays, expired: new Date(row.expires_at) <= new Date(), statusLabel: row.status === 'collected' ? '已取完' : new Date(row.expires_at) <= new Date() ? '已过期' : '存放中' };
 }
 router.get('/me/storage', (req, res) => res.json({ records: db.prepare("SELECT s.*, p.image_url, p.color FROM storage_records s LEFT JOIN products p ON p.id = s.product_id WHERE s.user_id = ? AND s.status = 'stored' AND s.quantity > 0 ORDER BY s.id DESC").all(currentUserId(req)).map(storageView) }));
-router.get('/admin/inventory', (_req, res) => res.json({ products: adminRows('SELECT id, name, stock, status, allow_bonus FROM products ORDER BY stock, id').map(row => ({ ...row, warning: row.stock <= 20 })) }));
-router.post('/admin/inventory/:productId/adjust', (req, res) => { const product = db.prepare('SELECT stock FROM products WHERE id = ?').get(req.params.productId); if (!product) return res.status(404).json({ message: '商品不存在' }); const change = Number(req.body.change); if (!Number.isInteger(change) || change === 0 || !String(req.body.reason || '').trim()) return res.status(400).json({ message: '请输入非零变动数量和原因' }); const after = product.stock + change; if (after < 0) return res.status(400).json({ message: '库存不能小于零' }); db.transaction(() => { db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(after, req.params.productId); db.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason) VALUES (?, ?, ?, ?)').run(req.params.productId, change, after, req.body.reason.trim()); audit(req, '调整库存', `${req.params.productId}: ${change}, ${req.body.reason.trim()}`); })(); res.json({ ok: true, stock: after }); });
+router.get('/admin/inventory', (_req, res) => res.json({ products: adminRows('SELECT id, name, stock, reserved_stock, status, allow_bonus FROM products ORDER BY stock - reserved_stock, id').map(row => ({ ...row, physicalStock: row.stock, reservedStock: row.reserved_stock, availableStock: Math.max(row.stock - row.reserved_stock, 0), warning: row.stock - row.reserved_stock <= 20 })) }));
+router.post('/admin/inventory/:productId/adjust', (req, res) => {
+  const product = db.prepare('SELECT stock, reserved_stock FROM products WHERE id = ?').get(req.params.productId);
+  if (!product) return res.status(404).json({ message: '商品不存在' });
+  const change = Number(req.body.change), reason = String(req.body.reason || '').trim();
+  if (!Number.isInteger(change) || change === 0 || !reason) return res.status(400).json({ message: '请输入非零变动数量和原因' });
+  try {
+    const result = db.transaction(() => {
+      const updated = db.prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND (? > 0 OR stock - reserved_stock >= ?)').run(change, req.params.productId, change, Math.max(-change, 0));
+      if (!updated.changes) {
+        const latest = db.prepare('SELECT stock, reserved_stock FROM products WHERE id = ?').get(req.params.productId);
+        throw new Error(`实际库存不能低于待支付订单已占用的 ${latest?.reserved_stock ?? product.reserved_stock} 件，或库存已被其他操作改变，请刷新后重试`);
+      }
+      const current = db.prepare('SELECT stock, reserved_stock FROM products WHERE id = ?').get(req.params.productId);
+      db.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason) VALUES (?, ?, ?, ?)').run(req.params.productId, change, current.stock, reason);
+      audit(req, '调整库存', `${req.params.productId}: ${change}, ${reason}`);
+      return current;
+    })();
+    res.json({ ok: true, stock: result.stock, physicalStock: result.stock, reservedStock: result.reserved_stock, availableStock: Math.max(result.stock - result.reserved_stock, 0) });
+  } catch (error) { res.status(409).json({ message: error.message }); }
+});
 router.get('/admin/losses', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM stock_losses').get().value; return res.json({ records: db.prepare('SELECT l.*, p.name AS product_name, a.display_name AS operator FROM stock_losses l JOIN products p ON p.id = l.product_id JOIN staff_accounts a ON a.id = l.operator_id ORDER BY l.id DESC LIMIT ? OFFSET ?').all(pageSize, offset).map(row => { const record = { ...row }; delete record.cost_cents; if (req.staff.role === 'super') record.cost = centsToMoney(row.cost_cents); return record; }), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/losses', (req, res) => {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(req.body?.productId);
   const quantity = Number(req.body?.quantity), type = req.body?.type, reason = String(req.body?.reason || '').trim();
   if (!product || !Number.isInteger(quantity) || quantity < 1 || !['gift','damage'].includes(type) || !reason) return res.status(400).json({ message: '请选择商品、数量、类型并填写原因' });
-  try { const record = db.transaction(() => { const updated = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?').run(quantity, product.id, quantity); if (!updated.changes) throw new Error('库存不足'); const r = db.prepare('INSERT INTO stock_losses (product_id, quantity, cost_cents, type, reason, operator_id) VALUES (?, ?, ?, ?, ?, ?)').run(product.id, quantity, product.cost_cents * quantity, type, reason, req.staff.id); audit(req, type === 'gift' ? '上报赠酒' : '上报报损', `${product.name} x${quantity}: ${reason}`); return db.prepare('SELECT * FROM stock_losses WHERE id = ?').get(r.lastInsertRowid); })(); if (req.staff.role !== 'super') delete record.cost_cents; res.status(201).json({ record }); } catch (error) { res.status(409).json({ message: error.message }); }
+  try { const record = db.transaction(() => { const updated = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock - reserved_stock >= ?').run(quantity, product.id, quantity); if (!updated.changes) throw new Error(`可售库存不足，已有 ${product.reserved_stock} 件被待支付订单占用`); const r = db.prepare('INSERT INTO stock_losses (product_id, quantity, cost_cents, type, reason, operator_id) VALUES (?, ?, ?, ?, ?, ?)').run(product.id, quantity, product.cost_cents * quantity, type, reason, req.staff.id); audit(req, type === 'gift' ? '上报赠酒' : '上报报损', `${product.name} x${quantity}: ${reason}`); return db.prepare('SELECT * FROM stock_losses WHERE id = ?').get(r.lastInsertRowid); })(); if (req.staff.role !== 'super') delete record.cost_cents; res.status(201).json({ record }); } catch (error) { res.status(409).json({ message: error.message }); }
 });
 
 router.get('/admin/storage', (req, res) => {

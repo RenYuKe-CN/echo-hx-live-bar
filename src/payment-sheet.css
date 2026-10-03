@@ -24,6 +24,15 @@
 .payment-button { width: 100%; background: #d59b64; color: #211b18; border-radius: 9px; padding: 13px; font-weight: 700; font-size: 13px; }
 .sheet-heading p { margin: 6px 0 0; color: #96a09e; font-size: 11px; }
 .payment-product { display: flex; align-items: center; gap: 9px; }
+.coupon-picker { margin: 15px 0 4px; padding-top: 14px; border-top: 1px solid #edf0ed; color: #53635f; font-size: 12px; }
+.coupon-options { display: grid; gap: 8px; margin-top: 9px; max-height: 170px; overflow-y: auto; padding: 1px; }
+.coupon-choice { display: flex; justify-content: space-between; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 9px 11px; border: 1px solid #e4e9e6; border-radius: 8px; background: #fff; color: #2d4541; text-align: left; font: inherit; }
+.coupon-choice span { min-width: 0; overflow-wrap: anywhere; }
+.coupon-choice small { display: block; margin-top: 4px; color: #83908d; font-size: 10px; line-height: 1.4; }
+.coupon-choice::after { content: '○'; flex: none; color: #9aa6a2; font-size: 16px; }
+.coupon-choice.selected { border-color: #2b9a70; background: #f0f8f3; box-shadow: 0 0 0 1px #2b9a7026; }
+.coupon-choice.selected::after { content: '✓'; color: #2b9a70; font-weight: 800; }
+.payment-rule-note { display: block; margin: 3px 0 5px; color: #6f837a; font-size: 10px; line-height: 1.5; }
 .payment-methods { margin: 14px 0; border-top: 1px solid #edf0ed; padding-top: 13px; font-size: 12px; }
 .payment-choice { display: flex; width: 100%; justify-content: space-between; align-items: center; text-align: left; border: 1px solid #e4e9e6; border-radius: 7px; padding: 10px; margin-top: 8px; color: #273d3c; }
 .payment-choice.selected { border-color: #2b9a70; background: #f0f8f3; }

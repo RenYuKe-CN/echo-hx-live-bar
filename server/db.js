@@ -53,6 +53,108 @@ db.exec(`
   );
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS coupon_definitions (
+    id INTEGER PRIMARY KEY,
+    store_id INTEGER NOT NULL REFERENCES stores(id),
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('fixed','discount')),
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    discount_rate REAL NOT NULL DEFAULT 1,
+    min_order_cents INTEGER NOT NULL DEFAULT 0,
+    product_id INTEGER REFERENCES products(id),
+    category_id INTEGER REFERENCES categories(id),
+    member_tier_id INTEGER REFERENCES member_tiers(id),
+    allow_stack_member_discount INTEGER NOT NULL DEFAULT 0,
+    allow_bonus_payment INTEGER NOT NULL DEFAULT 0,
+    total_quantity INTEGER NOT NULL DEFAULT 0,
+    issued_quantity INTEGER NOT NULL DEFAULT 0,
+    per_user_limit INTEGER NOT NULL DEFAULT 1,
+    valid_from TEXT,
+    valid_until TEXT,
+    valid_days INTEGER NOT NULL DEFAULT 0,
+    icon_url TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS user_coupons (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    coupon_definition_id INTEGER NOT NULL REFERENCES coupon_definitions(id),
+    coupon_code TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'available' CHECK(status IN ('available','locked','used','expired','cancelled')),
+    issued_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    used_at TEXT,
+    expired_at TEXT,
+    order_id INTEGER REFERENCES orders(id),
+    source_type TEXT NOT NULL DEFAULT 'campaign',
+    source_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS message_templates (
+    id INTEGER PRIMARY KEY,
+    template_key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    channel TEXT NOT NULL DEFAULT 'site',
+    wechat_template_id TEXT NOT NULL DEFAULT '',
+    title_template TEXT NOT NULL,
+    content_template TEXT NOT NULL,
+    field_mapping TEXT NOT NULL DEFAULT '{}',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS user_messages (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    type TEXT NOT NULL DEFAULT 'system_notice',
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    related_type TEXT,
+    related_id INTEGER,
+    read_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS message_campaigns (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    message_template_id INTEGER REFERENCES message_templates(id),
+    audience_type TEXT NOT NULL DEFAULT 'selected',
+    audience_filter TEXT NOT NULL DEFAULT '{}',
+    scheduled_at TEXT,
+    status TEXT NOT NULL DEFAULT 'sent',
+    created_by INTEGER REFERENCES staff_accounts(id),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS message_recipients (
+    id INTEGER PRIMARY KEY,
+    campaign_id INTEGER NOT NULL REFERENCES message_campaigns(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    openid TEXT,
+    channel TEXT NOT NULL DEFAULT 'site',
+    status TEXT NOT NULL DEFAULT 'pending',
+    wechat_message_id TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    sent_at TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS user_subscription_authorizations (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    template_key TEXT NOT NULL,
+    wechat_template_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'authorized',
+    authorized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_checked_at TEXT,
+    UNIQUE(user_id, template_key)
+  );
+  CREATE INDEX IF NOT EXISTS user_coupons_user_status_idx ON user_coupons(user_id, status);
+  CREATE INDEX IF NOT EXISTS user_messages_user_read_idx ON user_messages(user_id, read_at);
+`);
+
 db.prepare('INSERT OR IGNORE INTO backup_settings (id) VALUES (1)').run();
 
 // Keep the first SQLite release useful after schema upgrades as well as on a fresh install.
@@ -83,6 +185,8 @@ for (const account of db.prepare('SELECT id, permissions FROM staff_accounts WHE
   if (permissions.includes('rules')) db.prepare('UPDATE staff_accounts SET permissions = ? WHERE id = ?').run(JSON.stringify([...new Set([...permissions.filter(p => p !== 'rules'), 'members'])]), account.id);
 }
 ensureColumn('products', 'allow_bonus', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('products', 'reserved_stock', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('products', 'auto_unlisted', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('storage_records', 'product_id', 'INTEGER REFERENCES products(id)');
 ensureColumn('products', 'cost_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('order_items', 'cost_price_cents', 'INTEGER NOT NULL DEFAULT 0');
@@ -100,26 +204,64 @@ ensureColumn('orders', 'wechat_transaction_id', 'TEXT');
 ensureColumn('orders', 'payment_expire_at', 'TEXT');
 ensureColumn('orders', 'payment_error', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('orders', 'hidden_by_user', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('orders', 'coupon_id', 'INTEGER REFERENCES user_coupons(id)');
+ensureColumn('orders', 'coupon_discount_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('wallet_accounts', 'stored_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('wallet_accounts', 'bonus_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 db.exec(`
+  -- Rebuild reservations after upgrades or an unclean restart. Only orders
+  -- still waiting for payment can hold stock.
+  UPDATE products SET reserved_stock = COALESCE((
+    SELECT SUM(oi.quantity)
+    FROM order_items oi
+    JOIN orders o ON o.id = oi.order_id
+    WHERE oi.product_id = products.id AND o.payment_status = 'pending'
+  ), 0);
   UPDATE orders SET status = 'awaiting_delivery' WHERE status = 'paid' AND payment_status = 'paid';
-  UPDATE products SET status = 'inactive' WHERE stock <= 0 AND status = 'active';
-  CREATE TRIGGER IF NOT EXISTS products_empty_update AFTER UPDATE OF stock, status ON products
-  WHEN NEW.stock <= 0 AND NEW.status = 'active'
+  DROP TRIGGER IF EXISTS products_empty_update;
+  DROP TRIGGER IF EXISTS products_empty_insert;
+  DROP TRIGGER IF EXISTS products_available_restore;
+  UPDATE products SET status = 'inactive', auto_unlisted = 1
+    WHERE stock - reserved_stock <= 0 AND status = 'active';
+  CREATE TRIGGER products_empty_update AFTER UPDATE OF stock, reserved_stock, status ON products
+  WHEN NEW.stock - NEW.reserved_stock <= 0 AND NEW.status = 'active'
   BEGIN
-    UPDATE products SET status = 'inactive' WHERE id = NEW.id;
+    UPDATE products SET status = 'inactive', auto_unlisted = 1 WHERE id = NEW.id;
     INSERT INTO operation_logs (operator, action, detail) VALUES ('系统', '缺货自动下架', NEW.name);
   END;
-  CREATE TRIGGER IF NOT EXISTS products_empty_insert AFTER INSERT ON products
-  WHEN NEW.stock <= 0 AND NEW.status = 'active'
+  CREATE TRIGGER products_empty_insert AFTER INSERT ON products
+  WHEN NEW.stock - NEW.reserved_stock <= 0 AND NEW.status = 'active'
   BEGIN
-    UPDATE products SET status = 'inactive' WHERE id = NEW.id;
+    UPDATE products SET status = 'inactive', auto_unlisted = 1 WHERE id = NEW.id;
+  END;
+  CREATE TRIGGER products_available_restore AFTER UPDATE OF stock, reserved_stock ON products
+  WHEN NEW.stock - NEW.reserved_stock > 0 AND NEW.status = 'inactive' AND NEW.auto_unlisted = 1
+  BEGIN
+    UPDATE products SET status = 'active', auto_unlisted = 0 WHERE id = NEW.id;
+    INSERT INTO operation_logs (operator, action, detail) VALUES ('系统', '库存恢复自动上架', NEW.name);
   END;
 `);
 ensureColumn('wallet_transactions', 'pos_request_id', 'TEXT');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS orders_pos_request_unique ON orders(pos_request_id) WHERE pos_request_id IS NOT NULL; CREATE UNIQUE INDEX IF NOT EXISTS wallet_pos_request_unique ON wallet_transactions(pos_request_id) WHERE pos_request_id IS NOT NULL;');
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS orders_wechat_prepay_unique ON orders(wechat_prepay_id) WHERE wechat_prepay_id IS NOT NULL;');
+
+const messageTemplateSeed = [
+  ['order_pending_payment', '待支付订单', '订单待支付', '订单 {{orderNo}} 还有 {{minutes}} 分钟自动取消。'],
+  ['order_paid', '订单已支付', '订单已支付', '订单 {{orderNo}} 已支付成功，店员将尽快为您送达。'],
+  ['order_awaiting_delivery', '订单待送达', '订单准备中', '订单 {{orderNo}} 正在准备，请稍候。'],
+  ['order_completed', '订单已送达', '订单已送达', '订单 {{orderNo}} 已送达，祝您用餐愉快。'],
+  ['order_cancelled', '订单已取消', '订单已取消', '订单 {{orderNo}} 已取消。'],
+  ['coupon_issued', '优惠券到账', '您有新优惠券', '{{couponName}} 已放入您的券包。'],
+  ['coupon_expiring', '优惠券即将到期', '优惠券即将到期', '{{couponName}} 将于 {{expireAt}} 到期。'],
+  ['member_upgraded', '会员升级', '会员等级已升级', '恭喜您成为 {{memberLevel}}。'],
+  ['storage_expiring', '存酒到期提醒', '您的存酒即将到期', '{{productName}} 将于 {{expireAt}} 到期。'],
+  ['birthday_reward', '生日福利', '生日快乐', '祝您生日快乐，生日福利已到账。'],
+  ['wallet_recharged', '储值到账', '储值到账提醒', '储值金额 {{stored}} 元，赠金 {{bonus}} 元已到账。'],
+  ['reward_redeemed', '积分兑换', '兑换成功', '您已成功兑换 {{rewardName}}。'],
+  ['system_notice', '系统通知', '系统通知', '{{content}}']
+];
+const insertMessageTemplate = db.prepare('INSERT OR IGNORE INTO message_templates (template_key, name, title_template, content_template) VALUES (?, ?, ?, ?)');
+messageTemplateSeed.forEach(row => insertMessageTemplate.run(...row));
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS wechat_sessions (

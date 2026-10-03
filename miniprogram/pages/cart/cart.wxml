@@ -5,21 +5,23 @@
     <image wx:if="{{item.image}}" class="pic pic-image" src="{{item.image}}" mode="aspectFit" />
     <view wx:else class="pic">{{item.initial}}</view>
     <view class="info"><text>{{item.name}}</text><text class="muted">数量 {{item.quantity}}</text></view>
-    <view class="item-prices"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">¥{{item.memberText}}</text><text wx:if="{{!isMember}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text></view>
+    <view class="item-prices"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember || item.usingCoupon ? 'regular-price' : ''}}">¥{{item.displayText}}</text><text wx:if="{{!isMember && !item.usingCoupon}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text><text wx:if="{{item.usingCoupon}}" class="reference-price">优惠券按商品原价计算</text></view>
   </view>
+  <view wx:if="{{coupons.length}}" class="coupon-select"><view class="section-title">优惠券</view><view class="coupon-option {{!selectedCouponId ? 'selected' : ''}}" data-id="" bindtap="chooseCoupon"><text>不使用优惠券</text><text>按会员价结算</text></view><view wx:for="{{coupons}}" wx:key="id" class="coupon-option {{selectedCouponId == item.id ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="chooseCoupon"><view><text>{{item.name}}</text><text class="hint">{{item.minimumText}} · 按原价计算，不叠加会员价</text></view><text class="coupon-amount">{{item.amountText}}</text></view></view>
   <view class="order-note"><text class="section-title">订单备注</text><textarea value="{{note}}" maxlength="200" auto-height placeholder="例如：少冰、送到 A 区，不超过 200 字" bindinput="onNoteInput" /></view>
   <view class="summary">
     <view><text>商品原价</text><text>¥{{totals.originalText}}</text></view>
-    <view wx:if="{{isMember}}"><text>会员优惠</text><text class="green">-¥{{totals.discountText}}</text></view>
-    <view class="pay"><text>应付金额</text><text>¥{{totals.memberText}}</text></view>
+    <view wx:if="{{checkout && checkout.usingCoupon}}"><text>优惠券优惠</text><text class="green">-¥{{checkout.couponDiscount}}</text></view>
+    <view wx:if="{{!checkout || !checkout.usingCoupon}}"><text>会员优惠</text><text class="green">-¥{{checkout ? checkout.memberDiscount : totals.discountText}}</text></view>
+    <view class="pay"><text>应付金额</text><text>¥{{totals.payableText}}</text></view>
   </view>
-  <view wx:if="{{!isMember}}" class="upgrade-banner" bindtap="upgrade">当前按原价结算，是否充值余额并升级会员？<text>查看套餐 ›</text></view>
+  <view wx:if="{{!isMember && !(checkout && checkout.usingCoupon)}}" class="upgrade-banner" bindtap="upgrade">当前按原价结算，是否充值余额并升级会员？<text>查看套餐 ›</text></view>
   <view wx:if="{{checkout && items.length}}" class="methods">
     <view class="section-title">支付方式</view>
     <view class="method {{method === 'mixed' ? 'selected' : ''}}" data-method="mixed" bindtap="chooseMethod"><view><text>余额 + 微信支付</text><text class="hint">账户储值 ¥{{checkout.storedText}} · 本单抵扣 ¥{{checkout.balanceDeductionText}} · 微信支付 ¥{{checkout.wechatDueText}}</text></view><text class="radio">{{method === 'mixed' ? '●' : '○'}}</text></view>
-    <view class="method {{method === 'balance' ? 'selected' : ''}}" data-method="balance" bindtap="chooseMethod"><view><text>余额支付</text><text class="hint">储值余额 ¥{{checkout.storedText}} · 赠金 ¥{{checkout.bonusText}} · 本单最多抵扣 ¥{{checkout.balanceDeductionText}}</text></view><text class="radio">{{method === 'balance' ? '●' : '○'}}</text></view>
-    <view wx:if="{{!checkout.balanceAvailable}}" class="warning">余额不足时默认使用组合支付，微信接口尚未接通</view>
-    <view class="method {{method === 'wechat' ? 'selected' : ''}}" data-method="wechat" bindtap="chooseMethod"><view><text>仅微信支付</text><text class="hint">不使用账户余额，支付接口尚未接通</text></view><text class="radio">{{method === 'wechat' ? '●' : '○'}}</text></view>
+    <view class="method {{method === 'balance' ? 'selected' : ''}}" data-method="balance" bindtap="chooseMethod"><view><text>余额支付</text><text class="hint">储值本金 ¥{{checkout.storedText}} · {{checkout.usingCoupon ? '赠金不可用' : '赠金 ¥' + checkout.bonusText}} · 本单最多抵扣 ¥{{checkout.balanceDeductionText}}</text></view><text class="radio">{{method === 'balance' ? '●' : '○'}}</text></view>
+    <view wx:if="{{!checkout.balanceAvailable}}" class="warning">余额不足时可使用组合支付，差额将通过微信支付完成</view>
+    <view class="method {{method === 'wechat' ? 'selected' : ''}}" data-method="wechat" bindtap="chooseMethod"><view><text>仅微信支付</text><text class="hint">不使用账户余额，使用微信支付完成本单</text></view><text class="radio">{{method === 'wechat' ? '●' : '○'}}</text></view>
   </view>
-  <button class="pay-button" disabled="{{!items.length || submitting}}" loading="{{submitting}}" bindtap="pay">{{method === 'balance' ? '确认余额支付' : method === 'mixed' ? '余额抵扣 ¥' + checkout.balanceDeductionText + '，微信支付 ¥' + checkout.wechatDueText : '创建待支付订单'}} {{method === 'mixed' ? '' : '¥' + totals.memberText}}</button>
+  <button class="pay-button" disabled="{{!items.length || submitting}}" loading="{{submitting}}" bindtap="pay">{{method === 'balance' ? '确认余额支付' : method === 'mixed' ? '余额抵扣 ¥' + checkout.balanceDeductionText + '，微信支付 ¥' + checkout.wechatDueText : '创建待支付订单'}} {{method === 'mixed' ? '' : '¥' + totals.payableText}}</button>
 </view>
