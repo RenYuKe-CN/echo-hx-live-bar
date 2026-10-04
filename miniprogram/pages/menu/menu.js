@@ -55,7 +55,8 @@ Page({
         ...checkout,
         originalText: Number(checkout.original || 0).toFixed(2),
         payableText: Number(checkout.payable || 0).toFixed(2),
-        couponDiscountText: Number(checkout.couponDiscount || 0).toFixed(2)
+        couponDiscountText: Number(checkout.couponDiscount || 0).toFixed(2),
+        memberDiscountText: Number(checkout.memberDiscount || 0).toFixed(2)
       } });
       return checkout;
     }).catch(error => {

@@ -65,7 +65,7 @@ db.exec(`
     product_id INTEGER REFERENCES products(id),
     category_id INTEGER REFERENCES categories(id),
     member_tier_id INTEGER REFERENCES member_tiers(id),
-    allow_stack_member_discount INTEGER NOT NULL DEFAULT 0,
+    allow_stack_member_discount INTEGER NOT NULL DEFAULT 1,
     allow_bonus_payment INTEGER NOT NULL DEFAULT 0,
     total_quantity INTEGER NOT NULL DEFAULT 0,
     issued_quantity INTEGER NOT NULL DEFAULT 0,
@@ -210,6 +210,7 @@ ensureColumn('orders', 'coupon_id', 'INTEGER REFERENCES user_coupons(id)');
 ensureColumn('orders', 'coupon_discount_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('coupon_definitions', 'voucher_type', "TEXT NOT NULL DEFAULT 'discount'");
 ensureColumn('coupon_definitions', 'gift_product_id', 'INTEGER REFERENCES products(id)');
+db.prepare('UPDATE coupon_definitions SET allow_stack_member_discount = 1 WHERE allow_stack_member_discount = 0').run();
 ensureColumn('cart_items', 'applied_coupon_id', 'INTEGER REFERENCES user_coupons(id)');
 ensureColumn('wallet_accounts', 'stored_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('wallet_accounts', 'bonus_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');

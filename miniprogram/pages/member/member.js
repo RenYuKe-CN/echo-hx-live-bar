@@ -1,6 +1,7 @@
 const api = require('../../utils/api');
+const subscription = require('../../utils/subscription');
 Page({
-  data: { user: {}, wallet: {}, membership: {}, entries: [], notices: {}, couponCount: 0, expiry: '', avatar: '', initial: '会' },
+  data: { user: {}, wallet: {}, membership: {}, entries: [], notices: {}, couponCount: 0, expiry: '', avatar: '', initial: '会', subscriptionPromptVisible: false, subscriptionPromptBusy: false },
   onShow() {
     Promise.all([api.request('/me'), api.request('/mini-page'), api.request('/me/notification-summary').catch(() => ({ couponCount: 0, pendingOrderCount: 0, unreadMessageCount: 0 })), api.request('/me/coupons').catch(() => null)]).then(([profile, page, notices, couponData]) => {
       // Prefer the full list when it loaded successfully, but keep the
@@ -42,7 +43,35 @@ Page({
       this.setData({ user: profile.user, wallet: profile.wallet, membership, notices: safeNotices, couponCount: availableCouponCount, entries, expiry: expiry && profile.user.memberLevel !== '普通会员' ? expiry.slice(0, 10) : '', avatar: profile.user.avatarUrl ? api.imageUrl(profile.user.avatarUrl) : '', initial: (profile.user.nickname || '会').charAt(0) });
       const pageEntries = Array.isArray(page.entries) ? page.entries : [];
       wx.setNavigationBarTitle({ title: pageEntries.find(item => item.key === 'app_name')?.title || 'Echo HX Live Bar' });
+      this.maybePromptSubscription(profile.user.id);
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
+  },
+  maybePromptSubscription(userId) {
+    if (subscription.hasShownPrompt(userId)) return;
+    subscription.loadTemplates().then(templates => subscription.getSubscriptionSettings().then(settings => ({ templates, settings }))).then(({ templates, settings }) => {
+      if (templates.length && subscription.needsAuthorization(templates, settings)) {
+        // Mark when the one-time prompt is shown, so ignoring it does not cause
+        // the same banner to appear on every subsequent page visit.
+        subscription.markPromptShown(userId);
+        this.setData({ subscriptionPromptVisible: true });
+      }
+    }).catch(() => {});
+  },
+  postponeSubscription() {
+    subscription.markPromptShown(this.data.user.id);
+    this.setData({ subscriptionPromptVisible: false });
+  },
+  enableSubscription() {
+    if (this.data.subscriptionPromptBusy) return;
+    this.setData({ subscriptionPromptBusy: true });
+    subscription.loadTemplates().then(templates => subscription.requestAuthorization(templates))
+      .then(() => {
+        subscription.markPromptShown(this.data.user.id);
+        this.setData({ subscriptionPromptVisible: false });
+        wx.showToast({ title: '提醒设置已更新', icon: 'success' });
+      })
+      .catch(error => wx.showToast({ title: error.message || '授权未完成', icon: 'none' }))
+      .finally(() => this.setData({ subscriptionPromptBusy: false }));
   },
   open(e) {
     const routes = { rewards: '/pages/rewards/rewards', storage: '/pages/storage/storage', recharge: '/pages/recharge/recharge', orders: '/pages/order/order', coupons: '/pages/coupons/coupons', messages: '/pages/messages/messages' };

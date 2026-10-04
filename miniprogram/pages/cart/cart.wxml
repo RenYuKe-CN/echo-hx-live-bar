@@ -7,20 +7,20 @@
     <view class="info"><text>{{item.name}}</text><text class="muted">数量 {{item.quantity}}</text><text wx:if="{{item.isGiftItem}}" class="gift-caption">商品兑换券已赠送 {{item.giftQuantity}} 件</text></view>
     <view class="item-prices">
       <view wx:if="{{item.isGiftItem}}" class="gift-price-block"><text class="gift-price">赠送 {{item.giftQuantity}} 件 · ¥0.00</text></view>
-      <view wx:if="{{item.isGiftItem && item.paidQuantity > 0}}" class="paid-price-block"><text wx:if="{{item.usingCoupon}}" class="old">¥{{item.paidOriginalText}}</text><text class="price regular-price">其余 {{item.paidQuantity}} 件 · ¥{{item.paidAmountText}}</text></view>
-      <view wx:if="{{!item.isGiftItem}}"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember || item.usingCoupon ? 'regular-price' : ''}}">¥{{item.displayText}}</text><text wx:if="{{!isMember && !item.usingCoupon}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text><text wx:if="{{item.usingCoupon}}" class="reference-price">优惠券按商品原价计算</text></view>
+      <view wx:if="{{item.isGiftItem && item.paidQuantity > 0}}" class="paid-price-block"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.paidOriginalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">其余 {{item.paidQuantity}} 件 · ¥{{item.paidAmountText}}</text></view>
+      <view wx:if="{{!item.isGiftItem}}"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">¥{{item.displayText}}</text><text wx:if="{{!isMember}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text></view>
     </view>
   </view>
-  <view wx:if="{{coupons.length}}" class="coupon-select"><view class="section-title">优惠券</view><view class="coupon-option {{!selectedCouponId ? 'selected' : ''}}" data-id="" bindtap="chooseCoupon"><text>不使用优惠券</text><text>按会员价结算</text></view><view wx:for="{{coupons}}" wx:key="id" class="coupon-option {{selectedCouponId == item.id ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="chooseCoupon"><view><text>{{item.name}}</text><text class="hint">{{item.minimumText}} · 按原价计算，不叠加会员价</text></view><text class="coupon-amount">{{item.amountText}}</text></view></view>
+  <view wx:if="{{coupons.length}}" class="coupon-select"><view class="section-title">优惠券</view><view class="coupon-option {{!selectedCouponId ? 'selected' : ''}}" data-id="" bindtap="chooseCoupon"><text>不使用优惠券</text><text>{{isMember ? '按会员价结算' : '按原价结算'}}</text></view><view wx:for="{{coupons}}" wx:key="id" class="coupon-option {{selectedCouponId == item.id ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="chooseCoupon"><view><text>{{item.name}}</text><text class="hint">{{item.minimumText}} · 可叠加会员价</text></view><text class="coupon-amount">{{item.amountText}}</text></view></view>
   <view class="order-note"><text class="section-title">订单备注</text><textarea value="{{note}}" maxlength="200" auto-height placeholder="例如：少冰、送到 A 区，不超过 200 字" bindinput="onNoteInput" /></view>
   <view class="summary">
     <view><text>商品原价</text><text>¥{{totals.originalText}}</text></view>
+    <view wx:if="{{isMember}}"><text>会员优惠</text><text class="green">-¥{{checkout ? checkout.memberDiscount : totals.discountText}}</text></view>
     <view wx:if="{{checkout && checkout.usingCoupon}}"><text>{{checkout.productVoucher ? '商品兑换券赠送' : '优惠券优惠'}}</text><text class="green">-¥{{checkout.couponDiscount}}</text></view>
-    <view wx:if="{{!checkout || !checkout.usingCoupon}}"><text>会员优惠</text><text class="green">-¥{{checkout ? checkout.memberDiscount : totals.discountText}}</text></view>
     <view class="pay"><text>应付金额</text><text>¥{{totals.payableText}}</text></view>
   </view>
-  <view wx:if="{{checkout && checkout.productVoucher}}" class="coupon-rule-banner">商品兑换券赠送 1 件，按原价计算，不叠加会员价，也不可使用赠金。</view>
-  <view wx:if="{{!isMember && !(checkout && checkout.usingCoupon)}}" class="upgrade-banner" bindtap="upgrade">当前按原价结算，是否充值余额并升级会员？<text>查看套餐 ›</text></view>
+  <view wx:if="{{checkout && checkout.usingCoupon}}" class="coupon-rule-banner">优惠券可叠加会员价，但不可使用赠金；商品兑换券赠送 1 件。</view>
+  <view wx:if="{{!isMember}}" class="upgrade-banner" bindtap="upgrade">当前按原价结算，是否充值余额并升级会员？<text>查看套餐 ›</text></view>
   <view wx:if="{{checkout && items.length}}" class="methods">
     <view class="section-title">支付方式</view>
     <view class="method {{method === 'mixed' ? 'selected' : ''}}" data-method="mixed" bindtap="chooseMethod"><view><text>余额 + 微信支付</text><text class="hint">账户储值 ¥{{checkout.storedText}} · 本单抵扣 ¥{{checkout.balanceDeductionText}} · 微信支付 ¥{{checkout.wechatDueText}}</text></view><text class="radio">{{method === 'mixed' ? '●' : '○'}}</text></view>

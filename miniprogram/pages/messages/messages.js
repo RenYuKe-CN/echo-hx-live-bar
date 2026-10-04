@@ -1,4 +1,5 @@
 const api = require('../../utils/api');
+const subscription = require('../../utils/subscription');
 Page({
   data: { messages: [], page: 1, hasNext: false, busy: false, subscribing: false },
   onShow() { this.load(1); },
@@ -25,17 +26,9 @@ Page({
   subscribe() {
     if (this.data.subscribing) return;
     this.setData({ subscribing: true });
-    api.request('/message-subscription-templates').then(({ templates }) => {
-      const usable = (templates || []).filter(item => item.wechatTemplateId);
-      if (!usable.length) throw new Error('商家暂未配置微信订阅消息模板');
-      return new Promise((resolve, reject) => wx.requestSubscribeMessage({
-        tmplIds: usable.map(item => item.wechatTemplateId),
-        success: result => resolve({ result, templates: usable }),
-        fail: reject
-      }));
-    }).then(({ result, templates }) => api.request('/me/subscription-authorizations', {
-      method: 'POST',
-      data: { authorizations: templates.map(item => ({ templateKey: item.templateKey, wechatTemplateId: item.wechatTemplateId, status: result[item.wechatTemplateId] || 'reject' })) }
-    })).then(() => wx.showToast({ title: '提醒设置已更新', icon: 'success' })).catch(error => wx.showToast({ title: error.message || '授权未完成', icon: 'none' })).finally(() => this.setData({ subscribing: false }));
+    subscription.loadTemplates().then(templates => subscription.requestAuthorization(templates))
+      .then(() => wx.showToast({ title: '提醒设置已更新', icon: 'success' }))
+      .catch(error => wx.showToast({ title: error.message || '授权未完成', icon: 'none' }))
+      .finally(() => this.setData({ subscribing: false }));
   }
 });

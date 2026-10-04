@@ -730,7 +730,8 @@ function couponUsable(coupon, userId, items = [], options = {}) {
     const user = db.prepare('SELECT member_tier_id FROM users WHERE id = ?').get(userId);
     if (Number(user?.member_tier_id) !== Number(definition.member_tier_id)) return { ok: false, message: '当前会员等级不满足优惠券使用条件' };
   }
-  const base = items.reduce((sum, item) => sum + Number(item.price_cents || 0) * Number(item.quantity || 0), 0);
+  const pricing = options.pricing || memberPricing(userId);
+  const base = items.reduce((sum, item) => sum + unitPrice(item, pricing) * Number(item.quantity || 0), 0);
   if ((coupon.voucher_type || 'discount') === 'product') {
     // A product voucher must be bound to the cart row created by the
     // voucher-use endpoint. Matching by product alone would allow a payer to
@@ -738,12 +739,13 @@ function couponUsable(coupon, userId, items = [], options = {}) {
     const giftItems = items.filter(item => Number(item.applied_coupon_id) === Number(coupon.id)
       && Number(item.product_id) === Number(coupon.gift_product_id));
     if (!giftItems.length || giftItems.reduce((sum, item) => sum + Number(item.quantity || 0), 0) < 1) return { ok: false, message: '请先将兑换商品加入购物车' };
-    return { ok: true, discount: Math.max(...giftItems.map(item => Number(item.price_cents || 0))), eligibleAmount: Math.max(...giftItems.map(item => Number(item.price_cents || 0))), definition };
+    const giftPrice = Math.max(...giftItems.map(item => unitPrice(item, pricing)));
+    return { ok: true, discount: giftPrice, eligibleAmount: giftPrice, definition };
   }
   if (base < coupon.min_order_cents) return { ok: false, message: `订单满 ${centsToMoney(coupon.min_order_cents)} 元可用` };
   const eligibleItems = items.filter(item => (!definition.product_id || Number(item.product_id) === Number(definition.product_id)) && (!definition.category_id || Number(item.category_id) === Number(definition.category_id)));
   if (!eligibleItems.length) return { ok: false, message: '当前商品不满足优惠券使用范围' };
-  const eligibleAmount = eligibleItems.reduce((sum, item) => sum + Number(item.price_cents || 0) * Number(item.quantity || 0), 0);
+  const eligibleAmount = eligibleItems.reduce((sum, item) => sum + unitPrice(item, pricing) * Number(item.quantity || 0), 0);
   const discount = definition.type === 'discount'
     ? Math.min(eligibleAmount, Math.max(0, Math.round(eligibleAmount * (1 - Number(definition.discount_rate)))))
     : Math.min(eligibleAmount, Math.max(0, Number(definition.amount_cents)));
@@ -784,12 +786,11 @@ function releaseCoupon(order) {
 function orderTotals(items, userId, selectedCouponId) {
   const pricing = memberPricing(userId);
   const original = items.reduce((sum, item) => sum + item.price_cents * item.quantity, 0);
-  const coupon = selectedCouponId ? getCouponForOrder(userId, selectedCouponId, items) : null;
+  const coupon = selectedCouponId ? getCouponForOrder(userId, selectedCouponId, items, { pricing }) : null;
   const productVoucher = coupon && (coupon.voucher_type || 'discount') === 'product';
-  const member = productVoucher ? original : items.reduce((sum, item) => sum + unitPrice(item, pricing) * item.quantity, 0);
-  const payableBeforeCoupon = coupon ? original : member;
+  const member = items.reduce((sum, item) => sum + unitPrice(item, pricing) * item.quantity, 0);
   const couponDiscount = coupon?.discount || 0;
-  const payable = Math.max(0, payableBeforeCoupon - couponDiscount);
+  const payable = Math.max(0, member - couponDiscount);
   return { pricing, original, member, payable, couponDiscount, coupon, usingCoupon: Boolean(coupon), productVoucher, giftProductId: productVoucher ? coupon.gift_product_id : null };
 }
 
@@ -1215,7 +1216,7 @@ router.get('/sessions/:sessionId/checkout', (req, res) => {
   const storedUsable = Math.min(Math.max(wallet.stored_cents - wallet.stored_reserved_cents, 0), payable - bonusUsable);
   const balanceDeduction = bonusUsable + storedUsable;
   const wechatDue = payable - balanceDeduction;
-  res.json({ original: centsToMoney(totals.original), member: centsToMoney(totals.member), payable: centsToMoney(payable), discount: centsToMoney(totals.original - payable), memberDiscount: totals.usingCoupon ? 0 : centsToMoney(totals.original - totals.member), couponDiscount: centsToMoney(totals.couponDiscount), coupon: totals.coupon ? { id: totals.coupon.id, name: totals.coupon.name, discount: centsToMoney(totals.couponDiscount), voucherType: totals.coupon.voucher_type || 'discount', giftProductId: totals.coupon.gift_product_id || null, giftProductName: totals.coupon.gift_product_name || null } : null, usingCoupon: totals.usingCoupon, productVoucher: totals.productVoucher, giftProductId: totals.giftProductId, stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0, couponCannotUseBonus: totals.usingCoupon });
+  res.json({ original: centsToMoney(totals.original), member: centsToMoney(totals.member), payable: centsToMoney(payable), discount: centsToMoney(totals.original - payable), memberDiscount: centsToMoney(totals.original - totals.member), couponDiscount: centsToMoney(totals.couponDiscount), coupon: totals.coupon ? { id: totals.coupon.id, name: totals.coupon.name, discount: centsToMoney(totals.couponDiscount), voucherType: totals.coupon.voucher_type || 'discount', giftProductId: totals.coupon.gift_product_id || null, giftProductName: totals.coupon.gift_product_name || null } : null, usingCoupon: totals.usingCoupon, productVoucher: totals.productVoucher, giftProductId: totals.giftProductId, stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0, couponCannotUseBonus: totals.usingCoupon });
 });
 
 router.post('/sessions/:sessionId/orders', async (req, res) => {
@@ -1272,7 +1273,7 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
       remainingGiftQuantity -= giftQuantity;
       const paidQuantity = item.quantity - giftQuantity;
       if (giftQuantity) insertItem.run(result.lastInsertRowid, item.id, item.product_id, `${item.name}（兑换券赠送）`, giftQuantity, item.price_cents, 0, item.cost_cents);
-      if (paidQuantity) insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, paidQuantity, item.price_cents, totals.usingCoupon ? item.price_cents : unitPrice(item, pricing), item.cost_cents);
+      if (paidQuantity) insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, paidQuantity, item.price_cents, unitPrice(item, pricing), item.cost_cents);
     });
     lockCoupon(result.lastInsertRowid, totals.coupon?.id, userId);
     db.prepare(`UPDATE cart_items SET status = 'checking_out' WHERE session_id = ? AND status = 'pending'`).run(session.id);
