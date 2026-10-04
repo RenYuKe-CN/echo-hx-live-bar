@@ -1114,13 +1114,15 @@ setInterval(() => releaseExpiredWechatOrders(), 60 * 1000).unref();
 function notifyExpiringStorage() {
   const now = new Date();
   const limit = new Date(now.getTime() + 3 * 86400000);
-  const records = db.prepare(`SELECT id, user_id, product_name, expires_at
+  const records = db.prepare(`SELECT id, user_id, product_name, quantity, expires_at
     FROM storage_records
     WHERE status = 'stored' AND quantity > 0
       AND datetime(expires_at) > datetime(?)
       AND datetime(expires_at) <= datetime(?)`).all(now.toISOString(), limit.toISOString());
   records.forEach(record => queueUserMessage(record.user_id, 'storage_expiring', {
     productName: record.product_name,
+    quantity: record.quantity,
+    remainingDays: Math.max(1, Math.ceil((new Date(record.expires_at).getTime() - now.getTime()) / 86400000)),
     expireAt: String(record.expires_at).slice(0, 10)
   }, 'storage_expiry', record.id, `存酒即将到期：${record.id}`));
 }
@@ -1747,6 +1749,11 @@ router.post('/admin/storage', (req, res) => {
     audit(req, '登记存酒', `${user.id}: ${product.name} x${quantity}`);
     return db.prepare('SELECT * FROM storage_records WHERE id = ?').get(r.lastInsertRowid);
   })();
+  queueUserMessage(user.id, 'storage_deposited', {
+    productName: record.product_name,
+    quantity: record.quantity,
+    expireAt: String(record.expires_at).slice(0, 10)
+  }, 'storage_deposit', record.id, `存酒成功：${record.product_name}`);
   res.status(201).json({ record: storageView(record), expiresAt: expiry.toISOString(), days });
 });
 router.post('/admin/storage/:id/withdraw', (req, res) => {
@@ -1760,7 +1767,15 @@ router.post('/admin/storage/:id/withdraw', (req, res) => {
     db.prepare('INSERT INTO storage_movements (record_id, type, quantity, operator, note) VALUES (?, ?, ?, ?, ?)').run(record.id, 'withdraw', quantity, req.staff.username, String(req.body.note || '').trim());
     audit(req, '取酒', `${record.id}: ${record.product_name} x${quantity}`);
   })();
-  res.json({ record: db.prepare('SELECT * FROM storage_records WHERE id = ?').get(record.id) });
+  const updated = db.prepare('SELECT * FROM storage_records WHERE id = ?').get(record.id);
+  const movement = db.prepare("SELECT id FROM storage_movements WHERE record_id = ? AND type = 'withdraw' ORDER BY id DESC LIMIT 1").get(record.id);
+  queueUserMessage(record.user_id, 'storage_withdrawn', {
+    productName: record.product_name,
+    quantity,
+    remainingQuantity: updated.quantity,
+    expireAt: String(record.expires_at).slice(0, 10)
+  }, 'storage_withdraw', movement?.id || record.id, `取酒成功：${record.product_name}`);
+  res.json({ record: updated });
 });
 
 router.get('/admin/group-buy', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM group_buy_records').get().value; return res.json({ records: db.prepare('SELECT * FROM group_buy_records ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });

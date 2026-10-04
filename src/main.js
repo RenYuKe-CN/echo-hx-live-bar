@@ -316,6 +316,24 @@ function reportPresetRange(preset) {
   return { start: localDateString(start), end: localDateString(end) };
 }
 function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]); }
+function messageTemplateValueKeys(template) {
+  if (!template) return [];
+  const keys = new Set();
+  const source = `${template.title_template || ''} ${template.content_template || ''}`;
+  for (const match of source.matchAll(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g)) keys.add(match[1]);
+  try {
+    const mapping = JSON.parse(template.field_mapping || '{}');
+    if (mapping && typeof mapping === 'object' && !Array.isArray(mapping)) {
+      Object.values(mapping).forEach(value => {
+        if (/^[a-zA-Z0-9_]+$/.test(String(value))) keys.add(String(value));
+      });
+    }
+  } catch { /* An invalid mapping is reported when the template is saved. */ }
+  return [...keys];
+}
+function messageTemplateValues(template) {
+  return JSON.stringify(Object.fromEntries(messageTemplateValueKeys(template).map(key => [key, ''])), null, 2);
+}
 function adminTable(headers, rows) { return `<div class="admin-table-wrap"><table class="admin-table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows || `<tr><td colspan="${headers.length}" class="empty-cell">暂无数据</td></tr>`}</tbody></table></div>`; }
 function adminPageQuery(key) { return `page=${adminState.pages[key] || 1}&pageSize=${adminState.pageSizes[key] || 20}`; }
 function adminPagination(key, pagination) {
@@ -606,7 +624,7 @@ async function openAdminDialog(type, item) {
   const root = document.querySelector('#admin-dialog-root');
   const field = (label, name, input) => `<label class="admin-field"><span>${label}</span>${input || `<input name="${name}" required>`}</label>`;
   const number = (name, value = '', min = '0', step = '1') => `<input name="${name}" type="number" value="${value}" min="${min}" step="${step}" required>`;
-  let title, fields, path, method = 'POST';
+  let title, fields, path, method = 'POST', messageData = null;
   try {
     if (type === 'new-storage') {
       const productsData = await adminApi('/products?all=1');
@@ -663,13 +681,13 @@ async function openAdminDialog(type, item) {
         + field('状态', 'status', `<select name="status"><option value="active" ${item?.status !== 'inactive' ? 'selected' : ''}>启用</option><option value="inactive" ${item?.status === 'inactive' ? 'selected' : ''}>停用</option></select>`);
     } else if (type === 'issue-coupon' || type === 'send-message') {
       const couponData = await adminApi('/coupons?page=1&pageSize=50');
-      const messageData = type === 'send-message' ? await adminApi('/messages/templates') : null;
+      messageData = type === 'send-message' ? await adminApi('/messages/templates') : null;
       const recipient = item?.userId ? `<p class="dialog-hint">指定会员 ID ${item.userId}</p>` : '';
       title = type === 'issue-coupon' ? '发放优惠券' : '发送消息';
       path = type === 'issue-coupon' ? `/coupons/${item?.couponId || couponData.coupons[0]?.id}/issue` : '/messages/send';
       fields = recipient + (type === 'issue-coupon'
         ? field('优惠券', 'couponId', `<select name="couponId" required>${couponData.coupons.filter(c => c.status === 'active').map(c => `<option value="${c.id}" ${item?.couponId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}${c.isProductVoucher ? ` · 商品券：${escapeHtml(c.giftProductName || '指定商品')}` : ''}</option>`).join('')}</select>`)
-        : field('消息模板', 'templateId', `<select name="templateId" required>${messageData.templates.filter(t => t.enabled).map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')}</select>`) + field('发送名称', 'name', '<input name="name" maxlength="50" placeholder="例如 周末会员活动" required>') + field('模板变量 JSON', 'values', '<textarea name="values" rows="5" required>{"content":"今晚会员活动开始"}</textarea>'))
+        : field('消息模板', 'templateId', `<select name="templateId" required>${messageData.templates.filter(t => t.enabled).map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')}</select>`) + field('发送名称', 'name', '<input name="name" maxlength="50" placeholder="例如 周末会员活动" required>') + field('模板变量 JSON', 'values', `<textarea name="values" rows="5" required>${escapeHtml(messageTemplateValues(messageData.templates.find(t => t.enabled)))}</textarea>`))
         + field('发送范围', 'audience', `<select name="audience"><option value="selected" ${item?.userId ? 'selected' : ''}>指定会员</option><option value="all">全部会员</option></select>`)
         + (type === 'issue-coupon'
           ? `<div class="admin-field coupon-member-picker"><span>指定会员</span><div class="coupon-member-search"><input name="memberPhone" type="tel" inputmode="numeric" maxlength="11" placeholder="输入手机号搜索"><button type="button" class="outline-button" data-find-coupon-member>搜索</button></div><div id="coupon-member-results" class="coupon-member-results"><span class="dialog-hint">请输入手机号搜索后选择会员</span></div><input type="hidden" name="userIds" value="${item?.userId || ''}"></div>`
@@ -771,6 +789,16 @@ async function openAdminDialog(type, item) {
     audience.onchange = syncAudience;
     syncAudience();
     if (item?.userId) { phone.value = ''; results.innerHTML = '<span class="dialog-hint">已预选当前会员，可直接确认发放。</span>'; }
+  }
+  if (type === 'send-message') {
+    const templateSelect = root.querySelector('[name="templateId"]');
+    const valuesInput = root.querySelector('[name="values"]');
+    const syncMessageValues = () => {
+      const selected = messageData.templates.find(template => String(template.id) === String(templateSelect.value));
+      valuesInput.value = messageTemplateValues(selected);
+    };
+    templateSelect.addEventListener('change', syncMessageValues);
+    syncMessageValues();
   }
   root.querySelector('form').onsubmit = async event => {
     event.preventDefault();

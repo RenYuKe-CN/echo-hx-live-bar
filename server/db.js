@@ -260,7 +260,9 @@ const messageTemplateSeed = [
   ['coupon_issued', '优惠券到账', '您有新优惠券', '{{couponName}} 已放入您的券包。'],
   ['coupon_expiring', '优惠券即将到期', '优惠券即将到期', '{{couponName}} 将于 {{expireAt}} 到期。'],
   ['member_upgraded', '会员升级', '会员等级已升级', '恭喜您成为 {{memberLevel}}。'],
-  ['storage_expiring', '存酒到期提醒', '您的存酒即将到期', '{{productName}} 将于 {{expireAt}} 到期。'],
+  ['storage_deposited', '存酒成功', '存酒已登记', '您已存入 {{productName}} × {{quantity}}，有效期至 {{expireAt}}。'],
+  ['storage_withdrawn', '取酒成功', '取酒成功提醒', '您已取出 {{productName}} × {{quantity}}，当前剩余 {{remainingQuantity}} 件。'],
+  ['storage_expiring', '存酒到期提醒', '您的存酒即将到期', '{{productName}} 还有 {{quantity}} 件，距离到期还有 {{remainingDays}} 天（{{expireAt}}），请尽快来店使用。'],
   ['birthday_reward', '生日福利', '生日快乐', '祝您生日快乐，生日福利已到账。'],
   ['wallet_recharged', '储值到账', '储值到账提醒', '储值金额 {{stored}} 元，赠金 {{bonus}} 元已到账。'],
   ['reward_redeemed', '积分兑换', '兑换成功', '您已成功兑换 {{rewardName}}。'],
@@ -268,6 +270,15 @@ const messageTemplateSeed = [
 ];
 const insertMessageTemplate = db.prepare('INSERT OR IGNORE INTO message_templates (template_key, name, title_template, content_template) VALUES (?, ?, ?, ?)');
 messageTemplateSeed.forEach(row => insertMessageTemplate.run(...row));
+// Upgrade the original built-in copy without overwriting a template edited by
+// an administrator.
+db.prepare(`UPDATE message_templates
+  SET content_template = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE template_key = 'storage_expiring'
+    AND content_template = ?`).run(
+  '{{productName}} 还有 {{quantity}} 件，距离到期还有 {{remainingDays}} 天（{{expireAt}}），请尽快来店使用。',
+  '{{productName}} 将于 {{expireAt}} 到期。'
+);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS wechat_sessions (
