@@ -1,6 +1,6 @@
 const api = require('../../utils/api');
 Page({
-  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？', detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
+  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, couponCheckout: null, selectedCouponId: '', totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', appName: 'Echo HX Live Bar', homeTitle: '今晚喝点什么？', detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
   onLoad() { this.tableVersion = -1; },
   onShow() { this.load(); },
   load() {
@@ -24,7 +24,7 @@ Page({
       const profileReady = Boolean(session.user.phone && session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户');
       this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.memberLevel || '会').charAt(0), appName: settings.app_name || 'Echo HX Live Bar', homeTitle: settings.home_title || '今晚喝点什么？', authVisible: !profileReady, authStep: session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户' ? 'phone' : 'profile', authAvatarPath: session.user.avatarUrl ? api.imageUrl(session.user.avatarUrl) : '', authAvatarUrl: session.user.avatarUrl || '', authNickname: session.user.nickname === '微信用户' ? '' : (session.user.nickname || ''), authError: '' });
       wx.setNavigationBarTitle({ title: settings.app_name || 'Echo HX Live Bar' });
-      this.filter(); this.refreshCart();
+      this.filter(); this.refreshCart().then(() => this.consumePendingCoupon());
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
   },
   filter() {
@@ -38,21 +38,60 @@ Page({
   addFromDetail() { const product = this.data.detailProduct; if (!product) return; const sid = getApp().globalData.sessionId; api.request('/sessions/' + sid + '/cart/items', { method: 'POST', data: { productId: product.id, quantity: 1 } }).then(() => { this.setData({ detailProduct: null }); this.refreshCart(); }).catch(error => wx.showToast({ title: error.message, icon: 'none' })); },
   refreshCart() {
     const id = getApp().globalData.sessionId;
-    api.request('/sessions/' + id + '/cart').then(data => {
-      const cartMap = {}; data.items.forEach(i => { cartMap[i.product_id] = i.quantity; });
+    return api.request('/sessions/' + id + '/cart').then(data => {
+      // A product voucher creates a separate cart row. Keep the visible
+      // quantity aggregated, but preserve ordinary rows for decrementing.
+      const cartMap = {}; data.items.forEach(i => { cartMap[i.product_id] = (cartMap[i.product_id] || 0) + i.quantity; });
       this.setData({ cart: data.items, cartMap, totals: { ...data.totals, originalText: Number(data.totals.original).toFixed(2), memberText: Number(data.totals.member).toFixed(2) }, totalQty: data.items.reduce((n, i) => n + i.quantity, 0) });
-    }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
+      if (this.data.selectedCouponId) return this.refreshCouponCheckout();
+      return data;
+    }).catch(error => { wx.showToast({ title: error.message, icon: 'none' }); throw error; });
+  },
+  refreshCouponCheckout(couponId = this.data.selectedCouponId) {
+    const sid = getApp().globalData.sessionId;
+    if (!couponId || !sid) return Promise.resolve(null);
+    return api.request(`/sessions/${sid}/checkout?userCouponId=${encodeURIComponent(couponId)}`).then(checkout => {
+      this.setData({ selectedCouponId: String(couponId), couponCheckout: {
+        ...checkout,
+        originalText: Number(checkout.original || 0).toFixed(2),
+        payableText: Number(checkout.payable || 0).toFixed(2),
+        couponDiscountText: Number(checkout.couponDiscount || 0).toFixed(2)
+      } });
+      return checkout;
+    }).catch(error => {
+      this.setData({ selectedCouponId: '', couponCheckout: null });
+      wx.showToast({ title: error.message, icon: 'none' });
+      return null;
+    });
+  },
+  consumePendingCoupon() {
+    const app = getApp();
+    const couponId = app.globalData.pendingCouponId;
+    if (!couponId || !app.globalData.sessionId) return;
+    const mode = app.globalData.pendingCouponMode || 'product';
+    delete app.globalData.pendingCouponId;
+    delete app.globalData.pendingCouponMode;
+    const select = mode === 'product'
+      ? api.request(`/sessions/${app.globalData.sessionId}/coupons/${couponId}/use`, { method: 'POST' }).then(() => {
+        wx.showToast({ title: '兑换商品已加入购物车', icon: 'success' });
+      })
+      : Promise.resolve();
+    select.then(() => this.refreshCart()).then(() => this.refreshCouponCheckout(couponId)).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
   },
   change(e) {
     const id = Number(e.currentTarget.dataset.id), delta = Number(e.currentTarget.dataset.delta);
-    const item = this.data.cart.find(i => i.product_id === id), sid = getApp().globalData.sessionId;
+    // Reduce a paid row first. The voucher row is fixed at one and must not
+    // be removed when the customer decreases an ordinary purchase.
+    const item = this.data.cart.find(i => i.product_id === id && !i.applied_coupon_id)
+      || this.data.cart.find(i => i.product_id === id);
+    const sid = getApp().globalData.sessionId;
     const action = delta > 0 ? api.request('/sessions/' + sid + '/cart/items', { method: 'POST', data: { productId: id, quantity: 1 } }) : item ? api.request('/sessions/' + sid + '/cart/items/' + item.id, { method: 'PATCH', data: { quantity: item.quantity - 1 } }) : Promise.resolve();
     action.then(() => this.refreshCart()).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
   },
   upgrade() {
     wx.showModal({ title: '充值升级会员', content: '是否查看储值套餐？满足商家设置的升级条件后可享会员价，具体以充值后的会员等级为准。', confirmText: '查看套餐', success: result => { if (result.confirm) wx.navigateTo({ url: '/pages/recharge/recharge' }); } });
   },
-  preview() { if (!this.data.totalQty) return wx.showToast({ title: '请先选择商品', icon: 'none' }); wx.navigateTo({ url: '/pages/cart/cart' }); },
+  preview() { if (!this.data.totalQty) return wx.showToast({ title: '请先选择商品', icon: 'none' }); const query = this.data.selectedCouponId ? `?userCouponId=${encodeURIComponent(this.data.selectedCouponId)}` : ''; wx.navigateTo({ url: `/pages/cart/cart${query}` }); },
   closeAuth() { this.setData({ authVisible: false, authError: '' }); },
   onAuthAvatar(e) {
     const avatarPath = e.detail?.avatarUrl;

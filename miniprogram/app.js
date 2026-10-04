@@ -1,6 +1,6 @@
 const api = require('./utils/api');
 App({
-  globalData: { sessionId: null, tableNo: 'A-08', pendingScene: '', tableVersion: 0, user: null },
+  globalData: { sessionId: null, tableNo: 'A-08', pendingScene: '', pendingCouponId: '', pendingCouponMode: '', tableVersion: 0, user: null },
   onLaunch(options) {
     api.setUserId(1);
     this.apiReady = api.refreshApiBaseUrl().then(() => api.login()).then(login => { this.globalData.user = login.user; return Promise.all([api.request('/mini-page'), api.request('/me')]); }).then(([page, profile]) => {

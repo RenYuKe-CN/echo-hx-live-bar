@@ -10,6 +10,18 @@ Page({
   },
   read(e) { const id = e.currentTarget.dataset.id; api.request(`/me/messages/${id}/read`, { method: 'PATCH' }).then(() => this.setData({ messages: this.data.messages.map(m => m.id === id ? { ...m, read_at: 'read' } : m) })); },
   readAll() { api.request('/me/messages/read-all', { method: 'PATCH' }).then(() => this.setData({ messages: this.data.messages.map(m => ({ ...m, read_at: 'read' })) })).catch(error => wx.showToast({ title: error.message, icon: 'none' })); },
+  remove(e) {
+    const id = Number(e.currentTarget.dataset.id);
+    const message = this.data.messages.find(item => Number(item.id) === id);
+    if (!message?.read_at) return wx.showToast({ title: '请先打开消息标记为已读', icon: 'none' });
+    wx.showModal({ title: '删除消息', content: '只会从你的消息列表隐藏，商家后台记录仍会保留。', confirmText: '删除', success: result => {
+      if (!result.confirm) return;
+      api.request(`/me/messages/${id}`, { method: 'DELETE' }).then(() => {
+        this.setData({ messages: this.data.messages.filter(item => Number(item.id) !== id) });
+        wx.showToast({ title: '消息已删除', icon: 'success' });
+      }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
+    } });
+  },
   subscribe() {
     if (this.data.subscribing) return;
     this.setData({ subscribing: true });

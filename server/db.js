@@ -115,6 +115,7 @@ db.exec(`
     related_type TEXT,
     related_id INTEGER,
     read_at TEXT,
+    hidden_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS message_campaigns (
@@ -171,6 +172,7 @@ ensureColumn('users', 'member_pending_tier_id', 'INTEGER REFERENCES member_tiers
 ensureColumn('users', 'admin_note', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('users', 'birthday_type', 'TEXT');
 ensureColumn('users', 'birthday_date', 'TEXT');
+ensureColumn('user_messages', 'hidden_at', 'TEXT');
 ensureColumn('member_tiers', 'upgrade_type', "TEXT NOT NULL DEFAULT 'spend'");
 ensureColumn('member_tiers', 'threshold_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('member_tiers', 'duration_days', 'INTEGER NOT NULL DEFAULT 0');
@@ -206,6 +208,9 @@ ensureColumn('orders', 'payment_error', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('orders', 'hidden_by_user', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('orders', 'coupon_id', 'INTEGER REFERENCES user_coupons(id)');
 ensureColumn('orders', 'coupon_discount_cents', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('coupon_definitions', 'voucher_type', "TEXT NOT NULL DEFAULT 'discount'");
+ensureColumn('coupon_definitions', 'gift_product_id', 'INTEGER REFERENCES products(id)');
+ensureColumn('cart_items', 'applied_coupon_id', 'INTEGER REFERENCES user_coupons(id)');
 ensureColumn('wallet_accounts', 'stored_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('wallet_accounts', 'bonus_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 db.exec(`

@@ -269,13 +269,45 @@ function queueUserMessage(userId, type, values = {}, relatedType = null, related
 }
 function couponUserView(row) {
   const definition = couponDefinitionView(row);
-  const expired = (row.expired_at && new Date(row.expired_at) <= new Date()) || (row.valid_until && new Date(row.valid_until) <= new Date());
-  return { ...definition, id: row.id, couponCode: row.coupon_code, definitionStatus: row.definition_status || definition.status, status: expired && row.status === 'available' ? 'expired' : row.status, issuedAt: row.issued_at, usedAt: row.used_at, expiredAt: row.expired_at || row.valid_until };
+  const now = Date.now();
+  const startsAt = row.valid_from ? new Date(row.valid_from).getTime() : 0;
+  const expiresAt = row.expired_at || row.valid_until ? new Date(row.expired_at || row.valid_until).getTime() : 0;
+  const expired = Boolean(expiresAt && Number.isFinite(expiresAt) && expiresAt <= now);
+  const notStarted = Boolean(startsAt && Number.isFinite(startsAt) && startsAt > now);
+  const definitionStatus = row.definition_status || definition.status;
+  const status = definitionStatus === 'inactive'
+    ? 'cancelled'
+    : expired && row.status === 'available' ? 'expired' : row.status;
+  return {
+    ...definition,
+    id: row.id,
+    couponCode: row.coupon_code,
+    definitionStatus,
+    status,
+    usable: status === 'available' && !notStarted,
+    notStarted,
+    issuedAt: row.issued_at,
+    usedAt: row.used_at,
+    expiredAt: row.expired_at || row.valid_until
+  };
+}
+
+function availableCouponCount(userId) {
+  const rows = db.prepare(`SELECT uc.*, cd.name, cd.type, cd.amount_cents, cd.discount_rate, cd.min_order_cents, cd.product_id, cd.category_id,
+    cd.member_tier_id, cd.voucher_type, cd.gift_product_id, cd.total_quantity, cd.issued_quantity, cd.per_user_limit, cd.valid_from, cd.valid_until, cd.icon_url, cd.description, cd.status AS definition_status,
+    gift.name AS gift_product_name, gift.image_url AS gift_product_image, gift.price_cents AS gift_product_price_cents
+    FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id
+    LEFT JOIN products gift ON gift.id = cd.gift_product_id
+    WHERE uc.user_id = ? AND uc.status = 'available'`).all(userId);
+  return rows.reduce((count, row) => {
+    const coupon = couponUserView(row);
+    return count + (coupon.usable ? 1 : 0);
+  }, 0);
 }
 
 router.get('/me/notification-summary', requireWechatUser, (req, res) => {
   const userId = currentUserId(req);
-  const couponCount = db.prepare("SELECT COUNT(*) AS value FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id WHERE uc.user_id = ? AND uc.status = 'available' AND cd.status = 'active' AND (cd.valid_from IS NULL OR datetime(cd.valid_from) <= datetime('now')) AND (uc.expired_at IS NULL OR datetime(uc.expired_at) > datetime('now')) AND (cd.valid_until IS NULL OR datetime(cd.valid_until) > datetime('now'))").get(userId).value;
+  const couponCount = availableCouponCount(userId);
   // Keep the badge aligned with the order countdown. A scheduler may be a few
   // seconds late, so an expired pending order must not keep showing as unpaid
   // in the member centre while it is waiting to be closed.
@@ -283,24 +315,32 @@ router.get('/me/notification-summary', requireWechatUser, (req, res) => {
     WHERE payer_user_id = ? AND payment_status = 'pending'
       AND ((payment_expire_at IS NOT NULL AND datetime(payment_expire_at) > datetime('now'))
         OR (payment_expire_at IS NULL AND datetime(created_at, '+10 minutes') > datetime('now')))`).get(userId).value;
-  const unreadMessageCount = db.prepare('SELECT COUNT(*) AS value FROM user_messages WHERE user_id = ? AND read_at IS NULL').get(userId).value;
+  const unreadMessageCount = db.prepare('SELECT COUNT(*) AS value FROM user_messages WHERE user_id = ? AND read_at IS NULL AND hidden_at IS NULL').get(userId).value;
   res.json({ couponCount, pendingOrderCount, unreadMessageCount });
 });
 router.get('/me/coupons', requireWechatUser, (req, res) => {
   const rows = db.prepare(`SELECT uc.*, cd.name, cd.type, cd.amount_cents, cd.discount_rate, cd.min_order_cents, cd.product_id, cd.category_id,
-    cd.member_tier_id, cd.total_quantity, cd.issued_quantity, cd.per_user_limit, cd.valid_from, cd.valid_until, cd.icon_url, cd.description, cd.status AS definition_status
-    FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id WHERE uc.user_id = ? ORDER BY uc.id DESC`).all(currentUserId(req));
-  const coupons = rows.map(row => couponUserView({ ...row, status: row.definition_status === 'inactive' ? 'cancelled' : row.status }));
-  res.json({ coupons });
+    cd.member_tier_id, cd.voucher_type, cd.gift_product_id, cd.total_quantity, cd.issued_quantity, cd.per_user_limit, cd.valid_from, cd.valid_until, cd.icon_url, cd.description, cd.status AS definition_status,
+    gift.name AS gift_product_name, gift.image_url AS gift_product_image, gift.price_cents AS gift_product_price_cents
+    FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id
+    LEFT JOIN products gift ON gift.id = cd.gift_product_id
+    WHERE uc.user_id = ? ORDER BY uc.id DESC`).all(currentUserId(req));
+  const coupons = rows.map(couponUserView);
+  res.json({ coupons, couponCount: coupons.filter(coupon => coupon.usable).length });
 });
 router.get('/me/messages', requireWechatUser, (req, res) => {
   const { page, pageSize, offset } = parsePagination(req);
-  const total = db.prepare('SELECT COUNT(*) AS value FROM user_messages WHERE user_id = ?').get(currentUserId(req)).value;
-  const messages = db.prepare('SELECT * FROM user_messages WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?').all(currentUserId(req), pageSize, offset);
+  const total = db.prepare('SELECT COUNT(*) AS value FROM user_messages WHERE user_id = ? AND hidden_at IS NULL').get(currentUserId(req)).value;
+  const messages = db.prepare('SELECT * FROM user_messages WHERE user_id = ? AND hidden_at IS NULL ORDER BY id DESC LIMIT ? OFFSET ?').all(currentUserId(req), pageSize, offset);
   res.json({ messages, pagination: paginationView(page, pageSize, total) });
 });
 router.patch('/me/messages/:id/read', requireWechatUser, (req, res) => { db.prepare('UPDATE user_messages SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP) WHERE id = ? AND user_id = ?').run(req.params.id, currentUserId(req)); res.json({ ok: true }); });
 router.patch('/me/messages/read-all', requireWechatUser, (req, res) => { db.prepare('UPDATE user_messages SET read_at = COALESCE(read_at, CURRENT_TIMESTAMP) WHERE user_id = ?').run(currentUserId(req)); res.json({ ok: true }); });
+router.delete('/me/messages/:id', requireWechatUser, (req, res) => {
+  const result = db.prepare('UPDATE user_messages SET hidden_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND read_at IS NOT NULL AND hidden_at IS NULL').run(req.params.id, currentUserId(req));
+  if (!result.changes) return res.status(409).json({ message: '请先打开消息标记为已读，再删除消息' });
+  res.json({ ok: true });
+});
 router.post('/me/subscription-authorizations', requireWechatUser, (req, res) => {
   const authorizations = Array.isArray(req.body?.authorizations) ? req.body.authorizations.slice(0, 50) : [];
   const userId = currentUserId(req);
@@ -332,7 +372,8 @@ router.get('/admin/coupons', (req, res) => {
 });
 const couponInput = (body, current = {}) => {
   const name = String(body.name ?? current.name ?? '').trim();
-  const type = body.type ?? current.type ?? 'fixed';
+  const voucherType = body.voucherType ?? current.voucher_type ?? 'discount';
+  const type = voucherType === 'product' ? 'fixed' : (body.type ?? current.type ?? 'fixed');
   const amount = Number(body.amount ?? (Number(current.amount_cents || 0) / 100));
   const discountRate = Number(body.discountRate ?? current.discount_rate ?? 1);
   const minOrder = Number(body.minOrder ?? (Number(current.min_order_cents || 0) / 100));
@@ -342,25 +383,42 @@ const couponInput = (body, current = {}) => {
   const validFrom = body.validFrom ?? current.valid_from ?? null;
   const validUntil = body.validUntil ?? current.valid_until ?? null;
   const productId = body.productId === '' ? null : body.productId == null ? current.product_id || null : Number(body.productId);
+  const giftProductId = voucherType !== 'product'
+    ? null
+    : body.giftProductId === '' ? null : body.giftProductId == null ? current.gift_product_id || null : Number(body.giftProductId);
   const categoryId = body.categoryId === '' ? null : body.categoryId == null ? current.category_id || null : Number(body.categoryId);
   const memberTierId = body.memberTierId === '' ? null : body.memberTierId == null ? current.member_tier_id || null : Number(body.memberTierId);
   const status = body.status ?? current.status ?? 'active';
   const validFromTime = validFrom ? new Date(validFrom).getTime() : null;
   const validUntilTime = validUntil ? new Date(validUntil).getTime() : null;
   const validDatesOk = (!validFrom || Number.isFinite(validFromTime)) && (!validUntil || Number.isFinite(validUntilTime)) && (!validFromTime || !validUntilTime || validFromTime < validUntilTime);
-  const fixedAmountOk = type === 'discount' || (Number.isFinite(amount) && amount > 0);
+  const fixedAmountOk = voucherType === 'product' || type === 'discount' || (Number.isFinite(amount) && amount > 0);
   const discountRateOk = type === 'fixed' || (Number.isFinite(discountRate) && discountRate > 0 && discountRate < 1);
   const productOk = productId == null || Boolean(db.prepare('SELECT id FROM products WHERE id = ?').get(productId));
+  const giftProductOk = giftProductId == null || Boolean(db.prepare("SELECT id FROM products WHERE id = ? AND store_id = 1").get(giftProductId));
   const categoryOk = categoryId == null || Boolean(db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId));
   const tierOk = memberTierId == null || Boolean(db.prepare('SELECT id FROM member_tiers WHERE id = ?').get(memberTierId));
-  if (!name || name.length > 50 || !['fixed', 'discount'].includes(type) || !fixedAmountOk || !discountRateOk || !Number.isFinite(minOrder) || minOrder < 0 || !Number.isInteger(totalQuantity) || totalQuantity < 0 || !Number.isInteger(perUserLimit) || perUserLimit < 1 || perUserLimit > 99 || !Number.isInteger(validDays) || validDays < 0 || validDays > 3650 || !validDatesOk || !productOk || !categoryOk || !tierOk || !['active', 'inactive'].includes(status)) return null;
-  return { name, type, amountCents: Math.round(amount * 100), discountRate, minOrderCents: Math.round(minOrder * 100), totalQuantity, perUserLimit, validDays, validFrom, validUntil, productId, categoryId, memberTierId, iconUrl: String(body.iconUrl ?? current.icon_url ?? '').trim(), description: String(body.description ?? current.description ?? '').trim(), status };
+  if (!name || name.length > 50 || !['discount', 'product'].includes(voucherType) || !['fixed', 'discount'].includes(type) || (voucherType === 'product' && (!Number.isSafeInteger(giftProductId) || !giftProductOk)) || (voucherType !== 'product' && !giftProductOk) || !fixedAmountOk || !discountRateOk || !Number.isFinite(minOrder) || minOrder < 0 || !Number.isInteger(totalQuantity) || totalQuantity < 0 || !Number.isInteger(perUserLimit) || perUserLimit < 1 || perUserLimit > 99 || !Number.isInteger(validDays) || validDays < 0 || validDays > 3650 || !validDatesOk || !productOk || !categoryOk || !tierOk || !['active', 'inactive'].includes(status)) return null;
+  return {
+    name,
+    voucherType,
+    type,
+    amountCents: voucherType === 'product' ? 0 : Math.round(amount * 100),
+    discountRate: voucherType === 'product' ? 1 : discountRate,
+    minOrderCents: voucherType === 'product' ? 0 : Math.round(minOrder * 100),
+    totalQuantity, perUserLimit, validDays, validFrom, validUntil,
+    productId: voucherType === 'product' ? null : productId,
+    categoryId: voucherType === 'product' ? null : categoryId,
+    memberTierId, giftProductId: voucherType === 'product' ? giftProductId : null,
+    iconUrl: String(body.iconUrl ?? current.icon_url ?? '').trim(),
+    description: String(body.description ?? current.description ?? '').trim(), status
+  };
 };
 router.post('/admin/coupons', (req, res) => {
   const item = couponInput(req.body || {});
   if (!item) return res.status(400).json({ message: '优惠券参数无效' });
-  const id = db.prepare(`INSERT INTO coupon_definitions (store_id, name, type, amount_cents, discount_rate, min_order_cents, product_id, category_id, member_tier_id, total_quantity, per_user_limit, valid_from, valid_until, valid_days, icon_url, description, status)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(item.name, item.type, item.amountCents, item.discountRate, item.minOrderCents, item.productId, item.categoryId, item.memberTierId, item.totalQuantity, item.perUserLimit, item.validFrom, item.validUntil, item.validDays, item.iconUrl, item.description, item.status).lastInsertRowid;
+  const id = db.prepare(`INSERT INTO coupon_definitions (store_id, name, type, voucher_type, gift_product_id, amount_cents, discount_rate, min_order_cents, product_id, category_id, member_tier_id, total_quantity, per_user_limit, valid_from, valid_until, valid_days, icon_url, description, status)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(item.name, item.type, item.voucherType, item.giftProductId, item.amountCents, item.discountRate, item.minOrderCents, item.productId, item.categoryId, item.memberTierId, item.totalQuantity, item.perUserLimit, item.validFrom, item.validUntil, item.validDays, item.iconUrl, item.description, item.status).lastInsertRowid;
   audit(req, '新增优惠券', item.name); res.status(201).json({ coupon: couponDefinitionView(db.prepare('SELECT * FROM coupon_definitions WHERE id = ?').get(id)) });
 });
 router.patch('/admin/coupons/:id', (req, res) => {
@@ -368,20 +426,23 @@ router.patch('/admin/coupons/:id', (req, res) => {
   if (!current) return res.status(404).json({ message: '优惠券不存在' });
   const item = couponInput(req.body || {}, current);
   if (!item) return res.status(400).json({ message: '优惠券参数无效' });
-  db.prepare(`UPDATE coupon_definitions SET name=?, type=?, amount_cents=?, discount_rate=?, min_order_cents=?, product_id=?, category_id=?, member_tier_id=?, total_quantity=?, per_user_limit=?, valid_from=?, valid_until=?, valid_days=?, icon_url=?, description=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(item.name, item.type, item.amountCents, item.discountRate, item.minOrderCents, item.productId, item.categoryId, item.memberTierId, item.totalQuantity, item.perUserLimit, item.validFrom, item.validUntil, item.validDays, item.iconUrl, item.description, item.status, current.id);
+  db.prepare(`UPDATE coupon_definitions SET name=?, type=?, voucher_type=?, gift_product_id=?, amount_cents=?, discount_rate=?, min_order_cents=?, product_id=?, category_id=?, member_tier_id=?, total_quantity=?, per_user_limit=?, valid_from=?, valid_until=?, valid_days=?, icon_url=?, description=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(item.name, item.type, item.voucherType, item.giftProductId, item.amountCents, item.discountRate, item.minOrderCents, item.productId, item.categoryId, item.memberTierId, item.totalQuantity, item.perUserLimit, item.validFrom, item.validUntil, item.validDays, item.iconUrl, item.description, item.status, current.id);
   audit(req, '修改优惠券', item.name); res.json({ coupon: couponDefinitionView(db.prepare('SELECT * FROM coupon_definitions WHERE id = ?').get(current.id)) });
 });
 router.post('/admin/coupons/:id/issue', (req, res) => {
   const coupon = db.prepare('SELECT * FROM coupon_definitions WHERE id = ? AND status = \'active\'').get(req.params.id);
   if (!coupon) return res.status(404).json({ message: '优惠券不存在或已下架' });
   const audience = req.body?.audience === 'all' ? 'all' : 'selected';
-  const ids = Array.isArray(req.body?.userIds) ? req.body.userIds.map(Number).filter(Number.isInteger) : [];
+  const ids = Array.isArray(req.body?.userIds) ? [...new Set(req.body.userIds.map(Number).filter(Number.isSafeInteger))] : [];
+  if (audience === 'selected' && !ids.length) return res.status(400).json({ message: '请先搜索并选择要发券的会员，或改为全部会员' });
   const users = audience === 'all' ? db.prepare('SELECT id FROM users ORDER BY id').all() : db.prepare(`SELECT id FROM users WHERE id IN (${ids.length ? ids.map(() => '?').join(',') : 'NULL'})`).all(...ids);
+  if (audience === 'selected' && users.length !== ids.length) return res.status(400).json({ message: '指定的会员不存在，请重新搜索并选择会员' });
   const issued = [];
   let campaignId;
   try {
     db.transaction(() => {
       const eligible = users.filter(user => db.prepare("SELECT COUNT(*) AS value FROM user_coupons WHERE user_id = ? AND coupon_definition_id = ? AND status != 'cancelled'").get(user.id, coupon.id).value < coupon.per_user_limit);
+      if (audience === 'selected' && !eligible.length) throw new Error('所选会员已达到这张优惠券的领取上限，未重复发放');
       if (coupon.total_quantity > 0 && coupon.issued_quantity + eligible.length > coupon.total_quantity) throw new Error('优惠券剩余发放数量不足');
       const template = db.prepare("SELECT id FROM message_templates WHERE template_key = 'coupon_issued' AND enabled = 1").get();
       campaignId = db.prepare('INSERT INTO message_campaigns (name, message_template_id, audience_type, audience_filter, status, created_by) VALUES (?, ?, ?, ?, ?, ?)').run(`发放优惠券：${coupon.name}`, template?.id || null, audience, JSON.stringify({ userIds: ids }), 'sent', req.staff.id).lastInsertRowid;
@@ -625,10 +686,21 @@ function unitPrice(product, pricing) {
 }
 
 function couponDefinitionView(row) {
+  const giftProduct = row.gift_product_id
+    ? (row.gift_product_name !== undefined
+      ? { name: row.gift_product_name, image_url: row.gift_product_image, price_cents: row.gift_product_price_cents }
+      : db.prepare('SELECT name, image_url, price_cents FROM products WHERE id = ?').get(row.gift_product_id))
+    : null;
   return {
     id: row.id,
     name: row.name,
     type: row.type,
+    voucherType: row.voucher_type || 'discount',
+    isProductVoucher: (row.voucher_type || 'discount') === 'product',
+    giftProductId: row.gift_product_id || null,
+    giftProductName: giftProduct?.name || null,
+    giftProductImage: giftProduct?.image_url || null,
+    giftProductPrice: giftProduct?.price_cents == null ? null : centsToMoney(giftProduct.price_cents),
     amount: centsToMoney(row.amount_cents),
     discountRate: row.discount_rate,
     minOrder: centsToMoney(row.min_order_cents),
@@ -653,13 +725,22 @@ function couponUsable(coupon, userId, items = [], options = {}) {
   if (coupon.valid_from && new Date(coupon.valid_from).getTime() > now) return { ok: false, message: '优惠券尚未生效' };
   if (coupon.expired_at && new Date(coupon.expired_at).getTime() <= now) return { ok: false, message: '优惠券已过期' };
   if (coupon.valid_until && new Date(coupon.valid_until).getTime() <= now) return { ok: false, message: '优惠券已过期' };
-  const base = items.reduce((sum, item) => sum + Number(item.price_cents || 0) * Number(item.quantity || 0), 0);
-  if (base < coupon.min_order_cents) return { ok: false, message: `订单满 ${centsToMoney(coupon.min_order_cents)} 元可用` };
   const definition = coupon;
   if (definition.member_tier_id) {
     const user = db.prepare('SELECT member_tier_id FROM users WHERE id = ?').get(userId);
     if (Number(user?.member_tier_id) !== Number(definition.member_tier_id)) return { ok: false, message: '当前会员等级不满足优惠券使用条件' };
   }
+  const base = items.reduce((sum, item) => sum + Number(item.price_cents || 0) * Number(item.quantity || 0), 0);
+  if ((coupon.voucher_type || 'discount') === 'product') {
+    // A product voucher must be bound to the cart row created by the
+    // voucher-use endpoint. Matching by product alone would allow a payer to
+    // apply someone else's voucher to an ordinary item of the same product.
+    const giftItems = items.filter(item => Number(item.applied_coupon_id) === Number(coupon.id)
+      && Number(item.product_id) === Number(coupon.gift_product_id));
+    if (!giftItems.length || giftItems.reduce((sum, item) => sum + Number(item.quantity || 0), 0) < 1) return { ok: false, message: '请先将兑换商品加入购物车' };
+    return { ok: true, discount: Math.max(...giftItems.map(item => Number(item.price_cents || 0))), eligibleAmount: Math.max(...giftItems.map(item => Number(item.price_cents || 0))), definition };
+  }
+  if (base < coupon.min_order_cents) return { ok: false, message: `订单满 ${centsToMoney(coupon.min_order_cents)} 元可用` };
   const eligibleItems = items.filter(item => (!definition.product_id || Number(item.product_id) === Number(definition.product_id)) && (!definition.category_id || Number(item.category_id) === Number(definition.category_id)));
   if (!eligibleItems.length) return { ok: false, message: '当前商品不满足优惠券使用范围' };
   const eligibleAmount = eligibleItems.reduce((sum, item) => sum + Number(item.price_cents || 0) * Number(item.quantity || 0), 0);
@@ -672,9 +753,11 @@ function couponUsable(coupon, userId, items = [], options = {}) {
 
 function getCouponForOrder(userId, userCouponId, items, options = {}) {
   if (!userCouponId) return null;
-  const coupon = db.prepare(`SELECT uc.*, cd.name, cd.type, cd.amount_cents, cd.discount_rate, cd.min_order_cents,
-    cd.product_id, cd.category_id, cd.member_tier_id, cd.valid_from, cd.valid_until, cd.icon_url, cd.description, cd.status AS definition_status
+  const coupon = db.prepare(`SELECT uc.*, cd.name, cd.type, cd.voucher_type, cd.gift_product_id, cd.amount_cents, cd.discount_rate, cd.min_order_cents,
+    cd.product_id, cd.category_id, cd.member_tier_id, cd.valid_from, cd.valid_until, cd.icon_url, cd.description, cd.status AS definition_status,
+    gift.name AS gift_product_name, gift.image_url AS gift_product_image, gift.price_cents AS gift_product_price_cents
     FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id
+    LEFT JOIN products gift ON gift.id = cd.gift_product_id
     WHERE uc.id = ?`).get(userCouponId);
   const result = couponUsable(coupon, userId, items, options);
   if (!result.ok) throw new Error(result.message);
@@ -702,11 +785,12 @@ function orderTotals(items, userId, selectedCouponId) {
   const pricing = memberPricing(userId);
   const original = items.reduce((sum, item) => sum + item.price_cents * item.quantity, 0);
   const coupon = selectedCouponId ? getCouponForOrder(userId, selectedCouponId, items) : null;
-  const member = items.reduce((sum, item) => sum + unitPrice(item, pricing) * item.quantity, 0);
+  const productVoucher = coupon && (coupon.voucher_type || 'discount') === 'product';
+  const member = productVoucher ? original : items.reduce((sum, item) => sum + unitPrice(item, pricing) * item.quantity, 0);
   const payableBeforeCoupon = coupon ? original : member;
   const couponDiscount = coupon?.discount || 0;
   const payable = Math.max(0, payableBeforeCoupon - couponDiscount);
-  return { pricing, original, member, payable, couponDiscount, coupon, usingCoupon: Boolean(coupon) };
+  return { pricing, original, member, payable, couponDiscount, coupon, usingCoupon: Boolean(coupon), productVoucher, giftProductId: productVoucher ? coupon.gift_product_id : null };
 }
 
 router.get('/products', (req, res) => {
@@ -736,7 +820,7 @@ router.get('/tables/:tableNo/session', requireWechatUser, (req, res) => {
 });
 
 router.get('/sessions/:sessionId/cart', (req, res) => {
-  const rows = db.prepare("SELECT ci.id, ci.product_id, ci.quantity, ci.added_by_user_id, p.name, p.detail, p.price_cents, p.member_price_cents, p.image_url, p.color, p.stock, p.reserved_stock FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending' ORDER BY ci.id").all(req.params.sessionId);
+  const rows = db.prepare("SELECT ci.id, ci.product_id, ci.quantity, ci.added_by_user_id, ci.applied_coupon_id, p.name, p.detail, p.price_cents, p.member_price_cents, p.image_url, p.color, p.stock, p.reserved_stock FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending' ORDER BY ci.id").all(req.params.sessionId);
   const pricing = memberPricing(currentUserId(req));
   const totals = rows.reduce((sum, row) => { sum.original += row.price_cents * row.quantity; sum.member += unitPrice(row, pricing) * row.quantity; return sum; }, { original: 0, member: 0 });
   res.json({ membership: pricing, items: rows.map(row => ({ ...row, stock: Math.max(row.stock - row.reserved_stock, 0), physicalStock: row.stock, reservedStock: row.reserved_stock, availableStock: Math.max(row.stock - row.reserved_stock, 0), price: centsToMoney(row.price_cents), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) })), totals: { original: centsToMoney(totals.original), member: centsToMoney(totals.member), discount: centsToMoney(totals.original - totals.member), points: Math.floor(totals.member / 100 * pricing.pointsRate) } });
@@ -756,11 +840,46 @@ router.post('/sessions/:sessionId/cart/items', (req, res) => {
       const available = Math.max(product.stock - product.reserved_stock, 0);
       if (inCart + requested > available) throw new Error(`库存不足，当前最多还可下单 ${Math.max(available - inCart, 0)} 件`);
       db.prepare('INSERT OR IGNORE INTO session_members (session_id, user_id) VALUES (?, ?)').run(session.id, userId);
-      const existing = db.prepare("SELECT id FROM cart_items WHERE session_id = ? AND product_id = ? AND added_by_user_id = ? AND status = 'pending'").get(session.id, product.id, userId);
+      // Never merge a normal purchase into a product-voucher row. The
+      // voucher row is a fixed one-unit gift and must remain traceable to the
+      // specific user coupon through checkout.
+      const existing = db.prepare("SELECT id FROM cart_items WHERE session_id = ? AND product_id = ? AND added_by_user_id = ? AND status = 'pending' AND applied_coupon_id IS NULL").get(session.id, product.id, userId);
       if (existing) db.prepare('UPDATE cart_items SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(requested, existing.id);
       else db.prepare('INSERT INTO cart_items (session_id, product_id, quantity, added_by_user_id) VALUES (?, ?, ?, ?)').run(session.id, product.id, requested, userId);
     })();
     res.status(201).json({ ok: true });
+  } catch (error) { res.status(409).json({ message: error.message }); }
+});
+
+// Product vouchers only prepare the cart. The coupon is locked at checkout so
+// abandoning or expiring an order never burns the customer's voucher.
+router.post('/sessions/:sessionId/coupons/:userCouponId/use', (req, res) => {
+  const userId = currentUserId(req);
+  try {
+    const result = db.transaction(() => {
+      const session = db.prepare("SELECT * FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
+      if (!session) throw new Error('桌台会话不存在或已结束');
+      const coupon = db.prepare(`SELECT uc.*, cd.name, cd.voucher_type, cd.gift_product_id, cd.status AS definition_status,
+        cd.valid_from, cd.valid_until, p.name AS gift_product_name
+        FROM user_coupons uc JOIN coupon_definitions cd ON cd.id = uc.coupon_definition_id
+        LEFT JOIN products p ON p.id = cd.gift_product_id
+        WHERE uc.id = ? AND uc.user_id = ?`).get(req.params.userCouponId, userId);
+      if (!coupon || coupon.status !== 'available' || coupon.definition_status !== 'active') throw new Error('优惠券不可用');
+      if (coupon.voucher_type !== 'product' || !coupon.gift_product_id) throw new Error('这张券需要在结算时使用');
+      const now = Date.now();
+      if ((coupon.valid_from && new Date(coupon.valid_from).getTime() > now) || (coupon.valid_until && new Date(coupon.valid_until).getTime() <= now) || (coupon.expired_at && new Date(coupon.expired_at).getTime() <= now)) throw new Error('优惠券已过期或尚未生效');
+      const product = db.prepare("SELECT * FROM products WHERE id = ? AND status = 'active' AND stock - reserved_stock > 0").get(coupon.gift_product_id);
+      if (!product) throw new Error('兑换商品已下架或库存不足');
+      const applied = db.prepare("SELECT id, quantity FROM cart_items WHERE session_id = ? AND applied_coupon_id = ? AND status = 'pending' LIMIT 1").get(session.id, coupon.id);
+      if (applied) return { productId: product.id, productName: product.name, added: false, alreadyApplied: true, quantity: applied.quantity };
+      const inCart = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS quantity FROM cart_items WHERE session_id = ? AND product_id = ? AND status = 'pending'").get(session.id, product.id).quantity;
+      const available = Math.max(Number(product.stock) - Number(product.reserved_stock), 0);
+      if (inCart + 1 > available) throw new Error(`库存不足，当前最多还可下单 ${Math.max(available - inCart, 0)} 件`);
+      db.prepare('INSERT OR IGNORE INTO session_members (session_id, user_id) VALUES (?, ?)').run(session.id, userId);
+      db.prepare('INSERT INTO cart_items (session_id, product_id, quantity, added_by_user_id, applied_coupon_id) VALUES (?, ?, 1, ?, ?)').run(session.id, product.id, userId, coupon.id);
+      return { productId: product.id, productName: product.name, added: true, quantity: inCart + 1 };
+    })();
+    res.json({ ok: true, ...result });
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
 
@@ -772,6 +891,7 @@ router.patch('/sessions/:sessionId/cart/items/:itemId', (req, res) => {
       const item = db.prepare("SELECT ci.*, p.stock, p.reserved_stock, p.status AS product_status FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.id = ? AND ci.session_id = ? AND ci.status = 'pending'").get(req.params.itemId, req.params.sessionId);
       if (!item) throw new Error('购物车商品不存在或已下架');
       if (quantity > 0) {
+        if (item.applied_coupon_id && quantity > 1) throw new Error('商品兑换券赠送数量固定为 1 件');
         const other = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS quantity FROM cart_items WHERE session_id = ? AND product_id = ? AND status = 'pending' AND id != ?").get(req.params.sessionId, item.product_id, item.id).quantity;
         const available = Math.max(item.stock - item.reserved_stock, 0);
         if (item.product_status !== 'active' || available <= 0 || other + quantity > available) throw new Error(`库存不足，当前最多可下单 ${Math.max(available - other, 0)} 件`);
@@ -784,16 +904,19 @@ router.patch('/sessions/:sessionId/cart/items/:itemId', (req, res) => {
 
 function settleOrder(order, method, req, reserved = true) {
   const items = db.prepare('SELECT product_id, quantity, cart_item_id FROM order_items WHERE order_id = ?').all(order.id);
-  for (const item of items) {
+  const quantities = new Map();
+  for (const item of items) quantities.set(Number(item.product_id), (quantities.get(Number(item.product_id)) || 0) + Number(item.quantity));
+  for (const [productId, quantity] of quantities) {
     const statement = reserved
       ? 'UPDATE products SET stock = stock - ?, reserved_stock = reserved_stock - ? WHERE id = ? AND stock >= ? AND reserved_stock >= ?'
       : 'UPDATE products SET stock = stock - ? WHERE id = ? AND stock - reserved_stock >= ?';
     const params = reserved
-      ? [item.quantity, item.quantity, item.product_id, item.quantity, item.quantity]
-      : [item.quantity, item.product_id, item.quantity];
+      ? [quantity, quantity, productId, quantity, quantity]
+      : [quantity, productId, quantity];
     if (!db.prepare(statement).run(...params).changes) throw new Error('库存不足，无法完成支付');
-    if (item.cart_item_id) db.prepare("UPDATE cart_items SET status = 'settled' WHERE id = ?").run(item.cart_item_id);
   }
+  const settleCartItem = db.prepare("UPDATE cart_items SET status = 'settled' WHERE id = ?");
+  items.forEach(item => { if (item.cart_item_id) settleCartItem.run(item.cart_item_id); });
   db.prepare("UPDATE orders SET status = 'awaiting_delivery', payment_status = 'paid', payment_method = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ?").run(method, order.id);
   consumeCoupon(order);
   const points = Math.floor(order.payable_amount_cents / 100 * memberPricing(order.payer_user_id).pointsRate);
@@ -833,8 +956,10 @@ function releasePendingOrder(orderId, reason) {
     const order = db.prepare("SELECT * FROM orders WHERE id = ? AND payment_status = 'pending'").get(orderId);
     if (!order) return null;
     const items = db.prepare('SELECT cart_item_id, product_id, quantity FROM order_items WHERE order_id = ?').all(order.id);
+    const quantities = new Map();
+    for (const item of items) quantities.set(Number(item.product_id), (quantities.get(Number(item.product_id)) || 0) + Number(item.quantity));
     const releaseReserved = db.prepare('UPDATE products SET reserved_stock = MAX(reserved_stock - ?, 0) WHERE id = ?');
-    items.forEach(item => releaseReserved.run(item.quantity, item.product_id));
+    quantities.forEach((quantity, productId) => releaseReserved.run(quantity, productId));
     if (order.payment_method === 'mixed') {
       db.prepare('UPDATE wallet_accounts SET stored_reserved_cents = MAX(stored_reserved_cents - ?, 0), bonus_reserved_cents = MAX(bonus_reserved_cents - ?, 0), updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(order.stored_paid_cents, order.bonus_paid_cents, order.payer_user_id);
     }
@@ -1078,7 +1203,7 @@ router.get('/sessions/:sessionId/checkout', (req, res) => {
   const session = db.prepare("SELECT id FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
   if (!session) return res.status(404).json({ message: '桌台会话不存在' });
   const userId = currentUserId(req);
-  const rows = db.prepare("SELECT ci.quantity, p.id AS product_id, p.category_id, p.price_cents, p.member_price_cents, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(session.id);
+  const rows = db.prepare("SELECT ci.id, ci.quantity, ci.applied_coupon_id, p.id AS product_id, p.category_id, p.price_cents, p.member_price_cents, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(session.id);
   let totals;
   try { totals = orderTotals(rows, userId, req.query.userCouponId ? Number(req.query.userCouponId) : null); }
   catch (error) { return res.status(409).json({ message: error.message }); }
@@ -1090,7 +1215,7 @@ router.get('/sessions/:sessionId/checkout', (req, res) => {
   const storedUsable = Math.min(Math.max(wallet.stored_cents - wallet.stored_reserved_cents, 0), payable - bonusUsable);
   const balanceDeduction = bonusUsable + storedUsable;
   const wechatDue = payable - balanceDeduction;
-  res.json({ original: centsToMoney(totals.original), member: centsToMoney(totals.member), payable: centsToMoney(payable), discount: centsToMoney(totals.original - payable), memberDiscount: totals.usingCoupon ? 0 : centsToMoney(totals.original - totals.member), couponDiscount: centsToMoney(totals.couponDiscount), coupon: totals.coupon ? { id: totals.coupon.id, name: totals.coupon.name, discount: centsToMoney(totals.couponDiscount) } : null, usingCoupon: totals.usingCoupon, stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0, couponCannotUseBonus: totals.usingCoupon });
+  res.json({ original: centsToMoney(totals.original), member: centsToMoney(totals.member), payable: centsToMoney(payable), discount: centsToMoney(totals.original - payable), memberDiscount: totals.usingCoupon ? 0 : centsToMoney(totals.original - totals.member), couponDiscount: centsToMoney(totals.couponDiscount), coupon: totals.coupon ? { id: totals.coupon.id, name: totals.coupon.name, discount: centsToMoney(totals.couponDiscount), voucherType: totals.coupon.voucher_type || 'discount', giftProductId: totals.coupon.gift_product_id || null, giftProductName: totals.coupon.gift_product_name || null } : null, usingCoupon: totals.usingCoupon, productVoucher: totals.productVoucher, giftProductId: totals.giftProductId, stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0, couponCannotUseBonus: totals.usingCoupon });
 });
 
 router.post('/sessions/:sessionId/orders', async (req, res) => {
@@ -1105,7 +1230,13 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
   if (!session || !items.length) return res.status(400).json({ message: '桌台没有待支付商品' });
   const existing = db.prepare("SELECT o.* FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.session_id = ? AND o.payment_status = 'pending' AND oi.cart_item_id IN (SELECT id FROM cart_items WHERE session_id = ? AND status = 'pending') ORDER BY o.id DESC LIMIT 1").get(session.id, session.id);
   if (existing) return res.status(409).json({ message: `订单 ${existing.order_no} 正在等待支付，请勿重复提交` });
-  if (items.some(item => item.quantity > Math.max(item.stock - item.reserved_stock, 0))) return res.status(409).json({ message: '部分商品库存不足，请减少数量后重试' });
+  const requestedQuantities = new Map();
+  items.forEach(item => requestedQuantities.set(
+    Number(item.product_id),
+    (requestedQuantities.get(Number(item.product_id)) || 0) + Number(item.quantity)
+  ));
+  const insufficientItem = items.find(item => (requestedQuantities.get(Number(item.product_id)) || 0) > Math.max(item.stock - item.reserved_stock, 0));
+  if (insufficientItem) return res.status(409).json({ message: `商品“${insufficientItem.name}”库存不足，请减少数量后重试` });
   let totals;
   try { totals = orderTotals(items, userId, selectedCouponId); }
   catch (error) { return res.status(409).json({ message: error.message }); }
@@ -1126,12 +1257,29 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
     const paymentExpireAt = method === 'balance' || totals.payable === 0 ? null : new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString();
     const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, coupon_id, coupon_discount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents, payment_expire_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.payable, totals.payable, totals.coupon?.id || null, totals.couponDiscount, method, stored, bonus, wechat, paymentExpireAt, note);
     const insertItem = db.prepare('INSERT INTO order_items (order_id, cart_item_id, product_id, product_name, quantity, original_price_cents, paid_price_cents, cost_price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-    items.forEach(item => insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, item.quantity, item.price_cents, totals.usingCoupon ? item.price_cents : unitPrice(item, pricing), item.cost_cents));
+    const voucherGiftRowId = totals.productVoucher
+      ? items.find(item => Number(item.applied_coupon_id) === Number(totals.coupon?.id)
+        && Number(item.product_id) === Number(totals.giftProductId))?.id
+      : null;
+    let remainingGiftQuantity = totals.productVoucher ? 1 : 0;
+    items.forEach(item => {
+      // A product voucher is for one item per order. A product can be split
+      // into several cart rows when multiple guests add it, so consume the
+      // one free unit across rows instead of granting one free unit per row.
+      const giftQuantity = totals.productVoucher && item.id === voucherGiftRowId && Number(item.product_id) === Number(totals.giftProductId)
+        ? Math.min(remainingGiftQuantity, item.quantity)
+        : 0;
+      remainingGiftQuantity -= giftQuantity;
+      const paidQuantity = item.quantity - giftQuantity;
+      if (giftQuantity) insertItem.run(result.lastInsertRowid, item.id, item.product_id, `${item.name}（兑换券赠送）`, giftQuantity, item.price_cents, 0, item.cost_cents);
+      if (paidQuantity) insertItem.run(result.lastInsertRowid, item.id, item.product_id, item.name, paidQuantity, item.price_cents, totals.usingCoupon ? item.price_cents : unitPrice(item, pricing), item.cost_cents);
+    });
     lockCoupon(result.lastInsertRowid, totals.coupon?.id, userId);
     db.prepare(`UPDATE cart_items SET status = 'checking_out' WHERE session_id = ? AND status = 'pending'`).run(session.id);
     const reserve = db.prepare("UPDATE products SET reserved_stock = reserved_stock + ? WHERE id = ? AND status = 'active' AND stock - reserved_stock >= ?");
-    for (const item of items) {
-      if (!reserve.run(item.quantity, item.product_id, item.quantity).changes) throw new Error(`商品“${item.name}”库存不足，请刷新后重试`);
+    for (const [productId, quantity] of requestedQuantities) {
+      const item = items.find(row => Number(row.product_id) === productId);
+      if (!reserve.run(quantity, productId, quantity).changes) throw new Error(`商品“${item?.name || '商品'}”库存不足，请刷新后重试`);
     }
     if (method === 'balance' || totals.payable === 0) {
       if (stored || bonus) {

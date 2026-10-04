@@ -399,7 +399,7 @@ function adminContent(section, data) {
   if (section === 'group-buy') return `<div class="toolbar"><button class="primary-small" data-action="verify-group">录入核销</button><span>当前保存内部核销记录；抖音/美团查券接口需配置商户授权</span></div>${adminTable(['平台','券码','套餐','金额','核销时间','操作员'], data.records.map(r => `<tr><td>${r.platform}</td><td>${r.voucher_no}</td><td>${r.package_name}</td><td>${adminMoney(r.amount_cents / 100)}</td><td>${r.verified_at}</td><td>${r.verified_by || '-'}</td></tr>`).join(''))}${adminPagination('groupBuy', data.pagination)}`;
   if (section === 'wallet') return `<section class="kpi-grid">${[['未使用储值金额',data.outstanding.stored],['未使用赠金',data.outstanding.bonus]].map(([label,value]) => `<article class="kpi-card"><span>${label}</span><strong>${adminMoney(value)}</strong></article>`).join('')}</section><div class="toolbar"><button class="primary-small" data-action="new-wallet">新增储值套餐</button><span>储值与赠金分账；赠金不计入订单收入</span></div>${adminTable(['套餐','支付金额','储值金额','赠金','状态'], data.packages.map(p => `<tr><td>${p.name}</td><td>${adminMoney(p.pay)}</td><td>${adminMoney(p.stored)}</td><td class="green-text">${adminMoney(p.bonus)}</td><td>${p.status}</td></tr>`).join(''))}${adminPagination('wallet', data.pagination)}`;
   if (section === 'rewards') return `<div class="toolbar"><button class="primary-small" data-action="new-reward">新增奖品</button></div>${adminTable(['奖品','来源','所需积分','可兑数量','状态','操作'], data.rewards.map(r => `<tr><td><div class="product-cell">${r.imageUrl ? `<img src="${escapeHtml(r.imageUrl)}" alt="">` : ''}<strong>${escapeHtml(r.name)}</strong></div></td><td>${r.product_id ? '现有商品' : '自定义奖品'}</td><td>${r.points}</td><td>${r.stock}</td><td>${r.status === 'active' ? '上架' : '下架'}</td><td><button class="table-action" data-edit-reward="${r.id}">编辑</button></td></tr>`).join(''))}${adminPagination('rewards', data.pagination)}<section class="storage-history"><h2>兑换记录</h2>${adminTable(['时间','手机号','会员','奖品','积分','状态','操作'], data.redemptions.map(r => `<tr><td>${escapeHtml(r.created_at)}</td><td>${escapeHtml(r.phone || '未绑定')}</td><td>${escapeHtml(r.nickname)}</td><td>${escapeHtml(r.reward_name)}</td><td>${r.points}</td><td>${r.status === 'fulfilled' ? '已领取' : '待领取'}</td><td>${r.status === 'pending' ? `<button class="table-action" data-fulfill="${r.id}">确认发放</button>` : '-'}</td></tr>`).join(''))}${adminPagination('redemptions', data.redemptionsPagination)}</section>`;
-  if (section === 'coupons') return `<div class="toolbar"><button class="primary-small" data-action="new-coupon">新增优惠券</button><span>按商品原价计算，不叠加会员价，不可使用赠金；可使用储值本金。</span></div>${adminTable(['优惠券','优惠','门槛','发放数','每人限领','有效期','状态','操作'], data.coupons.map(c => `<tr><td><strong>${escapeHtml(c.name)}</strong><small>${escapeHtml(c.description || '')}</small></td><td>${c.type === 'fixed' ? adminMoney(c.amount) : `${(Number(c.discountRate) * 10).toFixed(1)} 折`}</td><td>${adminMoney(c.minOrder)}</td><td>${c.issuedQuantity} / ${c.totalQuantity || '不限'}</td><td>${c.perUserLimit}</td><td>${c.validDays ? `领取后 ${c.validDays} 天` : escapeHtml(c.validUntil || '长期有效')}</td><td>${c.status === 'active' ? '启用' : '停用'}</td><td><button class="table-action" data-edit-coupon="${c.id}">编辑</button> <button class="table-action" data-issue-coupon="${c.id}" ${c.status !== 'active' ? 'disabled' : ''}>发放</button> <button class="table-action" data-coupon-status="${c.id}" data-status="${c.status === 'active' ? 'inactive' : 'active'}">${c.status === 'active' ? '停用' : '启用'}</button></td></tr>`).join(''))}${adminPagination('coupons', data.pagination)}<section class="panel"><h2>最近发放记录</h2>${adminTable(['会员','手机号','优惠券','状态','发放时间','有效期'], (data.issued || []).map(r => `<tr><td>${escapeHtml(r.nickname)}</td><td>${escapeHtml(r.phone || '未绑定')}</td><td>${escapeHtml(r.coupon_name)}</td><td>${escapeHtml(({ available:'可使用', locked:'订单占用', used:'已使用', expired:'已过期', cancelled:'已作废' })[r.status] || r.status)}</td><td>${escapeHtml(r.issued_at)}</td><td>${escapeHtml(r.expired_at || '长期')}</td></tr>`).join(''))}</section>`;
+  if (section === 'coupons') return `<div class="toolbar"><button class="primary-small" data-action="new-coupon">新增优惠券</button><span>优惠券按商品原价计算，不叠加会员价，也不可使用赠金；商品兑换券赠送商品会扣库存并按进货价计入成本。</span></div>${adminTable(['优惠券','类型 / 优惠','门槛','发放数','每人限领','有效期','状态','操作'], data.coupons.map(c => `<tr><td><strong>${escapeHtml(c.name)}</strong><small>${c.isProductVoucher ? `赠送：${escapeHtml(c.giftProductName || '指定商品')}` : escapeHtml(c.description || '')}</small></td><td>${c.isProductVoucher ? '<span class="green-text">商品兑换券 · 1 件</span>' : c.type === 'fixed' ? adminMoney(c.amount) : `${(Number(c.discountRate) * 10).toFixed(1)} 折`}</td><td>${c.isProductVoucher ? '-' : adminMoney(c.minOrder)}</td><td>${c.issuedQuantity} / ${c.totalQuantity || '不限'}</td><td>${c.perUserLimit}</td><td>${c.validDays ? `领取后 ${c.validDays} 天` : escapeHtml(c.validUntil || '长期有效')}</td><td>${c.status === 'active' ? '启用' : '停用'}</td><td><button class="table-action" data-edit-coupon="${c.id}">编辑</button> <button class="table-action" data-issue-coupon="${c.id}" ${c.status !== 'active' ? 'disabled' : ''}>发放</button> <button class="table-action" data-coupon-status="${c.id}" data-status="${c.status === 'active' ? 'inactive' : 'active'}">${c.status === 'active' ? '停用' : '启用'}</button></td></tr>`).join(''))}${adminPagination('coupons', data.pagination)}<section class="panel"><h2>最近发放记录</h2>${adminTable(['会员','手机号','优惠券','状态','发放时间','有效期'], (data.issued || []).map(r => `<tr><td>${escapeHtml(r.nickname)}</td><td>${escapeHtml(r.phone || '未绑定')}</td><td>${escapeHtml(r.coupon_name)}</td><td>${escapeHtml(({ available:'可使用', locked:'订单占用', used:'已使用', expired:'已过期', cancelled:'已作废' })[r.status] || r.status)}</td><td>${escapeHtml(r.issued_at)}</td><td>${escapeHtml(r.expired_at || '长期')}</td></tr>`).join(''))}</section>`;
   if (section === 'messages') return `<div class="toolbar"><button class="primary-small" data-action="send-message">发送消息</button><span>站内消息始终发送；微信订阅消息需要用户一次性授权。微信失败不影响站内消息。</span></div><section class="panel"><h2>消息模板</h2>${adminTable(['模板','标识','微信模板 ID','字段映射','状态','操作'], data.templates.map(t => `<tr><td><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(t.title_template)}</small></td><td><code>${escapeHtml(t.template_key)}</code></td><td>${escapeHtml(t.wechat_template_id || '未配置')}</td><td><code>${escapeHtml(t.field_mapping || '{}')}</code></td><td>${t.enabled ? '启用' : '停用'}</td><td><button class="table-action" data-edit-message-template="${t.id}">编辑</button></td></tr>`).join(''))}</section><section class="panel"><h2>发送记录</h2>${adminTable(['时间','名称','模板','范围','接收人数','状态'], data.campaigns.map(c => `<tr><td>${escapeHtml(c.created_at)}</td><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.template_name || '优惠券发放')}</td><td>${c.audience_type === 'all' ? '全部会员' : '指定会员'}</td><td>${c.recipient_count}</td><td>${escapeHtml(c.status)}</td></tr>`).join(''))}${adminPagination('messages', data.pagination)}</section>`;
   if (section === 'mini-page') return `<section class="panel mini-page-panel"><h2>小程序首页</h2><p>修改后顾客下次打开即生效。微信搜索展示的正式名称仍需在微信公众平台修改。</p><form id="mini-page-form"><div class="mini-page-fields">${data.entries.filter(entry => entry.type === 'text').map(entry => `<label class="admin-field"><span>${miniEntryLabels[entry.key]}</span><input name="title-${entry.key}" maxlength="30" value="${escapeHtml(entry.title)}" required></label>`).join('')}</div><h2>会员中心入口</h2><div class="mini-page-fields">${data.entries.filter(entry => entry.type !== 'text').map(entry => `<div class="mini-entry-field"><strong>${miniEntryLabels[entry.key]}</strong><label class="admin-field"><span>显示名称</span><input name="title-${entry.key}" maxlength="8" value="${escapeHtml(entry.title)}" required></label><label class="admin-field"><span>图标</span><select name="icon-${entry.key}">${data.icons.map(icon => `<option value="${icon}" ${icon === entry.icon ? 'selected' : ''}>${miniIconLabels[icon]}</option>`).join('')}</select></label></div>`).join('')}</div><button class="primary-small">保存页面设置</button><p class="dialog-error"></p></form></section>`;
   if (section === 'reports') {
@@ -641,19 +641,22 @@ async function openAdminDialog(type, item) {
     } else if (type === 'new-coupon' || type === 'edit-coupon') {
       const [productData, memberData] = await Promise.all([adminApi('/products?all=1'), adminApi('/members?page=1&pageSize=20')]);
       title = item ? `编辑优惠券 · ${item.name}` : '新增优惠券'; path = item ? `/coupons/${item.id}` : '/coupons'; method = item ? 'PATCH' : 'POST';
-      fields = `<p class="dialog-hint">按商品原价计算，不叠加会员价，不可用赠金；可使用储值本金。</p>`
+      const voucherType = item?.voucherType || 'discount';
+      fields = `<p class="dialog-hint">商品兑换券会赠送绑定商品 1 件，点击小程序“去使用”后自动加入购物车；商品仍会扣库存，赠送商品按进货价计入后台成本。</p>`
         + field('名称', 'name', `<input name="name" maxlength="50" value="${escapeHtml(item?.name)}" required>`)
-        + field('类型', 'type', `<select name="type"><option value="fixed" ${item?.type !== 'discount' ? 'selected' : ''}>固定金额</option><option value="discount" ${item?.type === 'discount' ? 'selected' : ''}>折扣</option></select>`)
-        + field('固定抵扣（元）', 'amount', number('amount', item?.amount ?? 10, 0.01, '.01'))
-        + field('折扣系数（0.9 = 九折）', 'discountRate', number('discountRate', item?.discountRate ?? 0.9, 0.01, '.01'))
-        + field('最低订单金额（元）', 'minOrder', number('minOrder', item?.minOrder ?? 0, 0, '.01'))
+        + field('券类型', 'voucherType', `<select name="voucherType" data-coupon-voucher-type><option value="discount" ${voucherType !== 'product' ? 'selected' : ''}>金额 / 折扣优惠券</option><option value="product" ${voucherType === 'product' ? 'selected' : ''}>商品兑换券</option></select>`)
+        + field('优惠方式', 'type', `<select name="type" data-coupon-discount-field><option value="fixed" ${item?.type !== 'discount' ? 'selected' : ''}>固定金额</option><option value="discount" ${item?.type === 'discount' ? 'selected' : ''}>折扣</option></select>`)
+        + field('固定抵扣（元）', 'amount', `<input data-coupon-discount-field name="amount" type="number" value="${escapeHtml(item?.amount ?? 10)}" min="0.01" step=".01" required>`)
+        + field('折扣系数（0.9 = 九折）', 'discountRate', `<input data-coupon-discount-field name="discountRate" type="number" value="${escapeHtml(item?.discountRate ?? 0.9)}" min="0.01" max="0.99" step=".01" required>`)
+        + field('最低订单金额（元）', 'minOrder', `<input data-coupon-discount-field name="minOrder" type="number" value="${escapeHtml(item?.minOrder ?? 0)}" min="0" step=".01" required>`)
+        + field('赠送商品', 'giftProductId', `<select name="giftProductId" data-coupon-gift-product><option value="">请选择商品</option>${productData.products.filter(p => p.status !== 'inactive').map(p => `<option value="${p.id}" ${Number(item?.giftProductId) === Number(p.id) ? 'selected' : ''}>${escapeHtml(p.name)} · 可售 ${adminAvailableStock(p)} 件</option>`).join('')}</select>`)
         + field('总发行量（0 为不限）', 'totalQuantity', number('totalQuantity', item?.totalQuantity ?? 0, 0))
         + field('每人限领', 'perUserLimit', number('perUserLimit', item?.perUserLimit ?? 1, 1))
         + field('领取后有效天数（0 为按截止时间）', 'validDays', number('validDays', item?.validDays ?? 0, 0))
         + field('开始时间', 'validFrom', `<input name="validFrom" type="datetime-local" value="${escapeHtml(item?.validFrom?.slice(0, 16) || '')}">`)
         + field('截止时间', 'validUntil', `<input name="validUntil" type="datetime-local" value="${escapeHtml(item?.validUntil?.slice(0, 16) || '')}">`)
-        + field('指定商品', 'productId', `<select name="productId"><option value="">全部商品</option>${productData.products.map(p => `<option value="${p.id}" ${item?.productId === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}</select>`)
-        + field('指定分类', 'categoryId', `<select name="categoryId"><option value="">全部分类</option>${productData.categories.map(c => `<option value="${c.id}" ${item?.categoryId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>`)
+        + field('指定商品', 'productId', `<select name="productId" data-coupon-discount-field><option value="">全部商品</option>${productData.products.map(p => `<option value="${p.id}" ${item?.productId === p.id ? 'selected' : ''}>${escapeHtml(p.name)}</option>`).join('')}</select>`)
+        + field('指定分类', 'categoryId', `<select name="categoryId" data-coupon-discount-field><option value="">全部分类</option>${productData.categories.map(c => `<option value="${c.id}" ${item?.categoryId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>`)
         + field('指定等级', 'memberTierId', `<select name="memberTierId"><option value="">所有会员</option>${memberData.tiers.map(t => `<option value="${t.id}" ${item?.memberTierId === t.id ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('')}</select>`)
         + field('券图标 URL', 'iconUrl', `<input name="iconUrl" value="${escapeHtml(item?.iconUrl || '')}" placeholder="可选 HTTPS 图片地址">`)
         + field('使用说明', 'description', `<textarea name="description" rows="3">${escapeHtml(item?.description || '')}</textarea>`)
@@ -665,11 +668,13 @@ async function openAdminDialog(type, item) {
       title = type === 'issue-coupon' ? '发放优惠券' : '发送消息';
       path = type === 'issue-coupon' ? `/coupons/${item?.couponId || couponData.coupons[0]?.id}/issue` : '/messages/send';
       fields = recipient + (type === 'issue-coupon'
-        ? field('优惠券', 'couponId', `<select name="couponId" required>${couponData.coupons.filter(c => c.status === 'active').map(c => `<option value="${c.id}" ${item?.couponId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>`)
+        ? field('优惠券', 'couponId', `<select name="couponId" required>${couponData.coupons.filter(c => c.status === 'active').map(c => `<option value="${c.id}" ${item?.couponId === c.id ? 'selected' : ''}>${escapeHtml(c.name)}${c.isProductVoucher ? ` · 商品券：${escapeHtml(c.giftProductName || '指定商品')}` : ''}</option>`).join('')}</select>`)
         : field('消息模板', 'templateId', `<select name="templateId" required>${messageData.templates.filter(t => t.enabled).map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')}</select>`) + field('发送名称', 'name', '<input name="name" maxlength="50" placeholder="例如 周末会员活动" required>') + field('模板变量 JSON', 'values', '<textarea name="values" rows="5" required>{"content":"今晚会员活动开始"}</textarea>'))
         + field('发送范围', 'audience', `<select name="audience"><option value="selected" ${item?.userId ? 'selected' : ''}>指定会员</option><option value="all">全部会员</option></select>`)
-        + field('指定会员 ID（多个用逗号分隔）', 'userIds', `<input name="userIds" value="${item?.userId || ''}" placeholder="例如 12,15">`)
-        + '<p class="dialog-hint">全员发送请明确选择“全部会员”。微信消息只发送给已授权该模板的会员。</p>';
+        + (type === 'issue-coupon'
+          ? `<div class="admin-field coupon-member-picker"><span>指定会员</span><div class="coupon-member-search"><input name="memberPhone" type="tel" inputmode="numeric" maxlength="11" placeholder="输入手机号搜索"><button type="button" class="outline-button" data-find-coupon-member>搜索</button></div><div id="coupon-member-results" class="coupon-member-results"><span class="dialog-hint">请输入手机号搜索后选择会员</span></div><input type="hidden" name="userIds" value="${item?.userId || ''}"></div>`
+          : field('指定会员 ID（多个用逗号分隔）', 'userIds', `<input name="userIds" value="${item?.userId || ''}" placeholder="例如 12,15">`))
+        + '<p class="dialog-hint">商品券会在会员点击“去使用”时自动加入绑定商品；全员发送请明确选择“全部会员”。微信消息只发送给已授权该模板的会员。</p>';
     } else if (type === 'edit-message-template') {
       title = `编辑消息模板 · ${item.name}`; path = `/messages/templates/${item.id}`; method = 'PATCH';
       fields = `<p class="dialog-hint">模板标识 ${escapeHtml(item.template_key)}。微信字段 key 必须与微信公众平台已审核模板一致；无映射只发送站内消息。</p>`
@@ -717,6 +722,56 @@ async function openAdminDialog(type, item) {
     input.oninput = async () => { const phone = input.value.trim(); match.textContent = '输入已绑定手机号，确认会员后登记'; if (!/^1[3-9]\d{9}$/.test(phone)) return; try { const result = await adminApi(`/members?phone=${phone}`); if (input.value.trim() === phone) match.textContent = result.members.find(m => m.phone === phone) ? `已找到：${result.members.find(m => m.phone === phone).nickname}` : '未找到该手机号，请先在会员管理中绑定'; } catch (error) { match.textContent = error.message; } };
     if (input.value) input.oninput();
   }
+  if (type === 'new-coupon' || type === 'edit-coupon') {
+    const selector = root.querySelector('[data-coupon-voucher-type]');
+    const giftProduct = root.querySelector('[name="giftProductId"]');
+    const discountFields = [...root.querySelectorAll('[data-coupon-discount-field]')];
+    const syncCouponFields = () => {
+      const productVoucher = selector.value === 'product';
+      discountFields.forEach(input => {
+        const wrapper = input.closest('.admin-field');
+        if (wrapper) wrapper.hidden = productVoucher;
+        input.disabled = productVoucher;
+      });
+      giftProduct.required = productVoucher;
+      const giftWrapper = giftProduct.closest('.admin-field');
+      if (giftWrapper) giftWrapper.hidden = !productVoucher;
+      if (productVoucher) discountFields.forEach(input => { if (input.tagName === 'SELECT') input.value = input.name === 'type' ? 'fixed' : ''; });
+    };
+    selector.addEventListener('change', syncCouponFields);
+    syncCouponFields();
+  }
+  if (type === 'issue-coupon') {
+    const audience = root.querySelector('[name="audience"]');
+    const phone = root.querySelector('[name="memberPhone"]');
+    const userIds = root.querySelector('[name="userIds"]');
+    const results = root.querySelector('#coupon-member-results');
+    const search = root.querySelector('[data-find-coupon-member]');
+    const syncAudience = () => {
+      const picker = root.querySelector('.coupon-member-picker');
+      if (picker) picker.hidden = audience.value === 'all';
+      if (audience.value === 'all') userIds.value = '';
+    };
+    const renderMembers = members => {
+      results.innerHTML = members.length
+        ? members.map(member => `<label class="coupon-member-option"><input type="checkbox" data-coupon-member-id="${member.id}" ${userIds.value.split(',').includes(String(member.id)) ? 'checked' : ''}><span><strong>${escapeHtml(member.nickname)}</strong><small>${escapeHtml(member.phone || '未绑定手机号')} · ${escapeHtml(member.memberLevel)}</small></span></label>`).join('')
+        : '<span class="dialog-hint">没有找到匹配会员，请确认手机号已绑定。</span>';
+      results.querySelectorAll('[data-coupon-member-id]').forEach(input => input.onchange = () => {
+        userIds.value = [...results.querySelectorAll('[data-coupon-member-id]:checked')].map(item => item.dataset.couponMemberId).join(',');
+      });
+    };
+    search.onclick = async () => {
+      const value = phone.value.trim();
+      if (!/^\d{1,11}$/.test(value)) { results.innerHTML = '<span class="dialog-hint">请输入手机号数字后搜索。</span>'; return; }
+      search.disabled = true;
+      try { const data = await adminApi(`/members?phone=${encodeURIComponent(value)}&page=1&pageSize=20`); renderMembers(data.members || []); }
+      catch (error) { results.innerHTML = `<span class="dialog-hint">${escapeHtml(error.message)}</span>`; }
+      finally { search.disabled = false; }
+    };
+    audience.onchange = syncAudience;
+    syncAudience();
+    if (item?.userId) { phone.value = ''; results.innerHTML = '<span class="dialog-hint">已预选当前会员，可直接确认发放。</span>'; }
+  }
   root.querySelector('form').onsubmit = async event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -729,6 +784,10 @@ async function openAdminDialog(type, item) {
         delete payload.confirmPassword;
       }
       if (type === 'new-account' || type === 'edit-account') { payload.permissions = [...form.querySelectorAll('[name="permissions"]:checked')].map(input => input.value); if (item && !payload.password) delete payload.password; }
+      if (type === 'new-coupon' || type === 'edit-coupon') {
+        if (payload.voucherType === 'product' && !payload.giftProductId) throw new Error('请选择商品兑换券绑定的赠送商品');
+        if (payload.voucherType !== 'product') delete payload.giftProductId;
+      }
       if (type === 'edit-member' && payload.memberTierId !== String(item.memberTierId ?? '') && payload.memberExpiresAt === (item.memberExpiresAt?.slice(0, 10) || '')) delete payload.memberExpiresAt;
       if (type === 'edit-member' && (Number(payload.points) !== item.points || Number(payload.stored) !== item.stored || Number(payload.bonus) !== item.bonus) && !payload.reason.trim()) throw new Error('调整积分或钱包余额时请填写原因');
       if (type === 'issue-coupon' || type === 'send-message') {
