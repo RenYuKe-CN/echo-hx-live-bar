@@ -9,7 +9,21 @@ Page({
     this.setData({ busy: true });
     api.request(`/me/messages?page=${page}`).then(data => this.setData({ messages: page === 1 ? data.messages : this.data.messages.concat(data.messages), page, hasNext: data.pagination.hasNext })).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ busy: false }));
   },
-  read(e) { const id = e.currentTarget.dataset.id; api.request(`/me/messages/${id}/read`, { method: 'PATCH' }).then(() => this.setData({ messages: this.data.messages.map(m => m.id === id ? { ...m, read_at: 'read' } : m) })); },
+  read(e) {
+    const id = Number(e.currentTarget.dataset.id);
+    if (!Number.isFinite(id)) return;
+    const message = this.data.messages.find(item => Number(item.id) === id);
+    api.request(`/me/messages/${id}/read`, { method: 'PATCH' }).then(() => {
+      this.setData({ messages: this.data.messages.map(item => Number(item.id) === id ? { ...item, read_at: item.read_at || 'read' } : item) });
+      const relatedRoutes = {
+        storage_deposit: '/pages/storage/storage',
+        storage_withdraw: '/pages/storage/storage',
+        storage_expiry: '/pages/storage/storage'
+      };
+      const url = relatedRoutes[message?.related_type];
+      if (url) wx.navigateTo({ url });
+    }).catch(error => wx.showToast({ title: error.message || '消息操作失败', icon: 'none' }));
+  },
   readAll() { api.request('/me/messages/read-all', { method: 'PATCH' }).then(() => this.setData({ messages: this.data.messages.map(m => ({ ...m, read_at: 'read' })) })).catch(error => wx.showToast({ title: error.message, icon: 'none' })); },
   remove(e) {
     const id = Number(e.currentTarget.dataset.id);

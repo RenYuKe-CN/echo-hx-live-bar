@@ -3,7 +3,7 @@ const subscription = require('../../utils/subscription');
 Page({
   data: { user: {}, wallet: {}, membership: {}, entries: [], notices: {}, couponCount: 0, expiry: '', avatar: '', initial: '会', subscriptionPromptVisible: false, subscriptionPromptBusy: false },
   onShow() {
-    Promise.all([api.request('/me'), api.request('/mini-page'), api.request('/me/notification-summary').catch(() => ({ couponCount: 0, pendingOrderCount: 0, unreadMessageCount: 0 })), api.request('/me/coupons').catch(() => null)]).then(([profile, page, notices, couponData]) => {
+    Promise.all([api.request('/me'), api.request('/mini-page'), api.request('/me/notification-summary').catch(() => ({ couponCount: 0, pendingOrderCount: 0, unreadMessageCount: 0, storageCount: 0 })), api.request('/me/coupons').catch(() => null)]).then(([profile, page, notices, couponData]) => {
       // Prefer the full list when it loaded successfully, but keep the
       // summary count during a transient list request failure so a coupon
       // badge does not disappear just because one request timed out.
@@ -38,7 +38,9 @@ Page({
             ? Number(availableCouponCount || 0)
             : item.key === 'messages'
               ? Number(safeNotices.unreadMessageCount || 0)
-              : 0
+              : item.key === 'storage'
+                ? Number(safeNotices.storageCount || 0)
+                : 0
       }));
       this.setData({ user: profile.user, wallet: profile.wallet, membership, notices: safeNotices, couponCount: availableCouponCount, entries, expiry: expiry && profile.user.memberLevel !== '普通会员' ? expiry.slice(0, 10) : '', avatar: profile.user.avatarUrl ? api.imageUrl(profile.user.avatarUrl) : '', initial: (profile.user.nickname || '会').charAt(0) });
       const pageEntries = Array.isArray(page.entries) ? page.entries : [];

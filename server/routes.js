@@ -316,7 +316,9 @@ router.get('/me/notification-summary', requireWechatUser, (req, res) => {
       AND ((payment_expire_at IS NOT NULL AND datetime(payment_expire_at) > datetime('now'))
         OR (payment_expire_at IS NULL AND datetime(created_at, '+10 minutes') > datetime('now')))`).get(userId).value;
   const unreadMessageCount = db.prepare('SELECT COUNT(*) AS value FROM user_messages WHERE user_id = ? AND read_at IS NULL AND hidden_at IS NULL').get(userId).value;
-  res.json({ couponCount, pendingOrderCount, unreadMessageCount });
+  const storageCount = db.prepare(`SELECT COUNT(*) AS value FROM storage_records
+    WHERE user_id = ? AND status = 'stored' AND quantity > 0`).get(userId).value;
+  res.json({ couponCount, pendingOrderCount, unreadMessageCount, storageCount });
 });
 router.get('/me/coupons', requireWechatUser, (req, res) => {
   const rows = db.prepare(`SELECT uc.*, cd.name, cd.type, cd.amount_cents, cd.discount_rate, cd.min_order_cents, cd.product_id, cd.category_id,
