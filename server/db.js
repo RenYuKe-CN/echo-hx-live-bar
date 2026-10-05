@@ -279,6 +279,19 @@ db.prepare(`UPDATE message_templates
   '{{productName}} 还有 {{quantity}} 件，距离到期还有 {{remainingDays}} 天（{{expireAt}}），请尽快来店使用。',
   '{{productName}} 将于 {{expireAt}} 到期。'
 );
+// Add order details to the original built-in copies while preserving any
+// template that an administrator has already customized.
+[
+  ['order_pending_payment', '订单 {{orderNo}} 还有 {{minutes}} 分钟未支付，商品：{{productList}}，超时将自动取消。', '订单 {{orderNo}} 还有 {{minutes}} 分钟自动取消。'],
+  ['order_paid', '订单 {{orderNo}} 已支付成功，商品：{{productList}}，店员将尽快为您送达。', '订单 {{orderNo}} 已支付成功，店员将尽快为您送达。'],
+  ['order_awaiting_delivery', '订单 {{orderNo}} 正在准备，商品：{{productList}}，请稍候。', '订单 {{orderNo}} 正在准备，请稍候。'],
+  ['order_cancelled', '订单 {{orderNo}} 已取消，商品：{{productList}}。', '订单 {{orderNo}} 已取消。'],
+  ['order_completed', '订单 {{orderNo}} 已送达，商品：{{productList}}，祝您用餐愉快。', '订单 {{orderNo}} 已送达，祝您用餐愉快。']
+].forEach(([key, nextContent, originalContent]) => {
+  db.prepare(`UPDATE message_templates
+    SET content_template = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE template_key = ? AND content_template = ?`).run(nextContent, key, originalContent);
+});
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS wechat_sessions (

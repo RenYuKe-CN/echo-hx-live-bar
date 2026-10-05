@@ -705,7 +705,7 @@ async function openAdminDialog(type, item) {
         + '<p class="dialog-hint">商品券会在会员点击“去使用”时自动加入绑定商品；全员发送请明确选择“全部会员”。微信消息只发送给已授权该模板的会员。</p>';
     } else if (type === 'edit-message-template') {
       title = `编辑消息模板 · ${item.name}`; path = `/messages/templates/${item.id}`; method = 'PATCH';
-      fields = `<p class="dialog-hint">模板标识 ${escapeHtml(item.template_key)}。微信字段 key 必须与微信公众平台已审核模板一致；无映射只发送站内消息。</p>`
+      fields = `<p class="dialog-hint">模板标识 ${escapeHtml(item.template_key)}。微信字段 key 必须与微信公众平台已审核模板一致；无映射只发送站内消息。</p><p class="dialog-hint">订单通知可用：<code>orderNo</code> 订单号、<code>tableNo</code> 桌号、<code>productList</code> 完整商品清单、<code>productSummary</code> 微信短商品摘要、<code>amount</code> 原价、<code>payableAmount</code> 实付金额、<code>discountAmount</code> 优惠金额。其他模板字段以模板变量 JSON 中显示的字段为准。</p>`
         + field('名称', 'name', `<input name="name" maxlength="50" value="${escapeHtml(item.name)}" required>`)
         + field('站内标题', 'titleTemplate', `<input name="titleTemplate" maxlength="100" value="${escapeHtml(item.title_template)}" required>`)
         + field('站内内容', 'contentTemplate', `<textarea name="contentTemplate" rows="4" maxlength="500" required>${escapeHtml(item.content_template)}</textarea>`)

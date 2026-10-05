@@ -267,6 +267,34 @@ function queueUserMessage(userId, type, values = {}, relatedType = null, related
   setImmediate(() => queueWechatCampaign(campaignId, template, [{ id: userId }], values).catch(error => console.error('微信订阅消息发送失败', error)));
   return messageId;
 }
+
+// Build one consistent set of values for every order notification. The full
+// list is used by site messages; the shorter summary fits WeChat fields.
+function orderMessageValues(order) {
+  const row = order || {};
+  const items = row.id
+    ? db.prepare('SELECT product_name, quantity FROM order_items WHERE order_id = ? ORDER BY id').all(row.id)
+    : [];
+  const productList = items.map(item => `${item.product_name} × ${item.quantity}`).join('、');
+  const summaryItems = items.slice(0, 2).map(item => `${item.product_name}×${item.quantity}`);
+  const productSummary = summaryItems.join('、') + (items.length > summaryItems.length ? ` 等${items.length}项` : '');
+  const table = row.session_id
+    ? db.prepare('SELECT t.table_no FROM table_sessions ts JOIN tables t ON t.id = ts.table_id WHERE ts.id = ?').get(row.session_id)
+    : null;
+  return {
+    orderNo: row.order_no || '',
+    tableNo: table?.table_no || '',
+    productList,
+    productSummary,
+    amount: centsToMoney(row.original_amount_cents || 0),
+    originalAmount: centsToMoney(row.original_amount_cents || 0),
+    payableAmount: centsToMoney(row.payable_amount_cents || 0),
+    discountAmount: centsToMoney(row.discount_amount_cents || 0),
+    storedPaid: centsToMoney(row.stored_paid_cents || 0),
+    bonusPaid: centsToMoney(row.bonus_paid_cents || 0),
+    wechatPaid: centsToMoney(row.wechat_paid_cents || 0)
+  };
+}
 function couponUserView(row) {
   const definition = couponDefinitionView(row);
   const now = Date.now();
@@ -928,9 +956,11 @@ function settleOrder(order, method, req, reserved = true) {
   const before = db.prepare('SELECT member_tier_id, member_level FROM users WHERE id = ?').get(order.payer_user_id);
   const after = syncMembership(order.payer_user_id);
   if (req.staff && before?.member_tier_id !== after?.member_tier_id) audit(req, '会员等级自动调整', `ID ${order.payer_user_id}: ${before?.member_level || '普通会员'} -> ${after?.member_level || '普通会员'}`);
-  const orderNo = order.order_no || db.prepare('SELECT order_no FROM orders WHERE id = ?').get(order.id)?.order_no;
-  queueUserMessage(order.payer_user_id, 'order_paid', { orderNo }, 'order', order.id, `订单已支付：${orderNo}`);
-  queueUserMessage(order.payer_user_id, 'order_awaiting_delivery', { orderNo }, 'order_delivery', order.id, `订单待送达：${orderNo}`);
+  const messageOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id) || order;
+  const messageValues = orderMessageValues(messageOrder);
+  const orderNo = messageValues.orderNo;
+  queueUserMessage(order.payer_user_id, 'order_paid', messageValues, 'order', order.id, `订单已支付：${orderNo}`);
+  queueUserMessage(order.payer_user_id, 'order_awaiting_delivery', messageValues, 'order_delivery', order.id, `订单待送达：${orderNo}`);
   if (before?.member_tier_id !== after?.member_tier_id && after?.member_tier_id) {
     queueUserMessage(order.payer_user_id, 'member_upgraded', { memberLevel: after.member_level }, 'member', after.member_tier_id, `会员升级：${after.member_level}`);
   }
@@ -1057,7 +1087,7 @@ router.post('/me/orders/:orderNo/pay', async (req, res) => {
       if (result.paid) {
         return res.json({ order: db.prepare('SELECT payment_status, status FROM orders WHERE id = ?').get(order.id), payment: null });
       }
-      if (result.cancelled) queueUserMessage(userId, 'order_cancelled', { orderNo: order.order_no }, 'order', order.id);
+      if (result.cancelled) queueUserMessage(userId, 'order_cancelled', orderMessageValues(result.cancelled), 'order', order.id);
       return res.status(409).json({ message: '订单已过期，请重新下单' });
     } catch (error) {
       return res.status(error.status || 503).json({ message: error.message, code: error.code || 'WECHAT_QUERY_ERROR' });
@@ -1087,7 +1117,7 @@ router.post('/me/orders/:orderNo/cancel', async (req, res) => {
   if (result.paid) return res.status(409).json({ message: '订单已经支付，不能取消' });
   const cancelled = result.cancelled;
   if (!cancelled) return res.status(409).json({ message: '订单状态已发生变化，请刷新订单列表' });
-  queueUserMessage(userId, 'order_cancelled', { orderNo: cancelled.order_no }, 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
+  queueUserMessage(userId, 'order_cancelled', orderMessageValues(cancelled), 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
   res.json({ ok: true, order: { orderNo: cancelled.order_no, paymentStatus: cancelled.payment_status, status: cancelled.status } });
 });
 
@@ -1095,14 +1125,14 @@ function releaseExpiredWechatOrders() {
   return Promise.all(db.prepare("SELECT * FROM orders WHERE payment_status = 'pending' AND ((payment_expire_at IS NOT NULL AND payment_expire_at < ?) OR (payment_expire_at IS NULL AND datetime(created_at, '+10 minutes') < datetime('now')))").all(new Date().toISOString()).map(async order => {
     try {
       const result = await closePendingWechatOrder(order, '微信支付超时关闭');
-      if (result.cancelled) queueUserMessage(result.cancelled.payer_user_id, 'order_cancelled', { orderNo: order.order_no }, 'order', order.id, `订单已取消：${order.order_no}`);
+      if (result.cancelled) queueUserMessage(result.cancelled.payer_user_id, 'order_cancelled', orderMessageValues(result.cancelled), 'order', order.id, `订单已取消：${order.order_no}`);
     } catch (error) {
       // 本地演示环境没有微信商户配置，不能让测试订单永久卡在待支付。
       // 生产环境仍保留查询失败不自动关闭的保护，避免网络抖动误取消真实订单。
       const { groups } = getIntegrationStatus();
       if (!groups.wechatPay?.configured && !order.wechat_prepay_id) {
         const cancelled = releasePendingOrder(order.id, '微信支付未配置，订单超时关闭');
-        if (cancelled) queueUserMessage(cancelled.payer_user_id, 'order_cancelled', { orderNo: cancelled.order_no }, 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
+        if (cancelled) queueUserMessage(cancelled.payer_user_id, 'order_cancelled', orderMessageValues(cancelled), 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
       } else {
         console.error(`[wechat] 查询超时订单 ${order.order_no} 失败: ${error.message}`);
       }
@@ -1309,12 +1339,12 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
       payment = { provider: 'wechat', status: 'pending', payment: result.payment, message: method === 'mixed' ? `余额抵扣 ${centsToMoney(order.stored_paid_cents + order.bonus_paid_cents)}，请完成微信支付` : '请完成微信支付' };
     } catch (error) {
       const cancelled = releasePendingOrder(order.id, error.message);
-      if (cancelled) queueUserMessage(userId, 'order_cancelled', { orderNo: cancelled.order_no }, 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
+      if (cancelled) queueUserMessage(userId, 'order_cancelled', orderMessageValues(cancelled), 'order', cancelled.id, `订单已取消：${cancelled.order_no}`);
       return res.status(error.code === 'INTEGRATION_NOT_CONFIGURED' ? 503 : 502).json({ message: error.message, code: error.code || 'WECHAT_PAYMENT_ERROR' });
     }
   }
   if (order.payment_status === 'pending') {
-    queueUserMessage(userId, 'order_pending_payment', { orderNo: order.order_no, minutes: Math.ceil(PAYMENT_EXPIRY_MS / 60000) }, 'order_pending', order.id, `订单待支付：${order.order_no}`);
+    queueUserMessage(userId, 'order_pending_payment', { ...orderMessageValues(order), minutes: Math.ceil(PAYMENT_EXPIRY_MS / 60000) }, 'order_pending', order.id, `订单待支付：${order.order_no}`);
   }
   res.status(201).json({ order: { ...order, originalAmount: centsToMoney(order.original_amount_cents), discountAmount: centsToMoney(order.discount_amount_cents), payableAmount: centsToMoney(order.payable_amount_cents), storedPaid: centsToMoney(order.stored_paid_cents), bonusPaid: centsToMoney(order.bonus_paid_cents), wechatPaid: centsToMoney(order.wechat_paid_cents) }, payment });
   } catch (error) { res.status(409).json({ message: error.message }); }
@@ -1458,8 +1488,8 @@ router.post('/admin/orders/:id/deliver', (req, res) => {
     return { code: 200 };
   })();
   if (result.code === 200 && !result.message) {
-    const order = db.prepare('SELECT payer_user_id, order_no FROM orders WHERE id = ?').get(req.params.id);
-    if (order) queueUserMessage(order.payer_user_id, 'order_completed', { orderNo: order.order_no }, 'order_completed', req.params.id, `订单已送达：${order.order_no}`);
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+    if (order) queueUserMessage(order.payer_user_id, 'order_completed', orderMessageValues(order), 'order_completed', req.params.id, `订单已送达：${order.order_no}`);
   }
   res.status(result.code).json(result.message ? { message: result.message } : { ok: true });
 });
