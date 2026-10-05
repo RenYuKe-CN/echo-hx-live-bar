@@ -50,7 +50,7 @@ const paginationView = (page, pageSize, total) => {
 const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','coupons','messages','reports','losses','backups'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); const supplied = crypto.scryptSync(password, salt, 64); return hash?.length === 128 && crypto.timingSafeEqual(supplied, Buffer.from(hash, 'hex')); };
-const normalizePermissions = permissions => [...new Set(permissions.map(permission => permission === 'inventory' ? 'products' : permission).filter(permission => modules.includes(permission)))];
+const normalizePermissions = permissions => [...new Set(permissions.map(permission => permission === 'inventory' ? 'products' : permission).filter(permission => modules.includes(permission) && permission !== 'reports'))];
 const publicAccount = row => ({ id: row.id, username: row.username, displayName: row.display_name, role: row.role, permissions: row.role === 'super' ? [...modules, 'accounts', 'settings', 'logs', 'mini-page'] : normalizePermissions(JSON.parse(row.permissions)), status: row.status });
 const audit = (req, action, detail = '') => db.prepare('INSERT INTO operation_logs (operator, action, detail) VALUES (?, ?, ?)').run(req.staff.username, action, String(detail));
 const syncProductAvailability = () => {
@@ -114,7 +114,7 @@ router.use('/admin', (req, res, next) => {
   if (['session','logout','change-password'].includes(segment)) return next();
   const allowed = row.role === 'super' || JSON.parse(row.permissions).includes(section);
   if (!allowed) return res.status(403).json({ message: '当前账号没有此模块权限' });
-  if (section === 'backups' && row.role !== 'super') return res.status(403).json({ message: '仅超级管理员可管理备份与恢复' });
+  if (['backups', 'reports'].includes(section) && row.role !== 'super') return res.status(403).json({ message: '仅超级管理员可访问此模块' });
   if (req.method !== 'GET' && row.role !== 'super') {
     const managerOnly = ['accounts','settings','logs'];
     if (managerOnly.includes(section)) return res.status(403).json({ message: '仅超级管理员可修改此模块' });
@@ -128,10 +128,10 @@ router.post('/admin/change-password', (req, res) => {
   db.prepare('UPDATE staff_accounts SET password_hash = ? WHERE id = ?').run(hashPassword(req.body.newPassword), req.staff.id);
   audit(req, '修改密码'); res.json({ ok: true });
 });
-router.get('/admin/accounts', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM staff_accounts').get().value; return res.json({ accounts: db.prepare('SELECT * FROM staff_accounts ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset).map(publicAccount), modules, pagination: paginationView(page, pageSize, total) }); });
+router.get('/admin/accounts', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM staff_accounts').get().value; return res.json({ accounts: db.prepare('SELECT * FROM staff_accounts ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset).map(publicAccount), modules: modules.filter(module => module !== 'reports'), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/accounts', (req, res) => {
   const { username, displayName, password, role, permissions = [] } = req.body || {};
-  if (!/^[a-zA-Z0-9_]{3,32}$/.test(username || '') || String(password || '').length < 10 || !['manager','staff'].includes(role) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p))) return res.status(400).json({ message: '账号、密码或权限无效（密码至少 10 位）' });
+  if (!/^[a-zA-Z0-9_]{3,32}$/.test(username || '') || String(password || '').length < 10 || !['manager','staff'].includes(role) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p) || p === 'reports')) return res.status(400).json({ message: '账号、密码或权限无效（数据报表仅超管可见，密码至少 10 位）' });
   try { const r = db.prepare('INSERT INTO staff_accounts (username, display_name, password_hash, role, permissions) VALUES (?, ?, ?, ?, ?)').run(username, String(displayName || username), hashPassword(password), role, JSON.stringify(permissions)); audit(req, '创建账号', username); res.status(201).json({ account: publicAccount(db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(r.lastInsertRowid)) }); }
   catch (error) { res.status(409).json({ message: '账号名已存在' }); }
 });
@@ -139,8 +139,8 @@ router.patch('/admin/accounts/:id', (req, res) => {
   const account = db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(req.params.id);
   if (!account || account.role === 'super') return res.status(400).json({ message: '不可修改超级管理员账号' });
   const { role = account.role, status = account.status, permissions = JSON.parse(account.permissions), password, displayName = account.display_name } = req.body || {};
-  if (!['manager','staff'].includes(role) || !['active','disabled'].includes(status) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p)) || (password && String(password).length < 10)) return res.status(400).json({ message: '账号配置无效' });
-  db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ? WHERE id = ?').run(role, status, JSON.stringify(permissions), displayName, password ? hashPassword(password) : account.password_hash, account.id);
+  if (!['manager','staff'].includes(role) || !['active','disabled'].includes(status) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p) || p === 'reports') || (password && String(password).length < 10)) return res.status(400).json({ message: '账号配置无效（数据报表仅超级管理员可见）' });
+  db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ? WHERE id = ?').run(role, status, JSON.stringify(permissions.filter(p => p !== 'reports')), displayName, password ? hashPassword(password) : account.password_hash, account.id);
   if (status === 'disabled' || password) db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(account.id);
   audit(req, '修改账号', account.username); res.json({ ok: true });
 });
@@ -1335,7 +1335,6 @@ function orderItems(orderIds) {
   return grouped;
 }
 router.get('/admin/summary', (req, res) => {
-  const revenue = db.prepare("SELECT COALESCE(SUM(payable_amount_cents - bonus_paid_cents), 0) AS value FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') = date('now','localtime')").get().value;
   const pendingPayment = db.prepare("SELECT COUNT(*) AS value FROM orders WHERE status = 'pending_payment'").get().value;
   const activeOrders = db.prepare("SELECT COUNT(*) AS value FROM orders WHERE status = 'awaiting_delivery' AND payment_status = 'paid'").get().value;
   const activeTables = db.prepare("SELECT COUNT(*) AS value FROM table_sessions WHERE status = 'open'").get().value;
@@ -1347,10 +1346,9 @@ router.get('/admin/summary', (req, res) => {
   const canViewOrders = req.staff.role === 'super' || JSON.parse(req.staff.permissions).includes('orders');
   const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, o.note, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
   const items = orderItems(pendingOrders.map(o => o.id));
-  const today = db.prepare("SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents),0) AS revenue, COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents - COALESCE((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id),0)),0) AS profit, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.offline_paid_cents ELSE 0 END),0) AS offline, COALESCE(SUM((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id)),0) AS order_cost FROM orders o WHERE o.payment_status = 'paid' AND date(o.paid_at, 'localtime') = date('now','localtime')").get();
+  const today = db.prepare("SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents),0) AS revenue, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.offline_paid_cents ELSE 0 END),0) AS offline FROM orders o WHERE o.payment_status = 'paid' AND date(o.paid_at, 'localtime') = date('now','localtime')").get();
   const todayRecharge = db.prepare("SELECT COALESCE(SUM(pay_cents),0) AS value FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') = date('now','localtime')").get().value;
-  const todayLoss = db.prepare("SELECT COALESCE(SUM(cost_cents),0) AS value FROM stock_losses WHERE date(created_at, 'localtime') = date('now','localtime')").get().value;
-  res.json({ todayRevenue: centsToMoney(revenue), activeOrders, pendingPayment, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: centsToMoney(today.revenue), profit: centsToMoney(today.revenue - today.order_cost - todayLoss), recharge: centsToMoney(todayRecharge), offline: centsToMoney(today.offline), orderCost: centsToMoney(today.order_cost), lossCost: centsToMoney(todayLoss) }, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
+  res.json({ todayRevenue: centsToMoney(today.revenue), activeOrders, pendingPayment, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: centsToMoney(today.revenue), recharge: centsToMoney(todayRecharge), offline: centsToMoney(today.offline) }, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
 });
 
 router.get('/admin/products', (req, res) => { syncProductAvailability(); const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM products').get().value; const all = req.query.all === '1' || req.query.all === 'true'; const products = db.prepare(`SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id ORDER BY p.id DESC${all ? '' : ' LIMIT ? OFFSET ?'}`).all(...(all ? [] : [pageSize, offset])).map(row => { const product = { ...adminMoney(row), physicalStock: row.stock, reservedStock: row.reserved_stock, availableStock: Math.max(row.stock - row.reserved_stock, 0) }; if (req.staff.role !== 'super') delete product.cost_cents; return product; }); return res.json({ products, categories: adminRows('SELECT * FROM categories ORDER BY sort, id'), pagination: paginationView(page, pageSize, total) }); });
