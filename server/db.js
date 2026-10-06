@@ -152,6 +152,37 @@ db.exec(`
     last_checked_at TEXT,
     UNIQUE(user_id, template_key)
   );
+  CREATE TABLE IF NOT EXISTS refund_requests (
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reject_reason TEXT NOT NULL DEFAULT '',
+    reviewed_by INTEGER REFERENCES staff_accounts(id),
+    reviewed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS refund_transactions (
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    request_id INTEGER REFERENCES refund_requests(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+    stored_cents INTEGER NOT NULL DEFAULT 0,
+    bonus_cents INTEGER NOT NULL DEFAULT 0,
+    wechat_cents INTEGER NOT NULL DEFAULT 0,
+    offline_cents INTEGER NOT NULL DEFAULT 0,
+    out_refund_no TEXT NOT NULL UNIQUE,
+    wechat_refund_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS refund_requests_order_idx ON refund_requests(order_id, status);
+  CREATE INDEX IF NOT EXISTS refund_transactions_order_idx ON refund_transactions(order_id, status);
   CREATE INDEX IF NOT EXISTS user_coupons_user_status_idx ON user_coupons(user_id, status);
   CREATE INDEX IF NOT EXISTS user_messages_user_read_idx ON user_messages(user_id, read_at);
 `);
@@ -257,6 +288,10 @@ const messageTemplateSeed = [
   ['order_awaiting_delivery', '订单待送达', '订单准备中', '订单 {{orderNo}} 正在准备，请稍候。'],
   ['order_completed', '订单已送达', '订单已送达', '订单 {{orderNo}} 已送达，祝您用餐愉快。'],
   ['order_cancelled', '订单已取消', '订单已取消', '订单 {{orderNo}} 已取消。'],
+  ['refund_requested', '退款申请', '退款申请已提交', '订单 {{orderNo}} 的退款申请 ¥{{refundAmount}} 已提交，等待商家审核。'],
+  ['refund_approved', '退款处理中', '退款申请已通过', '订单 {{orderNo}} 的退款 ¥{{refundAmount}} 正在原路退回。'],
+  ['refund_success', '退款成功', '退款成功', '订单 {{orderNo}} 已退款 ¥{{refundAmount}}。'],
+  ['refund_rejected', '退款被拒绝', '退款申请未通过', '订单 {{orderNo}} 的退款申请未通过：{{rejectReason}}。'],
   ['coupon_issued', '优惠券到账', '您有新优惠券', '{{couponName}} 已放入您的券包。'],
   ['coupon_expiring', '优惠券即将到期', '优惠券即将到期', '{{couponName}} 将于 {{expireAt}} 到期。'],
   ['member_upgraded', '会员升级', '会员等级已升级', '恭喜您成为 {{memberLevel}}。'],

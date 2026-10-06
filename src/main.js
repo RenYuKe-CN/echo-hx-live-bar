@@ -229,6 +229,7 @@ async function createOrder() {
 const adminState = { section: 'dashboard', data: null, toast: '', dialog: null, account: null, memberPhone: '', storagePhone: '', reportRange: { start: '', end: '' }, pages: { accounts: 1, logs: 1, products: 1, tables: 1, orders: 1, members: 1, storage: 1, storageMovements: 1, groupBuy: 1, wallet: 1, rewards: 1, coupons: 1, messages: 1, redemptions: 1, losses: 1, reportDaily: 1 }, pageSizes: { accounts: 20, logs: 20, products: 20, tables: 20, orders: 20, members: 20, storage: 20, storageMovements: 20, groupBuy: 20, wallet: 20, rewards: 20, coupons: 20, messages: 20, redemptions: 20, losses: 20, reportDaily: 20 }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
 let adminRenderVersion = 0;
 let lastPendingOrderCount = null;
+let lastPendingRefundCount = null;
 let adminPolling = false;
 const adminModules = [['dashboard','经营概览'],['mini-page','小程序页面'],['pos','收银点单'],['orders','订单管理'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['coupons','优惠券管理'],['messages','消息中心'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['settings','接口配置'],['backups','备份与恢复']];
 const adminApi = (path, options = {}) => api(`/admin${path}`, options);
@@ -281,6 +282,29 @@ function orderPaymentSummary(order) {
   if (order.payment_method === 'balance') return `储值 ${adminMoney(order.storedPaid)} / 赠金 ${adminMoney(order.bonusPaid)}`;
   if (order.payment_method === 'wechat') return `微信 ${adminMoney(Number(order.wechatPaid) > 0 ? order.wechatPaid : order.payableAmount)}`;
   return '线下';
+}
+function refundStatusLabel(status) { return ({ pending: '待审核', approved: '已通过', rejected: '已拒绝', processing: '退款处理中', success: '退款成功', failed: '退款失败' })[status] || status || ''; }
+function adminRefundCell(order) {
+  const request = order.refundRequest;
+  const transaction = order.refundTransaction;
+  const parts = [];
+  if (Number(order.refundedAmount) > 0) parts.push(`<span>已退款 ${adminMoney(order.refundedAmount)}</span>`);
+  if (Number(order.refundableAmount) > 0 && order.payment_status === 'paid') parts.push(`<span>可退 ${adminMoney(order.refundableAmount)}</span>`);
+  if (request) parts.push(`<span class="refund-chip ${request.status}">申请${refundStatusLabel(request.status)} ${adminMoney(request.amount)}</span>`);
+  if (transaction) parts.push(`<span class="refund-chip ${transaction.status}">${refundStatusLabel(transaction.status)} ${adminMoney(transaction.amount)}</span>`);
+  if (request?.reason) parts.push(`<small>原因：${escapeHtml(request.reason)}</small>`);
+  if (request?.rejectReason) parts.push(`<small class="warning-text">拒绝：${escapeHtml(request.rejectReason)}</small>`);
+  return parts.length ? `<div class="admin-refund-cell">${parts.join('')}</div>` : '<span class="muted-cell">无</span>';
+}
+function adminRefundActions(order) {
+  if (!['super', 'manager'].includes(adminState.account.role)) return '';
+  const request = order.refundRequest;
+  const transaction = order.refundTransaction;
+  const buttons = [];
+  if (request?.status === 'pending') buttons.push(`<button class="table-action" data-review-refund="${request.id}">审核退款</button>`);
+  if (transaction && ['pending', 'processing'].includes(transaction.status) && transaction.wechatCents) buttons.push(`<button class="table-action" data-query-refund="${transaction.id}">查询退款</button>`);
+  if (order.payment_status === 'paid' && ['awaiting_delivery', 'completed'].includes(order.status) && Number(order.refundableAmount) > 0 && request?.status !== 'pending' && !['pending', 'processing'].includes(transaction?.status)) buttons.push(`<button class="table-action" data-admin-refund="${order.id}">退款</button>`);
+  return buttons.join(' ');
 }
 function reportNumber(value) { return Number(String(value ?? 0).replace(/[^0-9.-]/g, '')) || 0; }
 function reportTrendChart(daily) {
@@ -404,10 +428,10 @@ function renderAdminLogin() {
 }
 async function initAdmin() { if (sessionStorage.getItem('adminToken')) { try { adminState.account = (await adminApi('/session')).account; } catch { sessionStorage.removeItem('adminToken'); } } renderAdmin(); }
 function adminContent(section, data) {
-  if (section === 'dashboard') { const canOrders = adminState.account.permissions.includes('orders'); const canProducts = adminState.account.permissions.includes('products'); const m = data.todayMetrics || {}; const quickActions = [['pos','收银点单'],['storage','登记存酒'],['group-buy','核销团购'],['wallet','配置储值']].filter(([id]) => adminState.account.permissions.includes(id)); return `<section class="kpi-grid">${[['今日净销售额',adminMoney(m.revenue ?? data.todayRevenue),'今日'],['今日充值收款',adminMoney(m.recharge),'今日'],['营业桌台',`${data.activeTables} 桌`,'进行中'],['空闲桌台',`${data.idleTables} 桌`,'可安排']].map((k, i) => `<article class="kpi-card"><span>${k[0]}</span><strong data-kpi="${i}">${k[1]}</strong><small class="green">${k[2]}</small></article>`).join('')}</section><section class="panel daily-metrics"><div class="panel-heading"><div><h2>今日收款</h2><span>实时统计，赠金不计入净销售额</span></div></div><div class="metric-list"><div><span>线下收款</span><strong>${adminMoney(m.offline)}</strong></div></div></section><section class="admin-grid"><article class="panel"><div class="panel-heading"><div><h2>运营提醒</h2><span>点击提醒可直接进入处理页面</span></div></div><div class="task-list">${canProducts ? `<button class="task-link" data-admin-section="products"><b class="status-dot red-dot"></b><div><strong>库存预警 ${data.lowStock} 项</strong><span>${data.outOfStock ? `其中 ${data.outOfStock} 项已自动下架，请及时补货` : '请到商品与库存调整安全库存'}</span></div></button>` : ''}${canOrders ? `<button class="task-link" data-admin-section="orders"><b class="status-dot orange"></b><div><strong>待送达订单 ${data.activeOrders} 笔</strong><span>查看商品清单并确认送达${data.pendingPayment ? ` · 另有 ${data.pendingPayment} 笔待支付` : ''}</span></div></button>` : ''}</div></article><article class="panel"><div class="panel-heading"><div><h2>快速入口</h2><span>常用运营动作</span></div></div><div class="quick-actions">${quickActions.map(([id, label]) => `<button data-admin-section="${id}">${label}</button>`).join('')}</div></article></section><section class="panel dashboard-orders"><div class="panel-heading"><div><h2>新订单待处理</h2><span>支付成功后，店员送达才会完成</span></div>${canOrders ? '<button class="outline-button" data-admin-section="orders">查看全部</button>' : ''}</div>${data.pendingOrders?.length ? data.pendingOrders.map(o => `<article class="pending-order"><div><strong>${escapeHtml(o.order_no)} · ${escapeHtml(o.table_no)}桌</strong><span>${escapeHtml(o.nickname)} · ${o.paid_at}</span></div><div class="pending-items">${o.items.map(item => `<span>${escapeHtml(item.product_name)} × ${item.quantity}</span>`).join('')}</div></article>`).join('') : '<p class="empty-cell">暂无待送达订单</p>'}</section>`; }
+  if (section === 'dashboard') { const canOrders = adminState.account.permissions.includes('orders'); const canProducts = adminState.account.permissions.includes('products'); const canReviewRefunds = canOrders && ['super', 'manager'].includes(adminState.account.role); const m = data.todayMetrics || {}; const quickActions = [['pos','收银点单'],['storage','登记存酒'],['group-buy','核销团购'],['wallet','配置储值']].filter(([id]) => adminState.account.permissions.includes(id)); return `<section class="kpi-grid">${[['今日净销售额',adminMoney(m.revenue ?? data.todayRevenue),'今日'],['今日充值收款',adminMoney(m.recharge),'今日'],['营业桌台',`${data.activeTables} 桌`,'进行中'],['空闲桌台',`${data.idleTables} 桌`,'可安排']].map((k, i) => `<article class="kpi-card"><span>${k[0]}</span><strong data-kpi="${i}">${k[1]}</strong><small class="green">${k[2]}</small></article>`).join('')}</section><section class="panel daily-metrics"><div class="panel-heading"><div><h2>今日收款</h2><span>实时统计，赠金不计入净销售额</span></div></div><div class="metric-list"><div><span>线下收款</span><strong>${adminMoney(m.offline)}</strong></div></div></section><section class="admin-grid"><article class="panel"><div class="panel-heading"><div><h2>运营提醒</h2><span>点击提醒可直接进入处理页面</span></div></div><div class="task-list">${canProducts ? `<button class="task-link" data-admin-section="products"><b class="status-dot red-dot"></b><div><strong>库存预警 ${data.lowStock} 项</strong><span>${data.outOfStock ? `其中 ${data.outOfStock} 项已自动下架，请及时补货` : '请到商品与库存调整安全库存'}</span></div></button>` : ''}${canOrders ? `<button class="task-link" data-admin-section="orders"><b class="status-dot orange"></b><div><strong>待送达订单 ${data.activeOrders} 笔</strong><span>查看商品清单并确认送达${data.pendingPayment ? ` · 另有 ${data.pendingPayment} 笔待支付` : ''}</span></div></button>` : ''}${canReviewRefunds && Number(data.pendingRefunds || 0) > 0 ? `<button class="task-link" data-admin-section="orders"><b class="status-dot red-dot"></b><div><strong>待审核退款 ${Number(data.pendingRefunds)} 笔</strong><span>请及时审核用户退款申请</span></div></button>` : ''}</div></article><article class="panel"><div class="panel-heading"><div><h2>快速入口</h2><span>常用运营动作</span></div></div><div class="quick-actions">${quickActions.map(([id, label]) => `<button data-admin-section="${id}">${label}</button>`).join('')}</div></article></section><section class="panel dashboard-orders"><div class="panel-heading"><div><h2>新订单待处理</h2><span>支付成功后，店员送达才会完成</span></div>${canOrders ? '<button class="outline-button" data-admin-section="orders">查看全部</button>' : ''}</div>${data.pendingOrders?.length ? data.pendingOrders.map(o => `<article class="pending-order"><div><strong>${escapeHtml(o.order_no)} · ${escapeHtml(o.table_no)}桌</strong><span>${escapeHtml(o.nickname)} · ${o.paid_at}</span></div><div class="pending-items">${o.items.map(item => `<span>${escapeHtml(item.product_name)} × ${item.quantity}</span>`).join('')}</div></article>`).join('') : '<p class="empty-cell">暂无待送达订单</p>'}</section>`; }
   if (section === 'pos') return posContent(data);
   if (section === 'products') return `<div class="toolbar"><button class="primary-small" data-action="new-product">新增商品</button><span>商品资料、价格、赠金支付和库存统一管理；待支付订单会暂时占用可售库存</span></div>${adminTable(['商品','分类','原价','会员价','进货价','库存（实际 / 预占 / 可售）','赠金支付','状态','操作'], data.products.map(p => { const physical = adminPhysicalStock(p); const reserved = adminReservedStock(p); const available = adminAvailableStock(p); return `<tr><td><div class="product-cell">${p.image_url ? `<img src="${escapeHtml(p.image_url)}" alt="">` : ''}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.detail || '')}</small></div></div></td><td>${escapeHtml(p.category || '-')}</td><td>${adminMoney(p.price)}</td><td class="green-text">${p.memberPrice == null ? '-' : adminMoney(p.memberPrice)}</td><td>${p.cost_cents == null ? '-' : adminMoney(p.cost_cents / 100)}</td><td class="${available <= 20 ? 'warning-text' : ''}"><span title="实际库存">${physical}</span> / <span title="待支付预占">${reserved}</span> / <strong title="可售库存">${available}</strong>${available <= 20 ? ' · 预警' : ''}</td><td>${p.allow_bonus ? '支持' : '不支持'}</td><td>${p.status === 'active' ? '在售' : '下架'}</td><td><button class="table-action" data-adjust-stock="${p.id}">调库存</button> <button class="table-action" data-edit-product="${p.id}">编辑</button> <button class="table-action" data-product-status="${p.id}" data-status="${p.status === 'active' ? 'inactive' : 'active'}">${p.status === 'active' ? '下架' : '上架'}</button></td></tr>`; }).join(''))}${adminPagination('products', data.pagination)}`;
-  if (section === 'orders') return `${adminTable(['订单号','桌台','付款人','商品清单','订单备注','原价','会员优惠','优惠券优惠','实付','支付构成','净销售额','利润','状态','操作'], data.orders.map(o => `<tr><td>${o.order_no}</td><td>${o.table_no}</td><td>${escapeHtml(o.nickname)}</td><td class="order-items-cell">${o.items.map(item => `<span>${escapeHtml(item.product_name)} × ${item.quantity}</span>`).join('')}</td><td class="order-note-cell">${o.note ? escapeHtml(o.note) : '<span class="muted-cell">无</span>'}</td><td>${adminMoney(o.originalAmount)}</td><td class="green-text">-${adminMoney(o.memberDiscount)}</td><td class="green-text">-${adminMoney(o.couponDiscount)}</td><td><strong>${adminMoney(o.payableAmount)}</strong></td><td>${orderPaymentSummary(o)}</td><td>${o.payment_status === 'paid' ? adminMoney(o.netSales) : '-'}</td><td>${adminState.account.role === 'super' && o.profit != null ? adminMoney(o.profit) : '-'}</td><td>${escapeHtml(o.statusLabel)}</td><td>${o.payment_status === 'pending' ? (o.payment_method === 'mixed' ? '等待微信支付' : `<button class="table-action" data-mark-paid="${o.id}">确认线下收款</button>`) : o.status === 'awaiting_delivery' ? `<button class="table-action" data-deliver="${o.id}">确认送达</button>` : '已完成'}</td></tr>`).join(''))}${adminPagination('orders', data.pagination)}`;
+  if (section === 'orders') return `${adminTable(['订单号','桌台','付款人','商品清单','订单备注','原价','会员优惠','优惠券优惠','实付','支付构成','净销售额','利润','退款信息','状态','操作'], data.orders.map(o => `<tr><td>${escapeHtml(o.order_no)}</td><td>${escapeHtml(o.table_no)}</td><td>${escapeHtml(o.nickname)}</td><td class="order-items-cell">${o.items.map(item => `<span>${escapeHtml(item.product_name)} × ${item.quantity}</span>`).join('')}</td><td class="order-note-cell">${o.note ? escapeHtml(o.note) : '<span class="muted-cell">无</span>'}</td><td>${adminMoney(o.originalAmount)}</td><td class="green-text">-${adminMoney(o.memberDiscount)}</td><td class="green-text">-${adminMoney(o.couponDiscount)}</td><td><strong>${adminMoney(o.payableAmount)}</strong></td><td>${orderPaymentSummary(o)}</td><td>${o.payment_status === 'paid' ? adminMoney(o.netSales) : '-'}</td><td>${adminState.account.role === 'super' && o.profit != null ? adminMoney(o.profit) : '-'}</td><td>${adminRefundCell(o)}</td><td>${escapeHtml(o.statusLabel)}</td><td>${o.payment_status === 'pending' ? (o.payment_method === 'mixed' ? '等待微信支付' : `<button class="table-action" data-mark-paid="${o.id}">确认线下收款</button>`) : o.status === 'awaiting_delivery' ? `<button class="table-action" data-deliver="${o.id}">确认送达</button>` : '已完成'} ${adminRefundActions(o)}</td></tr>`).join(''))}${adminPagination('orders', data.pagination)}`;
   if (section === 'tables') return `<div class="toolbar"><button class="primary-small" data-action="new-table">新增桌台</button><span>每桌独立小程序码；扫码后自动进入对应桌台。删除后不再显示，已有历史订单仍会保留。</span></div>${adminTable(['桌号','小程序码','会话','已收金额','操作'], data.tables.map(t => `<tr><td><strong>${escapeHtml(t.table_no)}</strong></td><td><button class="table-action" data-table-code="${t.id}">预览 / 下载</button></td><td>${t.session_status === 'open' ? '进行中' : '空闲'}</td><td>${adminMoney(t.orderTotal)}</td><td><button class="table-action" data-edit-table="${t.id}">编辑</button> ${t.session_status === 'open' ? `<button class="table-action" data-close-table="${t.id}">结束本桌</button>` : `<button class="table-action danger-action" data-delete-table="${t.id}">删除</button>`}</td></tr>`).join(''))}${adminPagination('tables', data.pagination)}`;
   if (section === 'members') {
     const tierRows = data.tiers.map(t => {
@@ -473,6 +497,24 @@ function bindAdminActions() {
   action('[data-coupon-status]', button => adminApi(`/coupons/${button.dataset.couponStatus}`, { method: 'PATCH', body: JSON.stringify({ status: button.dataset.status }) }));
   action('[data-mark-paid]', button => adminApi(`/orders/${button.dataset.markPaid}/mark-paid`, { method: 'POST', body: '{}' }));
   action('[data-deliver]', button => adminApi(`/orders/${button.dataset.deliver}/deliver`, { method: 'POST', body: '{}' }));
+  document.querySelectorAll('[data-review-refund]').forEach(button => button.onclick = () => {
+    const requestId = Number(button.dataset.reviewRefund);
+    const order = adminState.data.orders.find(item => Number(item.refundRequest?.id) === requestId);
+    if (order) openAdminDialog('review-refund', order);
+  });
+  document.querySelectorAll('[data-admin-refund]').forEach(button => button.onclick = () => {
+    const order = adminState.data.orders.find(item => Number(item.id) === Number(button.dataset.adminRefund));
+    if (order) openAdminDialog('admin-refund', order);
+  });
+  document.querySelectorAll('[data-query-refund]').forEach(button => button.onclick = async () => {
+    button.disabled = true;
+    try {
+      const result = await adminApi(`/refunds/${button.dataset.queryRefund}/query`, { method: 'POST', body: '{}' });
+      await renderAdmin();
+      const status = String(result.status || '').toLowerCase();
+      adminNotice(['success', 'succeeded'].includes(status) ? '退款已成功到账' : `微信退款状态：${refundStatusLabel(status) || result.status || '处理中'}`);
+    } catch (error) { adminNotice(error.message); button.disabled = false; }
+  });
   action('[data-close-table]', button => adminApi(`/tables/${button.dataset.closeTable}/close`, { method: 'POST', body: '{}' }));
   document.querySelectorAll('[data-edit-table]').forEach(button => button.onclick = () => openAdminDialog('edit-table', adminState.data.tables.find(table => table.id === Number(button.dataset.editTable))));
   document.querySelectorAll('[data-delete-table]').forEach(button => button.onclick = async () => {
@@ -636,7 +678,18 @@ async function openAdminDialog(type, item) {
   const number = (name, value = '', min = '0', step = '1') => `<input name="${name}" type="number" value="${value}" min="${min}" step="${step}" required>`;
   let title, fields, path, method = 'POST', messageData = null;
   try {
-    if (type === 'new-storage') {
+    if (type === 'review-refund') {
+      const request = item?.refundRequest;
+      title = `审核退款 · ${item.order_no}`;
+      fields = `<div class="refund-review-summary"><strong>订单 ${escapeHtml(item.order_no)}</strong><span>申请退款 ${adminMoney(request?.amount)}</span><span>当前可退款 ${adminMoney(item.refundableAmount)}</span><p>${request?.reason ? `用户原因：${escapeHtml(request.reason)}` : '用户未填写退款原因'}</p></div>`
+        + field('拒绝原因（点击拒绝时必填）', 'rejectReason', '<textarea name="rejectReason" rows="4" maxlength="200" placeholder="请填写拒绝退款的具体原因"></textarea>');
+    } else if (type === 'admin-refund') {
+      title = `订单退款 · ${item.order_no}`;
+      path = `/orders/${item.id}/refund`;
+      fields = `<div class="refund-review-summary"><strong>订单 ${escapeHtml(item.order_no)}</strong><span>原订单实付 ${adminMoney(item.payableAmount)}</span><span>当前可退款 ${adminMoney(item.refundableAmount)}</span><p>退款会按赠金、储值余额、微信支付的原支付渠道顺序退回；微信部分可能需要稍后查询状态。</p></div>`
+        + field('退款金额（元）', 'amount', `<input name="amount" type="number" value="${escapeHtml(item.refundableAmount)}" min="0.01" max="${escapeHtml(item.refundableAmount)}" step="0.01" required>`)
+        + field('退款原因', 'reason', '<textarea name="reason" rows="3" maxlength="200" placeholder="例如：商品缺货、服务异常"></textarea>');
+    } else if (type === 'new-storage') {
       const productsData = await adminApi('/products?all=1');
       title = '登记存酒'; path = '/storage';
       fields = field('会员手机号', 'phone', `<input name="phone" type="tel" inputmode="numeric" maxlength="11" pattern="1[3-9][0-9]{9}" value="${escapeHtml(adminState.storagePhone)}" required>`) + `<p class="dialog-hint" id="storage-member-match">输入已绑定手机号，确认会员后登记</p>` + field('现有商品', 'productId', `<select name="productId" required>${productsData.products.filter(p => p.status === 'active').map(p => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')}</select>`) + field('存入数量', 'quantity', number('quantity', 1, 1)) + field('存放天数', 'days', number('days', 30, 1)) + field('备注', 'note', '<input name="note" placeholder="可选">');
@@ -741,10 +794,32 @@ async function openAdminDialog(type, item) {
     }
   } catch (error) { adminNotice(error.message); return; }
   adminState.dialog = type;
-  root.innerHTML = `<div class="admin-dialog-backdrop"><section class="admin-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><header><h2>${escapeHtml(title)}</h2><button type="button" data-close-dialog aria-label="关闭">×</button></header><form id="admin-operation-form"><div class="dialog-fields">${fields}</div><p class="dialog-error" aria-live="polite"></p><footer><button type="button" class="outline-button" data-close-dialog>取消</button><button type="submit" class="primary-small">确认保存</button></footer></form></section></div>`;
+  const dialogFooter = type === 'review-refund'
+    ? '<button type="button" class="outline-button" data-close-dialog>取消</button><button type="button" class="danger-button" data-refund-review="reject">拒绝退款</button><button type="button" class="primary-small" data-refund-review="approve">同意退款</button>'
+    : '<button type="button" class="outline-button" data-close-dialog>取消</button><button type="submit" class="primary-small">确认保存</button>';
+  root.innerHTML = `<div class="admin-dialog-backdrop"><section class="admin-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><header><h2>${escapeHtml(title)}</h2><button type="button" data-close-dialog aria-label="关闭">×</button></header><form id="admin-operation-form"><div class="dialog-fields">${fields}</div><p class="dialog-error" aria-live="polite"></p><footer>${dialogFooter}</footer></form></section></div>`;
   const close = () => { adminState.dialog = null; root.innerHTML = ''; };
   root.querySelectorAll('[data-close-dialog]').forEach(button => button.onclick = close);
   root.querySelector('.admin-dialog-backdrop').onclick = event => { if (event.target.classList.contains('admin-dialog-backdrop')) close(); };
+  if (type === 'review-refund') {
+    root.querySelectorAll('[data-refund-review]').forEach(button => button.onclick = async () => {
+      const form = root.querySelector('form');
+      const errorBox = form.querySelector('.dialog-error');
+      const actionType = button.dataset.refundReview;
+      const reason = form.querySelector('[name="rejectReason"]').value.trim();
+      if (actionType === 'reject' && !reason) { errorBox.textContent = '拒绝退款必须填写原因'; return; }
+      root.querySelectorAll('[data-refund-review]').forEach(itemButton => { itemButton.disabled = true; });
+      try {
+        const result = await adminApi(`/refunds/${item.refundRequest.id}/${actionType}`, { method: 'POST', body: JSON.stringify(actionType === 'reject' ? { reason } : {}) });
+        close();
+        await renderAdmin();
+        adminNotice(actionType === 'reject' ? '已拒绝退款申请' : (['processing', 'PROCESSING'].includes(result.status) ? '退款请求已提交，微信退款处理中' : '退款已处理'));
+      } catch (error) {
+        errorBox.textContent = error.message;
+        root.querySelectorAll('[data-refund-review]').forEach(itemButton => { itemButton.disabled = false; });
+      }
+    });
+  }
   if (type === 'new-storage') {
     const input = root.querySelector('[name="phone"]'), match = root.querySelector('#storage-member-match');
     input.oninput = async () => { const phone = input.value.trim(); match.textContent = '输入已绑定手机号，确认会员后登记'; if (!/^1[3-9]\d{9}$/.test(phone)) return; try { const result = await adminApi(`/members?phone=${phone}`); if (input.value.trim() === phone) match.textContent = result.members.find(m => m.phone === phone) ? `已找到：${result.members.find(m => m.phone === phone).nickname}` : '未找到该手机号，请先在会员管理中绑定'; } catch (error) { match.textContent = error.message; } };
@@ -812,6 +887,7 @@ async function openAdminDialog(type, item) {
   }
   root.querySelector('form').onsubmit = async event => {
     event.preventDefault();
+    if (type === 'review-refund') return;
     const form = event.currentTarget;
     const payload = Object.fromEntries(new FormData(form));
     const submit = form.querySelector('[type="submit"]');
@@ -869,12 +945,16 @@ if (location.pathname.startsWith('/admin')) {
         const pendingCount = Number(data.activeOrders || 0);
         const newOrderCount = lastPendingOrderCount !== null && pendingCount > lastPendingOrderCount ? pendingCount - lastPendingOrderCount : 0;
         lastPendingOrderCount = pendingCount;
+        const pendingRefundCount = Number(data.pendingRefunds || 0);
+        const newRefundCount = lastPendingRefundCount !== null && pendingRefundCount > lastPendingRefundCount ? pendingRefundCount - lastPendingRefundCount : 0;
+        lastPendingRefundCount = pendingRefundCount;
         if (adminState.section === 'dashboard') {
           await renderAdmin();
         } else {
           await renderAdmin();
         }
         if (newOrderCount) adminNotice(`收到 ${newOrderCount} 笔新订单，请及时处理`);
+        if (newRefundCount && ['super', 'manager'].includes(adminState.account.role)) adminNotice(`收到 ${newRefundCount} 笔新的退款申请，请及时审核`);
       } else if (adminState.section === 'products' || adminState.section === 'tables' || adminState.section === 'storage' || adminState.section === 'members') {
         await renderAdmin();
       }

@@ -1,7 +1,7 @@
 const api = require('../../utils/api');
 
 Page({
-  data: { orders: [], busyOrderNo: '' },
+  data: { orders: [], busyOrderNo: '', busyRefundOrderNo: '', refundFormOrderNo: '', refundAmount: '', refundReason: '' },
 
   onShow() {
     this.loadOrders();
@@ -67,11 +67,64 @@ Page({
         storedText: Number(item.storedPaid).toFixed(2),
         bonusText: Number(item.bonusPaid).toFixed(2),
         wechatText: Number(item.wechatPaid).toFixed(2),
+        refundedText: Number(item.refundedAmount || 0).toFixed(2),
+        refundableText: Number(item.refundableAmount || 0).toFixed(2),
+        refundRequestStatusLabel: this.refundRequestStatusLabel(item.refundRequest?.status),
+        refundTransactionStatusLabel: this.refundTransactionStatusLabel(item.refundTransaction?.status),
         expireText: item.payment_status === 'pending' ? this.formatExpireText(item.paymentExpireAt, now) : ''
       })) });
       this.refreshCountdown();
       this.startCountdown();
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
+  },
+
+  refundRequestStatusLabel(status) {
+    return ({ pending: '待审核', approved: '已通过', rejected: '已拒绝' })[status] || '';
+  },
+
+  refundTransactionStatusLabel(status) {
+    return ({ pending: '退款待处理', processing: '退款处理中', success: '退款成功', failed: '退款失败' })[status] || '';
+  },
+
+  openRefundForm(event) {
+    const orderNo = event.currentTarget.dataset.orderNo;
+    const order = this.data.orders.find(item => item.order_no === orderNo);
+    if (!order) return;
+    this.setData({
+      refundFormOrderNo: orderNo,
+      refundAmount: Number(order.refundableAmount || 0).toFixed(2),
+      refundReason: ''
+    });
+  },
+
+  closeRefundForm() {
+    this.setData({ refundFormOrderNo: '', refundAmount: '', refundReason: '' });
+  },
+
+  onRefundAmountInput(event) {
+    this.setData({ refundAmount: event.detail.value });
+  },
+
+  onRefundReasonInput(event) {
+    this.setData({ refundReason: event.detail.value });
+  },
+
+  submitRefund(event) {
+    const orderNo = event.currentTarget.dataset.orderNo;
+    const amount = this.data.refundAmount.trim();
+    const reason = this.data.refundReason.trim();
+    if (!amount || Number(amount) <= 0) return wx.showToast({ title: '请输入有效退款金额', icon: 'none' });
+    if (reason.length > 200) return wx.showToast({ title: '退款原因不能超过200字', icon: 'none' });
+    this.setData({ busyRefundOrderNo: orderNo });
+    api.request(`/me/orders/${encodeURIComponent(orderNo)}/refund-requests`, {
+      method: 'POST',
+      data: { amount, reason }
+    }).then(() => {
+      wx.showToast({ title: '退款申请已提交', icon: 'success' });
+      this.setData({ refundFormOrderNo: '', refundAmount: '', refundReason: '' });
+      return this.loadOrders();
+    }).catch(error => wx.showToast({ title: error.message, icon: 'none' }))
+      .finally(() => this.setData({ busyRefundOrderNo: '' }));
   },
 
   continuePay(event) {

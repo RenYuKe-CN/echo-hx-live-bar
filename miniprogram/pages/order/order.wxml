@@ -1,1 +1,36 @@
-<view class="page"><view class="title">桌台订单</view><view wx:for="{{orders}}" wx:key="id" class="order"><view class="order-main"><view class="order-heading"><text class="order-no">{{item.order_no}}</text><text class="status {{item.payment_status === 'pending' ? 'status-pending' : item.payment_status === 'paid' ? 'status-paid' : 'status-closed'}}">{{item.fulfillmentLabel}}</text></view><text class="muted">{{item.created_at}} · {{item.paymentMethodLabel}}</text><text class="muted">原价 ¥{{item.originalText}}</text><text wx:if="{{item.memberDiscountText !== '0.00'}}" class="muted">会员优惠 <text class="green">-¥{{item.memberDiscountText}}</text></text><text wx:if="{{item.couponDiscountText !== '0.00'}}" class="muted">优惠券优惠 <text class="green">-¥{{item.couponDiscountText}}</text></text><text wx:if="{{item.note}}" class="order-note">备注：{{item.note}}</text><text wx:if="{{item.payment_method === 'balance' || item.payment_method === 'mixed'}}" class="muted">储值本金 ¥{{item.storedText}} · 赠金 ¥{{item.bonusText}}<text wx:if="{{item.payment_method === 'mixed'}}"> · 微信 ¥{{item.wechatText}}</text></text><text wx:if="{{item.payment_method === 'wechat'}}" class="muted">微信待支付 ¥{{item.wechatText}}</text><view wx:if="{{item.canPay || item.canCancel || item.canHide}}" class="order-actions"><text wx:if="{{item.expireText}}" class="expire-text">{{item.expireText}}</text><button wx:if="{{item.canPay}}" class="pay-button" data-order-no="{{item.order_no}}" bindtap="continuePay" loading="{{busyOrderNo === item.order_no}}">继续支付</button><button wx:if="{{item.canCancel}}" class="cancel-button" data-order-no="{{item.order_no}}" bindtap="cancelOrder" loading="{{busyOrderNo === item.order_no}}">取消订单</button><button wx:if="{{item.canHide}}" class="hide-button" data-order-no="{{item.order_no}}" bindtap="hideOrder" loading="{{busyOrderNo === item.order_no}}">删除记录</button></view></view><text class="amount">实付 ¥{{item.payableText}}</text></view><view wx:if="{{!orders.length}}" class="empty">暂时还没有订单</view></view>
+<view class="page">
+  <view class="title">桌台订单</view>
+  <view wx:for="{{orders}}" wx:key="id" class="order">
+    <view class="order-main">
+      <view class="order-heading"><text class="order-no">{{item.order_no}}</text><text class="status {{item.payment_status === 'pending' ? 'status-pending' : item.payment_status === 'paid' ? 'status-paid' : 'status-closed'}}">{{item.fulfillmentLabel}}</text></view>
+      <text class="muted">{{item.created_at}} · {{item.paymentMethodLabel}}</text>
+      <text class="muted">原价 ¥{{item.originalText}}</text>
+      <text wx:if="{{item.memberDiscountText !== '0.00'}}" class="muted">会员优惠 <text class="green">-¥{{item.memberDiscountText}}</text></text>
+      <text wx:if="{{item.couponDiscountText !== '0.00'}}" class="muted">优惠券优惠 <text class="green">-¥{{item.couponDiscountText}}</text></text>
+      <text wx:if="{{item.note}}" class="order-note">备注：{{item.note}}</text>
+      <text wx:if="{{item.payment_method === 'balance' || item.payment_method === 'mixed'}}" class="muted">储值本金 ¥{{item.storedText}} · 赠金 ¥{{item.bonusText}}<text wx:if="{{item.payment_method === 'mixed'}}"> · 微信 ¥{{item.wechatText}}</text></text>
+      <text wx:if="{{item.payment_method === 'wechat'}}" class="muted">微信待支付 ¥{{item.wechatText}}</text>
+
+      <view wx:if="{{item.refundedText !== '0.00' || item.refundRequestStatusLabel || item.refundTransactionStatusLabel}}" class="refund-summary">
+        <text wx:if="{{item.refundedText !== '0.00'}}">已退款 ¥{{item.refundedText}}</text>
+        <text wx:if="{{item.refundableText !== '0.00' && item.canRefund}}">可申请退款 ¥{{item.refundableText}}</text>
+        <text wx:if="{{item.refundRequestStatusLabel}}">申请{{item.refundRequestStatusLabel}}</text>
+        <text wx:if="{{item.refundTransactionStatusLabel}}" class="refund-status">{{item.refundTransactionStatusLabel}}</text>
+        <text wx:if="{{item.refundRequest && item.refundRequest.status === 'rejected' && item.refundRequest.rejectReason}}" class="refund-reason">拒绝原因：{{item.refundRequest.rejectReason}}</text>
+      </view>
+
+      <view wx:if="{{item.canRefund}}" class="refund-entry"><button class="refund-button" data-order-no="{{item.order_no}}" bindtap="openRefundForm">申请退款</button></view>
+      <view wx:if="{{refundFormOrderNo === item.order_no}}" class="refund-form">
+        <text class="refund-form-title">申请退款</text>
+        <text class="refund-form-hint">最多可申请 ¥{{item.refundableText}}，退款将按原支付渠道退回</text>
+        <input class="refund-input" type="digit" maxlength="12" value="{{refundAmount}}" placeholder="退款金额" bindinput="onRefundAmountInput" />
+        <textarea class="refund-textarea" maxlength="200" value="{{refundReason}}" placeholder="请填写退款原因（选填）" bindinput="onRefundReasonInput"></textarea>
+        <view class="refund-form-actions"><button class="cancel-button" bindtap="closeRefundForm">取消</button><button class="pay-button" data-order-no="{{item.order_no}}" bindtap="submitRefund" loading="{{busyRefundOrderNo === item.order_no}}">提交申请</button></view>
+      </view>
+
+      <view wx:if="{{item.canPay || item.canCancel || item.canHide}}" class="order-actions"><text wx:if="{{item.expireText}}" class="expire-text">{{item.expireText}}</text><button wx:if="{{item.canPay}}" class="pay-button" data-order-no="{{item.order_no}}" bindtap="continuePay" loading="{{busyOrderNo === item.order_no}}">继续支付</button><button wx:if="{{item.canCancel}}" class="cancel-button" data-order-no="{{item.order_no}}" bindtap="cancelOrder" loading="{{busyOrderNo === item.order_no}}">取消订单</button><button wx:if="{{item.canHide}}" class="hide-button" data-order-no="{{item.order_no}}" bindtap="hideOrder" loading="{{busyOrderNo === item.order_no}}">删除记录</button></view>
+    </view>
+    <text class="amount">实付 ¥{{item.payableText}}</text>
+  </view>
+  <view wx:if="{{!orders.length}}" class="empty">暂时还没有订单</view>
+</view>

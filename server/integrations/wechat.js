@@ -136,3 +136,27 @@ export async function closePayment(orderNo) {
     Accept: 'application/json', 'Content-Type': 'application/json'
   }, body }).then(json);
 }
+
+export async function createRefund({ outTradeNo, outRefundNo, reason, refundCents, totalCents }) {
+  const values = requireIntegration('wechat_mch_id', 'wechat_merchant_serial', 'wechat_private_key');
+  const path = '/v3/refund/domestic/refunds';
+  const body = JSON.stringify({ out_trade_no: outTradeNo, out_refund_no: outRefundNo, reason, notify_url: values.wechat_refund_notify_url || values.wechat_notify_url, amount: { refund: refundCents, total: totalCents, currency: 'CNY' } });
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const signature = signMessage(`POST\n${path}\n${timestamp}\n${nonce}\n${body}\n`, readPrivateKey(values.wechat_private_key));
+  return fetch(`https://api.mch.weixin.qq.com${path}`, { method: 'POST', headers: {
+    Authorization: `WECHATPAY2-SHA256-RSA2048 mchid="${values.wechat_mch_id}",nonce_str="${nonce}",signature="${signature}",timestamp="${timestamp}",serial_no="${values.wechat_merchant_serial}"`,
+    Accept: 'application/json', 'Content-Type': 'application/json'
+  }, body }).then(json);
+}
+
+export async function queryRefund(outRefundNo) {
+  const values = requireIntegration('wechat_mch_id', 'wechat_merchant_serial', 'wechat_private_key');
+  const path = `/v3/refund/domestic/refunds/${encodeURIComponent(outRefundNo)}`;
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = crypto.randomBytes(16).toString('hex');
+  const signature = signMessage(`GET\n${path}\n${timestamp}\n${nonce}\n\n`, readPrivateKey(values.wechat_private_key));
+  return fetch(`https://api.mch.weixin.qq.com${path}`, { headers: {
+    Authorization: `WECHATPAY2-SHA256-RSA2048 mchid="${values.wechat_mch_id}",nonce_str="${nonce}",signature="${signature}",timestamp="${timestamp}",serial_no="${values.wechat_merchant_serial}"`, Accept: 'application/json'
+  } }).then(json);
+}

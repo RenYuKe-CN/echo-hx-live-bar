@@ -7,7 +7,7 @@ import multer from 'multer';
 import { db, centsToMoney } from './db.js';
 import { getIntegrationStatus, integrationDefinitions } from './config.js';
 import { getUnlimitedMiniProgramCode, miniProgramCodeContentType } from './wechat-mini-code.js';
-import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment, closePayment, sendSubscribeMessage } from './integrations/wechat.js';
+import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment, closePayment, sendSubscribeMessage, createRefund, queryRefund } from './integrations/wechat.js';
 import { localImageDir, saveUpload, readUpload, isAllowedImageUrl } from './storage.js';
 import { getBirthdayMatchInfo, normalizeBirthday } from './birthday.js';
 import { backupSettings, listBackups, createBackup, restoreBackup, backupFile } from './backup.js';
@@ -110,8 +110,9 @@ router.use('/admin', (req, res, next) => {
   if (!row) return res.status(401).json({ message: '请先登录管理后台' });
   req.staff = row;
   const segment = req.path.split('/')[1];
-  const section = ({ summary: 'dashboard', 'wallet-packages': 'wallet', 'member-rules': 'members', 'member-tiers': 'members', categories: 'products', 'session': null, 'logout': null, 'change-password': null })[segment] ?? segment;
+  const section = ({ summary: 'dashboard', refunds: 'orders', 'wallet-packages': 'wallet', 'member-rules': 'members', 'member-tiers': 'members', categories: 'products', 'session': null, 'logout': null, 'change-password': null })[segment] ?? segment;
   if (['session','logout','change-password'].includes(segment)) return next();
+  if ((segment === 'refunds' || /^\/orders\/[^/]+\/refund(?:$|\/)/.test(req.path)) && !['super', 'manager'].includes(row.role)) return res.status(403).json({ message: '仅超级管理员或管理员可处理退款' });
   const allowed = row.role === 'super' || JSON.parse(row.permissions).includes(section);
   if (!allowed) return res.status(403).json({ message: '当前账号没有此模块权限' });
   if (['backups', 'reports'].includes(section) && row.role !== 'super') return res.status(403).json({ message: '仅超级管理员可访问此模块' });
@@ -294,6 +295,100 @@ function orderMessageValues(order) {
     bonusPaid: centsToMoney(row.bonus_paid_cents || 0),
     wechatPaid: centsToMoney(row.wechat_paid_cents || 0)
   };
+}
+
+const refundValues = (order, amount, extra = {}) => ({ ...orderMessageValues(order), refundAmount: centsToMoney(amount), ...extra });
+const refundTotals = orderId => db.prepare(`SELECT
+  COALESCE(SUM(CASE WHEN status = 'success' THEN amount_cents ELSE 0 END),0) AS refunded,
+  COALESCE(SUM(CASE WHEN status = 'success' THEN stored_cents + wechat_cents + offline_cents ELSE 0 END),0) AS refundedRevenue,
+  COALESCE(SUM(CASE WHEN status = 'success' THEN bonus_cents ELSE 0 END),0) AS refundedBonus,
+  COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN amount_cents ELSE 0 END),0) AS processing
+  FROM refund_transactions WHERE order_id = ?`).get(orderId);
+function refundView(order) {
+  const totals = refundTotals(order.id);
+  const request = db.prepare('SELECT * FROM refund_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(order.id);
+  const transaction = db.prepare('SELECT * FROM refund_transactions WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(order.id);
+  return { refundedAmount: centsToMoney(totals.refunded), refundedRevenueAmount: centsToMoney(totals.refundedRevenue), refundedBonusAmount: centsToMoney(totals.refundedBonus), refundedCents: Number(totals.refunded), refundedRevenueCents: Number(totals.refundedRevenue), refundedBonusCents: Number(totals.refundedBonus), processingCents: Number(totals.processing), refundableAmount: centsToMoney(Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing)), refundRequest: request && { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason, rejectReason: request.reject_reason, createdAt: request.created_at, reviewedAt: request.reviewed_at }, refundTransaction: transaction && { id: transaction.id, status: transaction.status, amount: centsToMoney(transaction.amount_cents), wechatCents: Number(transaction.wechat_cents || 0), createdAt: transaction.created_at, completedAt: transaction.completed_at } };
+}
+
+function completeRefund(refundId, wechatResult = null) {
+  const result = db.transaction(() => {
+    const refund = db.prepare('SELECT * FROM refund_transactions WHERE id = ?').get(refundId);
+    if (!refund || refund.status === 'success') return null;
+    if (!['pending', 'processing'].includes(refund.status)) throw new Error('退款状态不可完成');
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(refund.order_id);
+    db.prepare("UPDATE refund_transactions SET status = 'success', wechat_refund_id = COALESCE(?, wechat_refund_id), completed_at = CURRENT_TIMESTAMP WHERE id = ?").run(wechatResult?.refund_id || null, refund.id);
+    if (refund.stored_cents || refund.bonus_cents) {
+      db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents + ?, bonus_cents = bonus_cents + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(refund.stored_cents, refund.bonus_cents, refund.user_id);
+      db.prepare('INSERT INTO wallet_transactions (user_id, type, stored_cents, bonus_cents, remark) VALUES (?, ?, ?, ?, ?)').run(refund.user_id, 'order_refund', refund.stored_cents, refund.bonus_cents, `${order.order_no} / ${refund.out_refund_no}`);
+    }
+    const refunded = refundTotals(order.id).refunded;
+    if (refunded >= order.payable_amount_cents && order.status === 'awaiting_delivery') {
+      for (const item of db.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(order.id)) {
+        db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(item.quantity, item.product_id);
+        const stock = db.prepare('SELECT stock FROM products WHERE id = ?').get(item.product_id);
+        db.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason) VALUES (?, ?, ?, ?)').run(item.product_id, item.quantity, stock.stock, `订单全额退款 ${order.order_no}`);
+      }
+      db.prepare("UPDATE orders SET status = 'refunded' WHERE id = ?").run(order.id);
+    }
+    // Reverse earned points proportionately, without taking the balance below zero.
+    const earned = db.prepare("SELECT COALESCE(SUM(points),0) AS value FROM points_ledger WHERE order_id = ? AND reason = '订单消费'").get(order.id).value;
+    const reversed = -db.prepare("SELECT COALESCE(SUM(points),0) AS value FROM points_ledger WHERE order_id = ? AND reason = '订单退款'").get(order.id).value;
+    const target = Math.floor(earned * refunded / order.payable_amount_cents);
+    const available = db.prepare('SELECT points FROM users WHERE id = ?').get(refund.user_id).points;
+    const deduction = Math.min(Math.max(0, target - reversed), available);
+    if (deduction) {
+      db.prepare('UPDATE users SET points = points - ? WHERE id = ?').run(deduction, refund.user_id);
+      db.prepare('INSERT INTO points_ledger (user_id, order_id, points, reason) VALUES (?, ?, ?, ?)').run(refund.user_id, order.id, -deduction, '订单退款');
+    }
+    return { refund, order };
+  })();
+  if (result) queueUserMessage(result.refund.user_id, 'refund_success', refundValues(result.order, result.refund.amount_cents), 'refund_success', result.refund.id);
+  return result;
+}
+
+function beginRefund(order, amount, reason, requestId = null) {
+  return db.transaction(() => {
+    const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    const totals = refundTotals(order.id);
+    if (fresh.payment_status !== 'paid' || !['awaiting_delivery', 'completed'].includes(fresh.status) || amount <= 0 || amount + totals.refunded + totals.processing > fresh.payable_amount_cents) throw new Error('订单可退金额不足或状态已变化');
+    if (totals.processing || db.prepare("SELECT id FROM refund_requests WHERE order_id = ? AND status = 'pending' AND id != ?").get(order.id, requestId || 0)) throw new Error('该订单已有退款正在处理');
+    const used = db.prepare("SELECT COALESCE(SUM(bonus_cents),0) AS bonus, COALESCE(SUM(stored_cents),0) AS stored, COALESCE(SUM(wechat_cents),0) AS wechat, COALESCE(SUM(offline_cents),0) AS offline FROM refund_transactions WHERE order_id = ? AND status = 'success'").get(order.id);
+    let left = amount;
+    const bonus = Math.min(left, fresh.bonus_paid_cents - used.bonus); left -= bonus;
+    const stored = Math.min(left, fresh.stored_paid_cents - used.stored); left -= stored;
+    const wechat = Math.min(left, fresh.wechat_paid_cents - used.wechat); left -= wechat;
+    const offline = Math.min(left, fresh.offline_paid_cents - used.offline); left -= offline;
+    if (left) throw new Error('订单支付渠道金额不一致，无法退款');
+    const refundNo = `RF${Date.now()}${crypto.randomBytes(5).toString('hex')}`;
+    const id = db.prepare('INSERT INTO refund_transactions (order_id, request_id, user_id, amount_cents, stored_cents, bonus_cents, wechat_cents, offline_cents, out_refund_no, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(order.id, requestId, order.payer_user_id, amount, stored, bonus, wechat, offline, refundNo, reason).lastInsertRowid;
+    if (requestId) db.prepare("UPDATE refund_requests SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(requestId);
+    return db.prepare('SELECT * FROM refund_transactions WHERE id = ?').get(id);
+  })();
+}
+
+async function dispatchRefund(refund, order) {
+  if (!refund.wechat_cents) { completeRefund(refund.id); return 'success'; }
+  try {
+    const data = await createRefund({ outTradeNo: order.order_no, outRefundNo: refund.out_refund_no, reason: refund.reason || '订单退款', refundCents: refund.wechat_cents, totalCents: order.wechat_paid_cents });
+    if (data.status === 'SUCCESS') completeRefund(refund.id, data);
+    else if (['CLOSED', 'ABNORMAL'].includes(data.status)) db.prepare("UPDATE refund_transactions SET status = 'failed' WHERE id = ? AND status != 'success'").run(refund.id);
+    else db.prepare("UPDATE refund_transactions SET status = 'processing', wechat_refund_id = ? WHERE id = ? AND status = 'pending'").run(data.refund_id || null, refund.id);
+    return data.status || 'PROCESSING';
+  } catch (error) {
+    // A timeout is ambiguous: do not issue another refund with a new number.
+    db.prepare("UPDATE refund_transactions SET status = 'processing' WHERE id = ? AND status = 'pending'").run(refund.id);
+    console.error(`微信退款 ${refund.out_refund_no} 状态待核对: ${error.message}`);
+    return 'PROCESSING';
+  }
+}
+
+async function reconcileRefund(refund) {
+  const data = await queryRefund(refund.out_refund_no);
+  if (data.status === 'SUCCESS') completeRefund(refund.id, data);
+  else if (['CLOSED', 'ABNORMAL'].includes(data.status)) db.prepare("UPDATE refund_transactions SET status = 'failed' WHERE id = ? AND status != 'success'").run(refund.id);
+  else db.prepare("UPDATE refund_transactions SET status = 'processing' WHERE id = ? AND status = 'pending'").run(refund.id);
+  return data.status;
 }
 function couponUserView(row) {
   const definition = couponDefinitionView(row);
@@ -1061,6 +1156,19 @@ router.post('/payments/wechat/notify', async (req, res) => {
   }
 });
 
+router.post('/payments/wechat/refund/notify', (req, res) => {
+  try {
+    const payload = verifyNotification({ body: req.rawBody || JSON.stringify(req.body || {}), timestamp: req.header('Wechatpay-Timestamp'), nonce: req.header('Wechatpay-Nonce'), signature: req.header('Wechatpay-Signature'), serial: req.header('Wechatpay-Serial') });
+    const refund = db.prepare('SELECT * FROM refund_transactions WHERE out_refund_no = ?').get(payload.out_refund_no);
+    if (!refund) return res.status(404).json({ code: 'FAIL', message: '退款单不存在' });
+    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(refund.order_id);
+    if (payload.out_trade_no !== order.order_no || Number(payload.amount?.refund) !== refund.wechat_cents) return res.status(409).json({ code: 'FAIL', message: '退款单信息不匹配' });
+    if (payload.refund_status === 'SUCCESS') completeRefund(refund.id, payload);
+    else if (['CLOSED', 'ABNORMAL'].includes(payload.refund_status)) db.prepare("UPDATE refund_transactions SET status = 'failed' WHERE id = ? AND status != 'success'").run(refund.id);
+    res.json({ code: 'SUCCESS', message: '成功' });
+  } catch (error) { res.status(error.code === 'WECHAT_SIGNATURE_INVALID' ? 401 : 500).json({ code: 'FAIL', message: error.message }); }
+});
+
 router.post('/payments/wechat/:orderNo/query', async (req, res) => {
   if (!req.user) return res.status(401).json({ message: '请先登录' });
   const order = db.prepare('SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, req.user.id);
@@ -1355,7 +1463,7 @@ const adminRows = query => db.prepare(query).all();
 const adminMoney = row => ({ ...row, price: row.price_cents == null ? undefined : centsToMoney(row.price_cents), memberPrice: row.member_price_cents == null ? undefined : centsToMoney(row.member_price_cents) });
 
 function fulfillmentLabel(order) {
-  return order.status === 'completed' ? '已送达' : order.payment_status === 'paid' ? '待送达' : order.payment_status === 'pending' ? '待支付' : '已取消';
+  return order.status === 'refunded' ? '已退款' : order.status === 'completed' ? '已送达' : order.payment_status === 'paid' ? '待送达' : order.payment_status === 'pending' ? '待支付' : '已取消';
 }
 function orderItems(orderIds) {
   if (!orderIds.length) return {};
@@ -1375,10 +1483,11 @@ router.get('/admin/summary', (req, res) => {
   const outOfStock = db.prepare('SELECT COUNT(*) AS value FROM products WHERE stock - reserved_stock <= 0').get().value;
   const canViewOrders = req.staff.role === 'super' || JSON.parse(req.staff.permissions).includes('orders');
   const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, o.note, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
+  const pendingRefunds = canViewOrders && ['super', 'manager'].includes(req.staff.role) ? db.prepare("SELECT COUNT(*) AS value FROM refund_requests WHERE status = 'pending'").get().value : 0;
   const items = orderItems(pendingOrders.map(o => o.id));
-  const today = db.prepare("SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents),0) AS revenue, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.offline_paid_cents ELSE 0 END),0) AS offline FROM orders o WHERE o.payment_status = 'paid' AND date(o.paid_at, 'localtime') = date('now','localtime')").get();
+  const today = db.prepare("SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents) FROM refund_transactions rt WHERE rt.order_id = o.id AND rt.status = 'success'), 0)),0) AS revenue, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.offline_paid_cents ELSE 0 END),0) AS offline FROM orders o WHERE o.payment_status = 'paid' AND date(o.paid_at, 'localtime') = date('now','localtime')").get();
   const todayRecharge = db.prepare("SELECT COALESCE(SUM(pay_cents),0) AS value FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') = date('now','localtime')").get().value;
-  res.json({ todayRevenue: centsToMoney(today.revenue), activeOrders, pendingPayment, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: centsToMoney(today.revenue), recharge: centsToMoney(todayRecharge), offline: centsToMoney(today.offline) }, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
+  res.json({ todayRevenue: centsToMoney(today.revenue), activeOrders, pendingPayment, pendingRefunds, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: centsToMoney(today.revenue), recharge: centsToMoney(todayRecharge), offline: centsToMoney(today.offline) }, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
 });
 
 router.get('/admin/products', (req, res) => { syncProductAvailability(); const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM products').get().value; const all = req.query.all === '1' || req.query.all === 'true'; const products = db.prepare(`SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id ORDER BY p.id DESC${all ? '' : ' LIMIT ? OFFSET ?'}`).all(...(all ? [] : [pageSize, offset])).map(row => { const product = { ...adminMoney(row), physicalStock: row.stock, reservedStock: row.reserved_stock, availableStock: Math.max(row.stock - row.reserved_stock, 0) }; if (req.staff.role !== 'super') delete product.cost_cents; return product; }); return res.json({ products, categories: adminRows('SELECT * FROM categories ORDER BY sort, id'), pagination: paginationView(page, pageSize, total) }); });
@@ -1475,7 +1584,56 @@ router.get('/admin/orders', (req, res) => {
   const total = db.prepare('SELECT COUNT(*) AS value FROM orders').get().value;
   const rows = db.prepare("SELECT o.*, t.table_no, u.nickname, COALESCE((SELECT SUM(oi.quantity * oi.cost_price_cents) FROM order_items oi WHERE oi.order_id = o.id),0) AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?").all(pageSize, offset);
   const items = orderItems(rows.map(o => o.id));
-  res.json({ orders: rows.map(row => { const order = { ...row, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
+  res.json({ orders: rows.map(row => { const refund = refundView(row); const order = { ...row, ...refund, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
+});
+
+router.get('/admin/refunds', (req, res) => {
+  const rows = db.prepare(`SELECT rr.*, o.order_no, o.payable_amount_cents, o.status AS order_status, o.payment_status, u.nickname, u.phone
+    FROM refund_requests rr JOIN orders o ON o.id = rr.order_id JOIN users u ON u.id = rr.user_id ORDER BY rr.id DESC LIMIT 100`).all();
+  res.json({ refunds: rows.map(row => ({ ...row, amount: centsToMoney(row.amount_cents), orderAmount: centsToMoney(row.payable_amount_cents) })) });
+});
+router.post('/admin/refunds/:id/approve', async (req, res) => {
+  const request = db.prepare("SELECT * FROM refund_requests WHERE id = ? AND status = 'pending'").get(req.params.id);
+  if (!request) return res.status(404).json({ message: '退款申请不存在或已处理' });
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.order_id);
+  try {
+    const refund = beginRefund(order, request.amount_cents, request.reason || '用户申请退款', request.id);
+    queueUserMessage(request.user_id, 'refund_approved', refundValues(order, refund.amount_cents), 'refund', refund.id);
+    const status = await dispatchRefund(refund, order);
+    audit(req, '同意退款', `${order.order_no} ¥${centsToMoney(refund.amount_cents)}`);
+    res.json({ ok: true, status, refund: { id: refund.id, status: db.prepare('SELECT status FROM refund_transactions WHERE id = ?').get(refund.id).status } });
+  } catch (error) { res.status(error.status || 409).json({ message: error.message }); }
+});
+router.post('/admin/refunds/:id/reject', (req, res) => {
+  const reason = String(req.body?.reason || '').trim();
+  if (!reason) return res.status(400).json({ message: '拒绝退款必须填写原因' });
+  const request = db.prepare("SELECT * FROM refund_requests WHERE id = ? AND status = 'pending'").get(req.params.id);
+  if (!request) return res.status(404).json({ message: '退款申请不存在或已处理' });
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.order_id);
+  db.prepare("UPDATE refund_requests SET status = 'rejected', reject_reason = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(reason, req.staff.id, request.id);
+  queueUserMessage(request.user_id, 'refund_rejected', refundValues(order, request.amount_cents, { rejectReason: reason }), 'refund_request', request.id);
+  audit(req, '拒绝退款', `${order.order_no}: ${reason}`);
+  res.json({ ok: true });
+});
+router.post('/admin/orders/:id/refund', async (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  const totals = refundTotals(order.id);
+  const amount = req.body?.amount == null || req.body.amount === '' ? order.payable_amount_cents - totals.refunded - totals.processing : Math.round(Number(req.body.amount) * 100);
+  if (!Number.isInteger(amount) || amount <= 0) return res.status(400).json({ message: '退款金额无效' });
+  try {
+    const refund = beginRefund(order, amount, String(req.body?.reason || '后台退款').trim());
+    const status = await dispatchRefund(refund, order);
+    audit(req, '后台退款', `${order.order_no} ¥${centsToMoney(amount)}`);
+    res.json({ ok: true, status, refund: { id: refund.id, status: db.prepare('SELECT status FROM refund_transactions WHERE id = ?').get(refund.id).status } });
+  } catch (error) { res.status(error.status || 409).json({ message: error.message }); }
+});
+router.post('/admin/refunds/:id/query', async (req, res) => {
+  const refund = db.prepare("SELECT * FROM refund_transactions WHERE id = ? AND status IN ('pending','processing')").get(req.params.id);
+  if (!refund) return res.status(404).json({ message: '退款流水不存在或已完成' });
+  if (!refund.wechat_cents) return res.json({ status: 'success' });
+  try { const status = await reconcileRefund(refund); res.json({ status }); }
+  catch (error) { res.status(error.status || 503).json({ message: error.message }); }
 });
 router.post('/admin/orders/:id/deliver', (req, res) => {
   const result = db.transaction(() => {
@@ -1483,6 +1641,7 @@ router.post('/admin/orders/:id/deliver', (req, res) => {
     if (!order) return { code: 404, message: '订单不存在' };
     if (order.status === 'completed') return { code: 200 };
     if (order.payment_status !== 'paid' || order.status !== 'awaiting_delivery') return { code: 409, message: '仅已支付的待送达订单可确认送达' };
+    if (db.prepare("SELECT id FROM refund_requests WHERE order_id = ? AND status = 'pending' LIMIT 1").get(order.id) || db.prepare("SELECT id FROM refund_transactions WHERE order_id = ? AND status IN ('pending','processing') LIMIT 1").get(order.id)) return { code: 409, message: '该订单有退款申请或退款处理中，请先完成退款处理后再确认送达' };
     db.prepare("UPDATE orders SET status = 'completed', delivered_at = CURRENT_TIMESTAMP WHERE id = ?").run(order.id);
     audit(req, '确认订单送达', order.order_no);
     return { code: 200 };
@@ -1704,9 +1863,38 @@ router.get('/me/orders', (req, res) => {
   const orders = db.prepare('SELECT * FROM orders WHERE payer_user_id = ? AND hidden_by_user = 0 ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => {
     const paymentExpireAt = orderExpiryAt(row);
     const isExpired = Boolean(row.payment_status === 'pending' && paymentExpireAt && new Date(paymentExpireAt) <= new Date());
-    return { ...row, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(row.discount_amount_cents - row.coupon_discount_cents), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending', canHide: row.payment_status !== 'pending' };
+    const refund = refundView(row);
+    return { ...row, ...refund, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(row.discount_amount_cents - row.coupon_discount_cents), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending', canHide: row.payment_status !== 'pending', canRefund: row.payment_status === 'paid' && row.status === 'awaiting_delivery' && Number(refund.refundableAmount) > 0 && !Number(refund.processingCents) && refund.refundRequest?.status !== 'pending' };
   });
   res.json({ orders });
+});
+
+router.post('/me/orders/:orderNo/refund-requests', requireWechatUser, (req, res) => {
+  const userId = currentUserId(req);
+  const order = db.prepare("SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?").get(req.params.orderNo, userId);
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  const amount = req.body?.amount == null || req.body.amount === '' ? null : Math.round(Number(req.body.amount) * 100);
+  const reason = String(req.body?.reason || '').trim();
+  const totals = refundTotals(order.id);
+  const refundable = order.payable_amount_cents - totals.refunded - totals.processing;
+  if (order.payment_status !== 'paid' || order.status !== 'awaiting_delivery') return res.status(409).json({ message: '仅未送达的已支付订单可以申请退款' });
+  const requestedAmount = amount ?? refundable;
+  if (!Number.isInteger(requestedAmount) || requestedAmount <= 0 || requestedAmount > refundable) return res.status(400).json({ message: `退款金额需在 0.01 至 ${centsToMoney(refundable)} 元之间` });
+  if (reason.length > 200) return res.status(400).json({ message: '退款原因不能超过 200 个字' });
+  try {
+    const request = db.transaction(() => {
+      if (db.prepare("SELECT id FROM refund_requests WHERE order_id = ? AND status = 'pending'").get(order.id)) throw new Error('该订单已有退款申请正在审核');
+      const id = db.prepare('INSERT INTO refund_requests (order_id, user_id, amount_cents, reason) VALUES (?, ?, ?, ?)').run(order.id, userId, requestedAmount, reason).lastInsertRowid;
+      return db.prepare('SELECT * FROM refund_requests WHERE id = ?').get(id);
+    })();
+    queueUserMessage(userId, 'refund_requested', refundValues(order, request.amount_cents), 'refund_request', request.id);
+    res.status(201).json({ request: { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason } });
+  } catch (error) { res.status(409).json({ message: error.message }); }
+});
+router.get('/me/orders/:orderNo/refund-requests', requireWechatUser, (req, res) => {
+  const order = db.prepare('SELECT id FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, currentUserId(req));
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  res.json({ requests: db.prepare('SELECT id, amount_cents, reason, status, reject_reason, created_at, reviewed_at FROM refund_requests WHERE order_id = ? ORDER BY id DESC').all(order.id).map(row => ({ ...row, amount: centsToMoney(row.amount_cents) })) });
 });
 router.post('/me/orders/:orderNo/hide', (req, res) => {
   const order = db.prepare('SELECT id, payment_status FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, currentUserId(req));
@@ -1901,11 +2089,11 @@ router.get('/admin/reports', (req, res) => {
   const end = datePattern.test(String(req.query.end || '')) ? String(req.query.end) : today;
   const start = datePattern.test(String(req.query.start || '')) ? String(req.query.start) : db.prepare("SELECT date(?, '-29 day') AS day").get(today).day;
   if (start > end) return res.status(400).json({ message: '开始日期不能晚于结束日期' });
-  const totals = db.prepare("SELECT COALESCE(SUM(payable_amount_cents - bonus_paid_cents),0) AS revenue, COALESCE(SUM(bonus_paid_cents),0) AS bonus, COALESCE(SUM(stored_paid_cents),0) AS stored, COALESCE(SUM(wechat_paid_cents),0) AS wechat, COALESCE(SUM(CASE WHEN payment_method = 'offline' THEN payable_amount_cents ELSE offline_paid_cents END),0) AS offline, COALESCE(SUM((SELECT SUM(quantity * cost_price_cents) FROM order_items WHERE order_id = o.id)),0) AS cost FROM orders o WHERE payment_status = 'paid'").get();
+  const totals = db.prepare("SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents) FROM refund_transactions rt WHERE rt.order_id = o.id AND rt.status = 'success'), 0)),0) AS revenue, COALESCE(SUM(o.bonus_paid_cents),0) AS bonus, COALESCE(SUM(o.stored_paid_cents),0) AS stored, COALESCE(SUM(o.wechat_paid_cents),0) AS wechat, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.payable_amount_cents ELSE o.offline_paid_cents END),0) AS offline, COALESCE(SUM(CASE WHEN COALESCE((SELECT SUM(rt.amount_cents) FROM refund_transactions rt WHERE rt.order_id = o.id AND rt.status = 'success'), 0) >= o.payable_amount_cents THEN 0 ELSE (SELECT COALESCE(SUM(quantity * cost_price_cents),0) FROM order_items WHERE order_id = o.id) END),0) AS cost FROM orders o WHERE payment_status = 'paid'").get();
   const losses = db.prepare('SELECT COALESCE(SUM(cost_cents),0) AS cost FROM stock_losses').get().cost;
   const balance = db.prepare('SELECT COALESCE(SUM(stored_cents),0) AS stored, COALESCE(SUM(bonus_cents),0) AS bonus FROM wallet_accounts').get();
   const recharge = db.prepare("SELECT COALESCE(SUM(pay_cents),0) AS amount FROM wallet_transactions WHERE type = 'recharge'").get().amount;
-  const daily = db.prepare(`SELECT days.day, COALESCE(o.orders,0) AS orders, COALESCE(o.revenue,0) AS revenue, COALESCE(o.order_cost,0) AS order_cost, COALESCE(o.offline,0) AS offline, COALESCE(r.recharge,0) AS recharge, COALESCE(l.loss_cost,0) AS loss_cost FROM (WITH RECURSIVE dates(day) AS (SELECT date(?) UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date(?)) SELECT day FROM dates) days LEFT JOIN (SELECT date(paid_at, 'localtime') AS day, COUNT(*) AS orders, SUM(payable_amount_cents - bonus_paid_cents) AS revenue, SUM((SELECT COALESCE(SUM(quantity * cost_price_cents),0) FROM order_items WHERE order_id = orders.id)) AS order_cost, SUM(CASE WHEN payment_method = 'offline' THEN offline_paid_cents ELSE 0 END) AS offline FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(paid_at, 'localtime')) o ON o.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(pay_cents) AS recharge FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) r ON r.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(cost_cents) AS loss_cost FROM stock_losses WHERE date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) l ON l.day = days.day ORDER BY days.day DESC`).all(start, end, start, end, start, end, start, end).map(row => ({ day: row.day, orders: row.orders, revenue: centsToMoney(row.revenue), profit: centsToMoney(row.revenue - row.order_cost - row.loss_cost), recharge: centsToMoney(row.recharge), offline: centsToMoney(row.offline), orderCost: centsToMoney(row.order_cost), lossCost: centsToMoney(row.loss_cost) }));
+  const daily = db.prepare(`SELECT days.day, COALESCE(o.orders,0) AS orders, COALESCE(o.revenue,0) AS revenue, COALESCE(o.order_cost,0) AS order_cost, COALESCE(o.offline,0) AS offline, COALESCE(r.recharge,0) AS recharge, COALESCE(l.loss_cost,0) AS loss_cost FROM (WITH RECURSIVE dates(day) AS (SELECT date(?) UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date(?)) SELECT day FROM dates) days LEFT JOIN (SELECT date(paid_at, 'localtime') AS day, COUNT(*) AS orders, SUM(payable_amount_cents - bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents) FROM refund_transactions rt WHERE rt.order_id = orders.id AND rt.status = 'success'), 0)) AS revenue, SUM(CASE WHEN COALESCE((SELECT SUM(rt.amount_cents) FROM refund_transactions rt WHERE rt.order_id = orders.id AND rt.status = 'success'), 0) >= payable_amount_cents THEN 0 ELSE (SELECT COALESCE(SUM(quantity * cost_price_cents),0) FROM order_items WHERE order_id = orders.id) END) AS order_cost, SUM(CASE WHEN payment_method = 'offline' THEN offline_paid_cents ELSE 0 END) AS offline FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(paid_at, 'localtime')) o ON o.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(pay_cents) AS recharge FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) r ON r.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(cost_cents) AS loss_cost FROM stock_losses WHERE date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) l ON l.day = days.day ORDER BY days.day DESC`).all(start, end, start, end, start, end, start, end).map(row => ({ day: row.day, orders: row.orders, revenue: centsToMoney(row.revenue), profit: centsToMoney(row.revenue - row.order_cost - row.loss_cost), recharge: centsToMoney(row.recharge), offline: centsToMoney(row.offline), orderCost: centsToMoney(row.order_cost), lossCost: centsToMoney(row.loss_cost) }));
   const dailyPage = parsePagination(req, 'daily');
   const dailyRows = daily.slice(dailyPage.offset, dailyPage.offset + dailyPage.pageSize);
   res.json({ dateRange: { start, end }, today: daily.find(row => row.day === today) || daily[0], ...(req.staff.role === 'super' ? { totals: { revenue: centsToMoney(totals.revenue), bonusUsed: centsToMoney(totals.bonus), storedUsed: centsToMoney(totals.stored), wechatReceived: centsToMoney(totals.wechat), offlineReceived: centsToMoney(totals.offline), rechargeReceived: centsToMoney(recharge), outstandingStored: centsToMoney(balance.stored), outstandingBonus: centsToMoney(balance.bonus), orderCost: centsToMoney(totals.cost), lossCost: centsToMoney(losses), profit: centsToMoney(totals.revenue - totals.cost - losses) } } : {}), daily, dailyRows, dailyPagination: paginationView(dailyPage.page, dailyPage.pageSize, daily.length), byProduct: adminRows("SELECT product_name, SUM(quantity) AS quantity, SUM(paid_price_cents * quantity) AS amount FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.payment_status = 'paid' GROUP BY product_id ORDER BY quantity DESC LIMIT 20").map(row => ({ ...row, amount: centsToMoney(row.amount) })) });
@@ -1917,7 +2105,7 @@ router.get('/admin/reports/export', (req, res) => {
   const end = datePattern.test(String(req.query.end || '')) ? String(req.query.end) : today;
   const start = datePattern.test(String(req.query.start || '')) ? String(req.query.start) : end;
   if (start > end) return res.status(400).send('开始日期不能晚于结束日期');
-  const rows = db.prepare(`WITH RECURSIVE dates(day) AS (SELECT date(?) UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date(?)) SELECT dates.day, COALESCE(o.orders, 0) AS orders, COALESCE(o.revenue, 0) AS revenue, COALESCE(o.offline, 0) AS offline, COALESCE(o.order_cost, 0) AS order_cost, COALESCE(r.recharge, 0) AS recharge FROM dates LEFT JOIN (SELECT date(paid_at, 'localtime') AS day, COUNT(*) AS orders, SUM(payable_amount_cents - bonus_paid_cents) AS revenue, SUM(CASE WHEN payment_method = 'offline' THEN offline_paid_cents ELSE 0 END) AS offline, SUM((SELECT COALESCE(SUM(quantity * cost_price_cents),0) FROM order_items WHERE order_id = orders.id)) AS order_cost FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(paid_at, 'localtime')) o ON o.day = dates.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(pay_cents) AS recharge FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) r ON r.day = dates.day ORDER BY dates.day`).all(start, end, start, end, start, end);
+  const rows = db.prepare(`WITH RECURSIVE dates(day) AS (SELECT date(?) UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date(?)) SELECT dates.day, COALESCE(o.orders, 0) AS orders, COALESCE(o.revenue, 0) AS revenue, COALESCE(o.offline, 0) AS offline, COALESCE(o.order_cost, 0) AS order_cost, COALESCE(r.recharge, 0) AS recharge FROM dates LEFT JOIN (SELECT date(paid_at, 'localtime') AS day, COUNT(*) AS orders, SUM(payable_amount_cents - bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents) FROM refund_transactions rt WHERE rt.order_id = orders.id AND rt.status = 'success'), 0)) AS revenue, SUM(CASE WHEN COALESCE((SELECT SUM(rt.amount_cents) FROM refund_transactions rt WHERE rt.order_id = orders.id AND rt.status = 'success'), 0) >= payable_amount_cents THEN 0 ELSE (SELECT COALESCE(SUM(quantity * cost_price_cents),0) FROM order_items WHERE order_id = orders.id) END) AS order_cost, SUM(CASE WHEN payment_method = 'offline' THEN offline_paid_cents ELSE 0 END) AS offline FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(paid_at, 'localtime')) o ON o.day = dates.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(pay_cents) AS recharge FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) r ON r.day = dates.day ORDER BY dates.day`).all(start, end, start, end, start, end);
   const csv = ['日期,订单数,订单净销售额,充值收款,线下收款,订单商品成本,赠酒报损成本,净利润', ...rows.map(row => { const loss = db.prepare("SELECT COALESCE(SUM(cost_cents),0) AS value FROM stock_losses WHERE date(created_at, 'localtime') = date(?)").get(row.day).value; return [row.day, row.orders, (row.revenue / 100).toFixed(2), (row.recharge / 100).toFixed(2), (row.offline / 100).toFixed(2), (row.order_cost / 100).toFixed(2), (loss / 100).toFixed(2), ((row.revenue - row.order_cost - loss) / 100).toFixed(2)].join(','); })].join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="report-${start}-${end}.csv"; filename*=UTF-8''${encodeURIComponent(`经营报表-${start}-${end}.csv`)}`); res.send(`\ufeff${csv}`);
 });
