@@ -681,7 +681,11 @@ async function openAdminDialog(type, item) {
     if (type === 'review-refund') {
       const request = item?.refundRequest;
       title = `审核退款 · ${item.order_no}`;
-      fields = `<div class="refund-review-summary"><strong>订单 ${escapeHtml(item.order_no)}</strong><span>申请退款 ${adminMoney(request?.amount)}</span><span>当前可退款 ${adminMoney(item.refundableAmount)}</span><p>${request?.reason ? `用户原因：${escapeHtml(request.reason)}` : '用户未填写退款原因'}</p></div>`
+      const refundItems = Array.isArray(request?.items) ? request.items : [];
+      const itemSummary = refundItems.length
+        ? `<div class="refund-item-summary"><strong>申请商品</strong>${refundItems.map(refundItem => `<span>${escapeHtml(refundItem.name || '商品')} × ${Number(refundItem.quantity || 0)}</span>`).join('')}</div>`
+        : '<p>历史申请未记录商品明细，本次按金额审核。</p>';
+      fields = `<div class="refund-review-summary"><strong>订单 ${escapeHtml(item.order_no)}</strong>${itemSummary}<span>申请退款 ${adminMoney(request?.amount)}</span><span>当前可退款 ${adminMoney(item.refundableAmount)}</span><p>${request?.reason ? `用户原因：${escapeHtml(request.reason)}` : '用户未填写退款原因'}</p></div>`
         + field('拒绝原因（点击拒绝时必填）', 'rejectReason', '<textarea name="rejectReason" rows="4" maxlength="200" placeholder="请填写拒绝退款的具体原因"></textarea>');
     } else if (type === 'admin-refund') {
       title = `订单退款 · ${item.order_no}`;

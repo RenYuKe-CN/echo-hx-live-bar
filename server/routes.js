@@ -304,11 +304,90 @@ const refundTotals = orderId => db.prepare(`SELECT
   COALESCE(SUM(CASE WHEN status = 'success' THEN bonus_cents ELSE 0 END),0) AS refundedBonus,
   COALESCE(SUM(CASE WHEN status IN ('pending','processing') THEN amount_cents ELSE 0 END),0) AS processing
   FROM refund_transactions WHERE order_id = ?`).get(orderId);
+
+function parseRefundItems(value) {
+  if (!value) return [];
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(item => ({
+      orderItemId: Number(item.orderItemId ?? item.order_item_id ?? item.id),
+      quantity: Number(item.quantity)
+    })).filter(item => Number.isSafeInteger(item.orderItemId) && Number.isSafeInteger(item.quantity) && item.quantity > 0);
+  } catch (_error) {
+    return [];
+  }
+}
+
+function refundItemQuantities(orderId) {
+  const used = new Map();
+  const rows = db.prepare("SELECT items_json FROM refund_transactions WHERE order_id = ? AND status IN ('pending','processing','success')").all(orderId);
+  rows.forEach(row => parseRefundItems(row.items_json).forEach(item => used.set(item.orderItemId, (used.get(item.orderItemId) || 0) + item.quantity)));
+  return used;
+}
+
+function orderRefundLines(orderId) {
+  const used = refundItemQuantities(orderId);
+  return db.prepare(`SELECT oi.id, oi.product_id, oi.product_name, oi.quantity, oi.paid_price_cents, oi.original_price_cents
+    FROM order_items oi WHERE oi.order_id = ? ORDER BY oi.id`).all(orderId).map(row => ({
+    ...row,
+    usedQuantity: used.get(row.id) || 0,
+    availableQuantity: Math.max(0, row.quantity - (used.get(row.id) || 0)),
+    refundable: row.paid_price_cents > 0 && row.quantity > (used.get(row.id) || 0)
+  }));
+}
+
+function normalizeRefundSelection(orderId, input) {
+  if (!Array.isArray(input) || !input.length || input.length > 100) throw new Error('请选择要退款的商品和数量');
+  const quantities = new Map();
+  for (const item of input) {
+    const orderItemId = Number(item?.orderItemId ?? item?.order_item_id ?? item?.id);
+    const quantity = Number(item?.quantity);
+    if (!Number.isSafeInteger(orderItemId) || !Number.isSafeInteger(quantity) || quantity < 1) throw new Error('退款商品或数量无效');
+    if (quantities.has(orderItemId)) throw new Error('同一商品不能重复选择');
+    quantities.set(orderItemId, quantity);
+  }
+  const lines = orderRefundLines(orderId);
+  const selected = [];
+  for (const [orderItemId, quantity] of quantities) {
+    const line = lines.find(item => item.id === orderItemId);
+    if (!line) throw new Error('退款商品不属于当前订单');
+    if (!line.refundable) throw new Error(`商品“${line.product_name}”是赠送商品，不能申请金额退款`);
+    if (quantity > line.availableQuantity) throw new Error(`商品“${line.product_name}”最多可退款 ${line.availableQuantity} 件`);
+    selected.push({ orderItemId, quantity, productId: line.product_id, name: line.product_name });
+  }
+  return selected;
+}
+
+function calculateRefundAmount(order, selectedItems) {
+  const lines = orderRefundLines(order.id);
+  const lineMap = new Map(lines.map(line => [line.id, line]));
+  const totals = refundTotals(order.id);
+  const remainingAmount = Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing);
+  const totalBase = lines.reduce((sum, line) => sum + Math.max(0, line.paid_price_cents * line.availableQuantity), 0);
+  const selectedBase = selectedItems.reduce((sum, item) => sum + (lineMap.get(item.orderItemId)?.paid_price_cents || 0) * item.quantity, 0);
+  if (!totalBase || !selectedBase) throw new Error('所选商品没有可退款金额');
+  const selectedById = new Map(selectedItems.map(item => [item.orderItemId, item.quantity]));
+  const selectedAllRemaining = lines.filter(line => line.refundable).every(line => selectedById.get(line.id) === line.availableQuantity);
+  const amount = selectedAllRemaining
+    ? remainingAmount
+    : Math.min(remainingAmount, Math.round(remainingAmount * selectedBase / totalBase));
+  if (amount <= 0) throw new Error('所选商品可退款金额不足 0.01 元');
+  return amount;
+}
+
+function refundItemsView(value) {
+  return parseRefundItems(value).map(item => {
+    const row = db.prepare('SELECT product_name, product_id FROM order_items WHERE id = ?').get(item.orderItemId);
+    return { orderItemId: item.orderItemId, productId: row?.product_id || null, name: row?.product_name || '商品', quantity: item.quantity };
+  });
+}
+
 function refundView(order) {
   const totals = refundTotals(order.id);
   const request = db.prepare('SELECT * FROM refund_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(order.id);
   const transaction = db.prepare('SELECT * FROM refund_transactions WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(order.id);
-  return { refundedAmount: centsToMoney(totals.refunded), refundedRevenueAmount: centsToMoney(totals.refundedRevenue), refundedBonusAmount: centsToMoney(totals.refundedBonus), refundedCents: Number(totals.refunded), refundedRevenueCents: Number(totals.refundedRevenue), refundedBonusCents: Number(totals.refundedBonus), processingCents: Number(totals.processing), refundableAmount: centsToMoney(Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing)), refundRequest: request && { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason, rejectReason: request.reject_reason, createdAt: request.created_at, reviewedAt: request.reviewed_at }, refundTransaction: transaction && { id: transaction.id, status: transaction.status, amount: centsToMoney(transaction.amount_cents), wechatCents: Number(transaction.wechat_cents || 0), createdAt: transaction.created_at, completedAt: transaction.completed_at } };
+  return { refundedAmount: centsToMoney(totals.refunded), refundedRevenueAmount: centsToMoney(totals.refundedRevenue), refundedBonusAmount: centsToMoney(totals.refundedBonus), refundedCents: Number(totals.refunded), refundedRevenueCents: Number(totals.refundedRevenue), refundedBonusCents: Number(totals.refundedBonus), processingCents: Number(totals.processing), refundableAmount: centsToMoney(Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing)), refundRequest: request && { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason, items: refundItemsView(request.items_json), rejectReason: request.reject_reason, createdAt: request.created_at, reviewedAt: request.reviewed_at }, refundTransaction: transaction && { id: transaction.id, status: transaction.status, amount: centsToMoney(transaction.amount_cents), items: refundItemsView(transaction.items_json), wechatCents: Number(transaction.wechat_cents || 0), createdAt: transaction.created_at, completedAt: transaction.completed_at } };
 }
 
 function completeRefund(refundId, wechatResult = null) {
@@ -323,13 +402,20 @@ function completeRefund(refundId, wechatResult = null) {
       db.prepare('INSERT INTO wallet_transactions (user_id, type, stored_cents, bonus_cents, remark) VALUES (?, ?, ?, ?, ?)').run(refund.user_id, 'order_refund', refund.stored_cents, refund.bonus_cents, `${order.order_no} / ${refund.out_refund_no}`);
     }
     const refunded = refundTotals(order.id).refunded;
-    if (refunded >= order.payable_amount_cents && order.status === 'awaiting_delivery') {
-      for (const item of db.prepare('SELECT product_id, quantity FROM order_items WHERE order_id = ?').all(order.id)) {
+    if (order.status === 'awaiting_delivery') {
+      const selectedItems = parseRefundItems(refund.items_json);
+      const stockItems = selectedItems.length
+        ? selectedItems.map(selected => {
+          const item = db.prepare('SELECT id, product_id, product_name FROM order_items WHERE id = ? AND order_id = ?').get(selected.orderItemId, order.id);
+          return item ? { ...item, quantity: selected.quantity } : null;
+        }).filter(Boolean)
+        : refunded >= order.payable_amount_cents ? db.prepare('SELECT product_id, quantity, product_name FROM order_items WHERE order_id = ?').all(order.id) : [];
+      for (const item of stockItems) {
         db.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(item.quantity, item.product_id);
         const stock = db.prepare('SELECT stock FROM products WHERE id = ?').get(item.product_id);
-        db.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason) VALUES (?, ?, ?, ?)').run(item.product_id, item.quantity, stock.stock, `订单全额退款 ${order.order_no}`);
+        db.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason) VALUES (?, ?, ?, ?)').run(item.product_id, item.quantity, stock.stock, `订单退款 ${order.order_no}`);
       }
-      db.prepare("UPDATE orders SET status = 'refunded' WHERE id = ?").run(order.id);
+      if (refunded >= order.payable_amount_cents) db.prepare("UPDATE orders SET status = 'refunded' WHERE id = ?").run(order.id);
     }
     // Reverse earned points proportionately, without taking the balance below zero.
     const earned = db.prepare("SELECT COALESCE(SUM(points),0) AS value FROM points_ledger WHERE order_id = ? AND reason = '订单消费'").get(order.id).value;
@@ -347,7 +433,7 @@ function completeRefund(refundId, wechatResult = null) {
   return result;
 }
 
-function beginRefund(order, amount, reason, requestId = null) {
+function beginRefund(order, amount, reason, requestId = null, refundItems = []) {
   return db.transaction(() => {
     const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     const totals = refundTotals(order.id);
@@ -361,7 +447,7 @@ function beginRefund(order, amount, reason, requestId = null) {
     const offline = Math.min(left, fresh.offline_paid_cents - used.offline); left -= offline;
     if (left) throw new Error('订单支付渠道金额不一致，无法退款');
     const refundNo = `RF${Date.now()}${crypto.randomBytes(5).toString('hex')}`;
-    const id = db.prepare('INSERT INTO refund_transactions (order_id, request_id, user_id, amount_cents, stored_cents, bonus_cents, wechat_cents, offline_cents, out_refund_no, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(order.id, requestId, order.payer_user_id, amount, stored, bonus, wechat, offline, refundNo, reason).lastInsertRowid;
+    const id = db.prepare('INSERT INTO refund_transactions (order_id, request_id, user_id, amount_cents, stored_cents, bonus_cents, wechat_cents, offline_cents, out_refund_no, reason, items_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(order.id, requestId, order.payer_user_id, amount, stored, bonus, wechat, offline, refundNo, reason, JSON.stringify(refundItems)).lastInsertRowid;
     if (requestId) db.prepare("UPDATE refund_requests SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(requestId);
     return db.prepare('SELECT * FROM refund_transactions WHERE id = ?').get(id);
   })();
@@ -1465,6 +1551,67 @@ const adminMoney = row => ({ ...row, price: row.price_cents == null ? undefined 
 function fulfillmentLabel(order) {
   return order.status === 'refunded' ? '已退款' : order.status === 'completed' ? '已送达' : order.payment_status === 'paid' ? '待送达' : order.payment_status === 'pending' ? '待支付' : '已取消';
 }
+function userOrderItems(orderId) {
+  const used = refundItemQuantities(orderId);
+  return db.prepare(`SELECT oi.id, oi.product_id, oi.product_name, oi.quantity,
+    oi.original_price_cents, oi.paid_price_cents, p.image_url
+    FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id
+    WHERE oi.order_id = ? ORDER BY oi.id`).all(orderId).map(item => ({
+      id: item.id,
+      productId: item.product_id,
+      name: item.product_name,
+      quantity: item.quantity,
+      imageUrl: item.image_url || '',
+      originalPrice: centsToMoney(item.original_price_cents),
+      paidPrice: centsToMoney(item.paid_price_cents),
+      originalSubtotal: centsToMoney(item.original_price_cents * item.quantity),
+      paidSubtotal: centsToMoney(item.paid_price_cents * item.quantity),
+      refundedQuantity: used.get(item.id) || 0,
+      refundAvailableQuantity: item.paid_price_cents > 0 ? Math.max(0, item.quantity - (used.get(item.id) || 0)) : 0,
+      refundSelectable: item.paid_price_cents > 0 && item.quantity > (used.get(item.id) || 0)
+    }));
+}
+function userOrderView(row, includeItems = false) {
+  const paymentExpireAt = orderExpiryAt(row);
+  const isExpired = Boolean(row.payment_status === 'pending' && paymentExpireAt && new Date(paymentExpireAt) <= new Date());
+  const refund = refundView(row);
+  const table = row.session_id
+    ? db.prepare('SELECT t.table_no FROM table_sessions ts JOIN tables t ON t.id = ts.table_id WHERE ts.id = ?').get(row.session_id)
+    : null;
+  const order = {
+    ...row,
+    id: row.id,
+    orderNo: row.order_no,
+    tableNo: table?.table_no || '',
+    status: row.status,
+    paymentStatus: row.payment_status,
+    statusLabel: row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : fulfillmentLabel(row),
+    paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消',
+    createdAt: row.created_at,
+    paidAt: row.paid_at,
+    deliveredAt: row.delivered_at,
+    note: row.note || '',
+    originalAmount: centsToMoney(row.original_amount_cents),
+    discountAmount: centsToMoney(row.discount_amount_cents),
+    memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)),
+    couponDiscount: centsToMoney(row.coupon_discount_cents),
+    payableAmount: centsToMoney(row.payable_amount_cents),
+    storedPaid: centsToMoney(row.stored_paid_cents),
+    bonusPaid: centsToMoney(row.bonus_paid_cents),
+    wechatPaid: centsToMoney(row.wechat_paid_cents),
+    paymentMethod: row.payment_method,
+    paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他',
+    paymentExpireAt,
+    isExpired,
+    canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method),
+    canCancel: row.payment_status === 'pending',
+    canHide: row.payment_status !== 'pending',
+    canRefund: row.payment_status === 'paid' && row.status === 'awaiting_delivery' && Number(refund.refundableAmount) > 0 && !Number(refund.processingCents) && refund.refundRequest?.status !== 'pending',
+    ...refund
+  };
+  if (includeItems) order.items = userOrderItems(row.id);
+  return order;
+}
 function orderItems(orderIds) {
   if (!orderIds.length) return {};
   const grouped = {};
@@ -1590,14 +1737,14 @@ router.get('/admin/orders', (req, res) => {
 router.get('/admin/refunds', (req, res) => {
   const rows = db.prepare(`SELECT rr.*, o.order_no, o.payable_amount_cents, o.status AS order_status, o.payment_status, u.nickname, u.phone
     FROM refund_requests rr JOIN orders o ON o.id = rr.order_id JOIN users u ON u.id = rr.user_id ORDER BY rr.id DESC LIMIT 100`).all();
-  res.json({ refunds: rows.map(row => ({ ...row, amount: centsToMoney(row.amount_cents), orderAmount: centsToMoney(row.payable_amount_cents) })) });
+  res.json({ refunds: rows.map(row => ({ ...row, amount: centsToMoney(row.amount_cents), orderAmount: centsToMoney(row.payable_amount_cents), items: refundItemsView(row.items_json) })) });
 });
 router.post('/admin/refunds/:id/approve', async (req, res) => {
   const request = db.prepare("SELECT * FROM refund_requests WHERE id = ? AND status = 'pending'").get(req.params.id);
   if (!request) return res.status(404).json({ message: '退款申请不存在或已处理' });
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.order_id);
   try {
-    const refund = beginRefund(order, request.amount_cents, request.reason || '用户申请退款', request.id);
+    const refund = beginRefund(order, request.amount_cents, request.reason || '用户按商品申请退款', request.id, parseRefundItems(request.items_json));
     queueUserMessage(request.user_id, 'refund_approved', refundValues(order, refund.amount_cents), 'refund', refund.id);
     const status = await dispatchRefund(refund, order);
     audit(req, '同意退款', `${order.order_no} ¥${centsToMoney(refund.amount_cents)}`);
@@ -1860,41 +2007,40 @@ router.post('/rewards/:id/redeem', requireWechatUser, (req, res) => {
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
 router.get('/me/orders', (req, res) => {
-  const orders = db.prepare('SELECT * FROM orders WHERE payer_user_id = ? AND hidden_by_user = 0 ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => {
-    const paymentExpireAt = orderExpiryAt(row);
-    const isExpired = Boolean(row.payment_status === 'pending' && paymentExpireAt && new Date(paymentExpireAt) <= new Date());
-    const refund = refundView(row);
-    return { ...row, ...refund, originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(row.discount_amount_cents - row.coupon_discount_cents), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), paymentMethodLabel: ({ balance: '余额支付', mixed: '余额 + 微信支付', wechat: '微信支付', offline: '线下收款' })[row.payment_method] || '其他', paymentStatusLabel: row.payment_status === 'paid' ? '已支付' : row.payment_status === 'pending' ? (isExpired ? '支付已过期' : '待支付') : '已取消', fulfillmentLabel: fulfillmentLabel(row), paymentExpireAt, isExpired, canPay: row.payment_status === 'pending' && !isExpired && ['wechat', 'mixed'].includes(row.payment_method), canCancel: row.payment_status === 'pending', canHide: row.payment_status !== 'pending', canRefund: row.payment_status === 'paid' && row.status === 'awaiting_delivery' && Number(refund.refundableAmount) > 0 && !Number(refund.processingCents) && refund.refundRequest?.status !== 'pending' };
-  });
+  const orders = db.prepare('SELECT * FROM orders WHERE payer_user_id = ? AND hidden_by_user = 0 ORDER BY id DESC LIMIT 100').all(currentUserId(req)).map(row => userOrderView(row));
   res.json({ orders });
+});
+
+router.get('/me/orders/:orderNo', (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ? AND hidden_by_user = 0').get(req.params.orderNo, currentUserId(req));
+  if (!order) return res.status(404).json({ message: '订单不存在或已隐藏' });
+  res.json({ order: userOrderView(order, true) });
 });
 
 router.post('/me/orders/:orderNo/refund-requests', requireWechatUser, (req, res) => {
   const userId = currentUserId(req);
   const order = db.prepare("SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?").get(req.params.orderNo, userId);
   if (!order) return res.status(404).json({ message: '订单不存在' });
-  const amount = req.body?.amount == null || req.body.amount === '' ? null : Math.round(Number(req.body.amount) * 100);
-  const reason = String(req.body?.reason || '').trim();
   const totals = refundTotals(order.id);
   const refundable = order.payable_amount_cents - totals.refunded - totals.processing;
   if (order.payment_status !== 'paid' || order.status !== 'awaiting_delivery') return res.status(409).json({ message: '仅未送达的已支付订单可以申请退款' });
-  const requestedAmount = amount ?? refundable;
-  if (!Number.isInteger(requestedAmount) || requestedAmount <= 0 || requestedAmount > refundable) return res.status(400).json({ message: `退款金额需在 0.01 至 ${centsToMoney(refundable)} 元之间` });
-  if (reason.length > 200) return res.status(400).json({ message: '退款原因不能超过 200 个字' });
   try {
+    const items = normalizeRefundSelection(order.id, req.body?.items);
+    const requestedAmount = calculateRefundAmount(order, items);
+    if (requestedAmount > refundable) throw new Error('所选商品可退款金额超过订单剩余可退款金额，请刷新后重试');
     const request = db.transaction(() => {
       if (db.prepare("SELECT id FROM refund_requests WHERE order_id = ? AND status = 'pending'").get(order.id)) throw new Error('该订单已有退款申请正在审核');
-      const id = db.prepare('INSERT INTO refund_requests (order_id, user_id, amount_cents, reason) VALUES (?, ?, ?, ?)').run(order.id, userId, requestedAmount, reason).lastInsertRowid;
+      const id = db.prepare('INSERT INTO refund_requests (order_id, user_id, amount_cents, reason, items_json) VALUES (?, ?, ?, ?, ?)').run(order.id, userId, requestedAmount, '用户按商品申请退款', JSON.stringify(items)).lastInsertRowid;
       return db.prepare('SELECT * FROM refund_requests WHERE id = ?').get(id);
     })();
     queueUserMessage(userId, 'refund_requested', refundValues(order, request.amount_cents), 'refund_request', request.id);
-    res.status(201).json({ request: { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason } });
+    res.status(201).json({ request: { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), items } });
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
 router.get('/me/orders/:orderNo/refund-requests', requireWechatUser, (req, res) => {
   const order = db.prepare('SELECT id FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, currentUserId(req));
   if (!order) return res.status(404).json({ message: '订单不存在' });
-  res.json({ requests: db.prepare('SELECT id, amount_cents, reason, status, reject_reason, created_at, reviewed_at FROM refund_requests WHERE order_id = ? ORDER BY id DESC').all(order.id).map(row => ({ ...row, amount: centsToMoney(row.amount_cents) })) });
+  res.json({ requests: db.prepare('SELECT id, amount_cents, reason, status, reject_reason, items_json, created_at, reviewed_at FROM refund_requests WHERE order_id = ? ORDER BY id DESC').all(order.id).map(row => ({ ...row, amount: centsToMoney(row.amount_cents), items: refundItemsView(row.items_json) })) });
 });
 router.post('/me/orders/:orderNo/hide', (req, res) => {
   const order = db.prepare('SELECT id, payment_status FROM orders WHERE order_no = ? AND payer_user_id = ?').get(req.params.orderNo, currentUserId(req));

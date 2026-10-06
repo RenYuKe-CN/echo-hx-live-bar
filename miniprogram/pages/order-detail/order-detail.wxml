@@ -1,0 +1,60 @@
+<view class="page">
+  <view wx:if="{{loading}}" class="loading">正在加载订单详情...</view>
+  <block wx:if="{{order}}">
+    <view class="hero">
+      <view class="hero-top"><text class="hero-label">订单状态</text><text class="status">{{order.statusLabel}}</text></view>
+      <text class="order-no">{{order.orderNo}}</text>
+      <text class="table">桌号 {{order.tableNo || '未记录'}}</text>
+    </view>
+
+    <view class="section">
+      <view class="section-title"><text>商品清单</text><text>{{order.items.length}} 项</text></view>
+      <view wx:for="{{order.items}}" wx:key="id" class="item">
+        <view class="item-image-wrap"><image wx:if="{{item.image}}" class="item-image" src="{{item.image}}" mode="aspectFill"/><view wx:else class="item-placeholder">{{item.initial}}</view></view>
+        <view class="item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">数量 × {{item.quantity}} · 单价 ¥{{item.paidPriceText}}</text><text wx:if="{{item.originalPriceText !== item.paidPriceText}}" class="item-original">原价 ¥{{item.originalPriceText}} / 件</text></view>
+        <view class="item-price"><text wx:if="{{item.originalSubtotalText !== item.paidSubtotalText}}" class="item-strike">¥{{item.originalSubtotalText}}</text><text class="item-total">¥{{item.paidSubtotalText}}</text></view>
+      </view>
+      <view wx:if="{{!order.items.length}}" class="empty-inline">暂无商品明细</view>
+    </view>
+
+    <view wx:if="{{order.canRefund}}" id="refund-panel" class="section refund-apply-section">
+      <view class="section-title"><text>申请退款</text><text>按商品选择数量</text></view>
+      <text class="refund-hint">请选择未送达商品和退款数量，系统会按照本单优惠后的实付金额自动计算退款金额。</text>
+      <view wx:for="{{order.items}}" wx:key="id" wx:if="{{item.refundSelectable}}" class="refund-item">
+        <view class="refund-item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">可退款 {{item.refundAvailableQuantity}} 件 · ¥{{item.paidPriceText}} / 件</text></view>
+        <view class="quantity-stepper"><button class="stepper-button" data-index="{{index}}" data-delta="-1" bindtap="changeRefundQuantity">−</button><text>{{item.refundQuantity}}</text><button class="stepper-button" data-index="{{index}}" data-delta="1" bindtap="changeRefundQuantity">＋</button></view>
+      </view>
+      <view class="refund-estimate"><text>预计退款</text><text>¥{{refundAmountText}}</text></view>
+      <button class="refund-submit" loading="{{submittingRefund}}" bindtap="submitRefund">提交退款申请</button>
+    </view>
+
+    <view class="section amount-section">
+      <view class="section-title"><text>金额明细</text></view>
+      <view class="amount-row"><text>商品原价</text><text>¥{{order.originalText}}</text></view>
+      <view wx:if="{{order.memberDiscountText !== '0.00'}}" class="amount-row discount"><text>会员优惠</text><text>-¥{{order.memberDiscountText}}</text></view>
+      <view wx:if="{{order.couponDiscountText !== '0.00'}}" class="amount-row discount"><text>优惠券优惠</text><text>-¥{{order.couponDiscountText}}</text></view>
+      <view class="amount-row total"><text>实付金额</text><text>¥{{order.payableText}}</text></view>
+    </view>
+
+    <view class="section">
+      <view class="section-title"><text>支付信息</text></view>
+      <view class="info-row"><text>支付方式</text><text>{{order.paymentMethodLabel}}</text></view>
+      <view wx:if="{{order.storedText !== '0.00'}}" class="info-row"><text>储值本金</text><text>¥{{order.storedText}}</text></view>
+      <view wx:if="{{order.bonusText !== '0.00'}}" class="info-row"><text>赠金</text><text>¥{{order.bonusText}}</text></view>
+      <view wx:if="{{order.wechatText !== '0.00'}}" class="info-row"><text>微信支付</text><text>¥{{order.wechatText}}</text></view>
+      <view class="info-row"><text>下单时间</text><text>{{order.createdAt}}</text></view>
+      <view wx:if="{{order.paidAt}}" class="info-row"><text>支付时间</text><text>{{order.paidAt}}</text></view>
+      <view wx:if="{{order.deliveredAt}}" class="info-row"><text>送达时间</text><text>{{order.deliveredAt}}</text></view>
+    </view>
+
+    <view wx:if="{{order.note}}" class="section note-section"><view class="section-title"><text>订单备注</text></view><text class="note">{{order.note}}</text></view>
+    <view wx:if="{{order.refundedText !== '0.00' || order.refundRequest || order.refundTransaction}}" class="section refund-section">
+      <view class="section-title"><text>退款信息</text></view>
+      <view wx:if="{{order.refundedText !== '0.00'}}" class="info-row"><text>已退款</text><text>¥{{order.refundedText}}</text></view>
+      <view wx:if="{{order.refundRequest}}" class="info-row"><text>退款申请</text><text>{{order.refundRequest.status === 'pending' ? '待审核' : order.refundRequest.status === 'approved' ? '已通过' : '已拒绝'}}</text></view>
+      <view wx:if="{{order.refundRequest && order.refundRequest.rejectReason}}" class="reason">拒绝原因：{{order.refundRequest.rejectReason}}</view>
+      <view wx:if="{{order.refundTransaction}}" class="info-row"><text>退款处理</text><text>{{order.refundTransaction.status === 'success' ? '退款成功' : order.refundTransaction.status === 'processing' ? '退款处理中' : order.refundTransaction.status === 'failed' ? '退款失败' : '退款待处理'}}</text></view>
+    </view>
+  </block>
+  <view wx:if="{{!loading && !order}}" class="empty">暂无订单详情</view>
+</view>

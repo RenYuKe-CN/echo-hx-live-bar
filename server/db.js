@@ -158,6 +158,7 @@ db.exec(`
     user_id INTEGER NOT NULL REFERENCES users(id),
     amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
     reason TEXT NOT NULL DEFAULT '',
+    items_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'pending',
     reject_reason TEXT NOT NULL DEFAULT '',
     reviewed_by INTEGER REFERENCES staff_accounts(id),
@@ -176,6 +177,7 @@ db.exec(`
     offline_cents INTEGER NOT NULL DEFAULT 0,
     out_refund_no TEXT NOT NULL UNIQUE,
     wechat_refund_id TEXT,
+    items_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'pending',
     reason TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -239,6 +241,8 @@ ensureColumn('orders', 'payment_error', "TEXT NOT NULL DEFAULT ''");
 ensureColumn('orders', 'hidden_by_user', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('orders', 'coupon_id', 'INTEGER REFERENCES user_coupons(id)');
 ensureColumn('orders', 'coupon_discount_cents', 'INTEGER NOT NULL DEFAULT 0');
+ensureColumn('refund_requests', 'items_json', "TEXT NOT NULL DEFAULT '[]'");
+ensureColumn('refund_transactions', 'items_json', "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('coupon_definitions', 'voucher_type', "TEXT NOT NULL DEFAULT 'discount'");
 ensureColumn('coupon_definitions', 'gift_product_id', 'INTEGER REFERENCES products(id)');
 db.prepare('UPDATE coupon_definitions SET allow_stack_member_discount = 1 WHERE allow_stack_member_discount = 0').run();
