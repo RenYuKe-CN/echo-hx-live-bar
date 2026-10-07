@@ -40,6 +40,8 @@ beforeEach(() => {
   process.env.WECHAT_PLATFORM_CERTIFICATE = keys.publicKey.export({ type: 'spki', format: 'pem' });
   process.env.WECHAT_PLATFORM_SERIAL = 'PUB_KEY_ID_123456';
   db.transaction(() => {
+    db.prepare('DELETE FROM mini_page_settings').run();
+    db.prepare("UPDATE stores SET name='Test Store' WHERE id=1").run();
     db.prepare('INSERT OR REPLACE INTO staff_sessions(token_hash,account_id,expires_at) VALUES(?,1,?)').run(hash(tokens.admin), new Date(Date.now() + 3600000).toISOString());
     for (const table of ['user_coupons', 'refund_transactions', 'refund_requests', 'inventory_logs', 'wallet_transactions', 'points_ledger', 'order_items', 'orders', 'cart_items', 'session_members', 'table_sessions', 'wechat_sessions', 'user_messages']) db.prepare(`DELETE FROM ${table}`).run();
     db.prepare("UPDATE users SET member_tier_id=NULL,member_level='普通会员',member_discount=1,member_expires_at=NULL,points=0").run();
@@ -62,6 +64,27 @@ async function call(url, { token = tokens.user, method = 'GET', body, headers = 
   const response = await nativeFetch(base + url, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers }, ...(body !== undefined ? { body: typeof body === 'string' ? body : JSON.stringify(body) } : {}) });
   return { status: response.status, body: raw ? await response.text() : await response.json() };
 }
+
+test('store name is centrally configurable and synchronized with public mini-program settings', async () => {
+  const initial = await call('/admin/mini-page', { token: tokens.admin });
+  assert.equal(initial.body.entries.find(entry => entry.key === 'app_name').title, 'Test Store');
+  const entries = initial.body.entries.map(entry => ({ ...entry, title: entry.key === 'app_name' ? '新店名 · LIVE & BAR' : entry.title }));
+  const updated = await call('/admin/mini-page', { token: tokens.admin, method: 'PUT', body: { entries } });
+  assert.equal(updated.status, 200);
+  assert.equal(db.prepare('SELECT name FROM stores WHERE id=1').get().name, '新店名 · LIVE & BAR');
+  const visible = await call('/mini-page', { token: null });
+  assert.equal(visible.body.entries.find(entry => entry.key === 'app_name').title, '新店名 · LIVE & BAR');
+  assert.equal(visible.body.entries.find(entry => entry.key === 'coupons').icon, 'ticket');
+});
+
+test('an empty or overlong store name cannot partially update page settings', async () => {
+  const initial = (await call('/admin/mini-page', { token: tokens.admin })).body.entries;
+  for (const name of ['  ', '长'.repeat(31)]) {
+    const entries = initial.map(entry => ({ ...entry, title: entry.key === 'app_name' ? name : entry.title }));
+    assert.equal((await call('/admin/mini-page', { token: tokens.admin, method: 'PUT', body: { entries } })).status, 400);
+    assert.equal(db.prepare('SELECT name FROM stores WHERE id=1').get().name, 'Test Store');
+  }
+});
 function addCart() { db.prepare('INSERT INTO cart_items(id,session_id,product_id,quantity,added_by_user_id) VALUES(1,1,1,1,1)').run(); }
 function makeOrder({ method = 'balance', status = 'awaiting_delivery', quantity = 2, stored = 6000, wechat = 0, bonus = 0 } = {}) {
   const total = quantity * 3000;

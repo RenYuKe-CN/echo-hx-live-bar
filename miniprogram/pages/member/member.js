@@ -1,9 +1,17 @@
 const api = require('../../utils/api');
 const subscription = require('../../utils/subscription');
+const branding = require('../../utils/branding');
+const { moneyText, iconPath } = require('../../utils/presentation');
 Page({
-  data: { user: {}, wallet: {}, membership: {}, entries: [], notices: {}, couponCount: 0, expiry: '', avatar: '', initial: '会', subscriptionPromptVisible: false, subscriptionPromptBusy: false },
+  data: { user: {}, wallet: {}, membership: {}, entries: [], primaryEntries: [], serviceEntries: [], notices: {}, couponCount: 0, expiry: '', avatar: '', initial: '会', ...branding.readSettings(), loading: true, loadError: '', avatarFailed: false, storedText: '—', bonusText: '—', pointsText: '—', subscriptionPromptVisible: false, subscriptionPromptBusy: false },
   onShow() {
-    Promise.all([api.request('/me'), api.request('/mini-page'), api.request('/me/notification-summary').catch(() => ({ couponCount: 0, pendingOrderCount: 0, unreadMessageCount: 0, storageCount: 0 })), api.request('/me/coupons').catch(() => null)]).then(([profile, page, notices, couponData]) => {
+    return this.load();
+  },
+  load() {
+    const version = this.loadVersion = (this.loadVersion || 0) + 1;
+    this.setData({ loading: true, loadError: '' });
+    return Promise.all([api.request('/me'), api.request('/mini-page'), api.request('/me/notification-summary').catch(() => this.data.notices), api.request('/me/coupons').catch(() => null)]).then(([profile, page, notices, couponData]) => {
+      if (version !== this.loadVersion) return;
       // Prefer the full list when it loaded successfully, but keep the
       // summary count during a transient list request failure so a coupon
       // badge does not disappear just because one request timed out.
@@ -15,7 +23,6 @@ Page({
       // read, so falling back to its old count can hide a usable coupon.
       const safeNotices = { ...notices, couponCount: availableCouponCount };
       const expiry = profile.user.memberExpiresAt;
-      const symbols = { gift: '礼', bottle: '酒', wallet: '¥', receipt: '单', star: '★', glass: '杯', card: '卡', bag: '兑' };
       const membership = profile.membership || {};
       membership.progressPercent = Math.round(Number(membership.progress || 0) * 100);
       const fallbackEntries = [
@@ -23,15 +30,16 @@ Page({
         { key: 'storage', title: '我的存酒', icon: 'bottle', type: 'entry' },
         { key: 'recharge', title: '会员充值', icon: 'wallet', type: 'entry' },
         { key: 'orders', title: '我的订单', icon: 'receipt', type: 'entry' },
-        { key: 'coupons', title: '我的券包', icon: 'gift', type: 'entry' },
-        { key: 'messages', title: '消息中心', icon: 'card', type: 'entry' }
+        { key: 'coupons', title: '我的券包', icon: 'ticket', type: 'entry' },
+        { key: 'messages', title: '消息中心', icon: 'bell', type: 'entry' }
       ];
       const configuredEntries = (page.entries || []).filter(item => item.type !== 'text');
       const entryMap = new Map(configuredEntries.map(item => [item.key, item]));
       fallbackEntries.forEach(item => { if (!entryMap.has(item.key)) entryMap.set(item.key, item); });
       const entries = [...entryMap.values()].map(item => ({
         ...item,
-        symbol: symbols[item.icon] || '会',
+        iconPath: iconPath(item.icon),
+        description: item.key === 'orders' ? '查看订单状态' : item.key === 'storage' ? '查看存酒记录' : '',
         badgeCount: item.key === 'orders'
           ? Number(safeNotices.pendingOrderCount || 0)
           : item.key === 'coupons'
@@ -42,12 +50,17 @@ Page({
                 ? Number(safeNotices.storageCount || 0)
                 : 0
       }));
-      this.setData({ user: profile.user, wallet: profile.wallet, membership, notices: safeNotices, couponCount: availableCouponCount, entries, expiry: expiry && profile.user.memberLevel !== '普通会员' ? expiry.slice(0, 10) : '', avatar: profile.user.avatarUrl ? api.imageUrl(profile.user.avatarUrl) : '', initial: (profile.user.nickname || '会').charAt(0) });
-      const pageEntries = Array.isArray(page.entries) ? page.entries : [];
-      wx.setNavigationBarTitle({ title: pageEntries.find(item => item.key === 'app_name')?.title || 'Echo HX Live Bar' });
+      const order = ['orders', 'storage', 'coupons', 'rewards', 'recharge', 'messages'];
+      entries.sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+      const storedText = moneyText(profile.wallet?.stored), bonusText = moneyText(profile.wallet?.bonus);
+      const avatar = profile.user.avatarUrl ? api.imageUrl(profile.user.avatarUrl) : '';
+      this.setData({ user: profile.user, wallet: profile.wallet, storedText, bonusText, storedLong: storedText.length > 8, bonusLong: bonusText.length > 8, pointsText: profile.user.points == null ? '—' : String(profile.user.points), membership, notices: safeNotices, couponCount: availableCouponCount, entries, primaryEntries: entries.filter(item => ['orders', 'storage'].includes(item.key)), serviceEntries: entries.filter(item => !['orders', 'storage'].includes(item.key)), expiry: expiry && profile.user.memberLevel !== '普通会员' ? expiry.slice(0, 10).replace(/-/g, '.') : '', avatarFailed: avatar !== this.data.avatar ? false : this.data.avatarFailed, avatar, initial: (profile.user.nickname || '会').charAt(0) });
+      branding.applySettings(this, page);
       this.maybePromptSubscription(profile.user.id);
-    }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
+    }).catch(error => { if (version === this.loadVersion) this.setData({ loadError: error.message || '会员信息暂时不可用' }); })
+      .finally(() => { if (version === this.loadVersion) this.setData({ loading: false }); });
   },
+  onAvatarError() { this.setData({ avatarFailed: true }); },
   maybePromptSubscription(userId) {
     if (subscription.hasShownPrompt(userId)) return;
     subscription.loadTemplates().then(templates => subscription.getSubscriptionSettings().then(settings => ({ templates, settings }))).then(({ templates, settings }) => {

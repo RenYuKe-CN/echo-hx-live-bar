@@ -1,1 +1,41 @@
-{ "pages": ["pages/menu/menu", "pages/member/member", "pages/member-tiers/member-tiers", "pages/profile/profile", "pages/cart/cart", "pages/order/order", "pages/order-detail/order-detail", "pages/coupons/coupons", "pages/messages/messages", "pages/storage/storage", "pages/rewards/rewards", "pages/recharge/recharge"], "window": { "navigationBarTitleText": "Echo HX Live Bar", "navigationBarBackgroundColor": "#17262c", "navigationBarTextStyle": "white" }, "tabBar": { "color": "#899497", "selectedColor": "#c77f52", "list": [{ "pagePath": "pages/menu/menu", "text": "点单" }, { "pagePath": "pages/member/member", "text": "会员" }] } }
+{
+  "pages": [
+    "pages/menu/menu",
+    "pages/member/member",
+    "pages/member-tiers/member-tiers",
+    "pages/profile/profile",
+    "pages/cart/cart",
+    "pages/order/order",
+    "pages/order-detail/order-detail",
+    "pages/coupons/coupons",
+    "pages/messages/messages",
+    "pages/storage/storage",
+    "pages/rewards/rewards",
+    "pages/recharge/recharge"
+  ],
+  "window": {
+    "navigationBarTitleText": "店铺点单",
+    "navigationBarBackgroundColor": "#f7f4ee",
+    "navigationBarTextStyle": "black"
+  },
+  "tabBar": {
+    "color": "#78867d",
+    "selectedColor": "#193432",
+    "list": [
+      {
+        "pagePath": "pages/menu/menu",
+        "text": "点单",
+        "iconPath": "assets/icons/glass-muted.png",
+        "selectedIconPath": "assets/icons/glass-green.png"
+      },
+      {
+        "pagePath": "pages/member/member",
+        "text": "会员",
+        "iconPath": "assets/icons/user-muted.png",
+        "selectedIconPath": "assets/icons/user-green.png"
+      }
+    ],
+    "backgroundColor": "#fffefa",
+    "borderStyle": "white"
+  }
+}

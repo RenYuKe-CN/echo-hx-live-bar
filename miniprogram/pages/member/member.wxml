@@ -1,1 +1,31 @@
-<view class="page"><view class="profile"><view class="profile-top"><view class="identity"><image wx:if="{{avatar}}" class="avatar" src="{{avatar}}" mode="aspectFill"/><view wx:else class="avatar fallback">{{initial}}</view><view><text class="name">{{user.nickname || '顾客'}}</text><view class="badge-row" bindtap="openTierRules"><text class="badge" style="background: {{user.memberColor || '#C77F52'}}">{{user.memberLevel || '普通会员'}}</text><text class="badge-arrow">查看等级权益 ›</text></view><text wx:if="{{expiry}}" class="expiry">有效期至 {{expiry}}</text></view></view><button class="profile-settings" bindtap="openProfile">资料设置</button></view><view class="balances"><view><text>储值余额</text><text class="balance-value">¥{{wallet.stored || '0.00'}}</text></view><view><text>赠金</text><text class="balance-value">¥{{wallet.bonus || '0.00'}}</text></view><view><text>积分</text><text class="balance-value">{{user.points || 0}}</text></view></view></view><view wx:if="{{subscriptionPromptVisible}}" class="subscription-prompt"><view class="subscription-copy"><text class="subscription-title">开启消息提醒</text><text class="subscription-hint">订单、优惠券和活动消息会及时通知你</text></view><button class="subscription-later" bindtap="postponeSubscription">暂不</button><button class="subscription-enable" bindtap="enableSubscription" loading="{{subscriptionPromptBusy}}">开启提醒</button></view><view class="entry-grid"><view wx:for="{{entries}}" wx:key="key" class="entry" data-key="{{item.key}}" bindtap="open"><view class="entry-icon icon-{{item.icon}}">{{item.symbol}}<text wx:if="{{item.badgeCount}}" class="entry-count">{{item.badgeCount > 99 ? '99+' : item.badgeCount}}</text></view><text>{{item.title}}</text></view></view></view>
+<view class="member-page">
+  <text class="page-title">我的会员</text>
+  <view wx:if="{{loading && !user.id}}" class="profile-skeleton"><view/><view/><view/></view>
+  <view wx:elif="{{loadError && !user.id}}" class="member-state"><image src="/assets/icons/info-muted.png" mode="aspectFit"/><text class="state-title">会员信息暂时未能加载</text><text class="state-copy">{{loadError}}</text><button bindtap="load">重新加载</button></view>
+  <view wx:else class="membership-card">
+    <view class="card-lines"><view/><view/><view/></view>
+    <text class="card-brand">{{appName}}</text>
+    <view class="profile-top">
+      <view class="identity">
+        <image wx:if="{{avatar && !avatarFailed}}" class="avatar" src="{{avatar}}" mode="aspectFill" binderror="onAvatarError"/>
+        <view wx:else class="avatar avatar-fallback">{{initial}}</view>
+        <view class="identity-copy"><text class="member-name">{{user.nickname || '顾客'}}</text><view class="member-level"><image src="/assets/icons/crown-gold.png" mode="aspectFit"/><view class="tier-color" style="background:{{user.memberColor || '#debd8c'}}"/><text>{{user.memberLevel || '普通会员'}}</text></view><text wx:if="{{expiry}}" class="member-expiry">有效期至 {{expiry}}</text></view>
+      </view>
+      <button class="profile-settings" bindtap="openProfile"><image src="/assets/icons/settings-gold.png" mode="aspectFit"/><text>资料设置</text></button>
+    </view>
+    <view class="account-metrics">
+      <view class="account-metric"><text class="metric-label">储值余额</text><text class="metric-value {{storedLong ? 'metric-long' : ''}}">{{storedText === '—' ? '—' : '¥' + storedText}}</text></view>
+      <view class="account-metric"><text class="metric-label">赠金</text><text class="metric-value {{bonusLong ? 'metric-long' : ''}}">{{bonusText === '—' ? '—' : '¥' + bonusText}}</text></view>
+      <view class="account-metric"><text class="metric-label">积分</text><text class="metric-value {{pointsText.length > 8 ? 'metric-long' : ''}}">{{pointsText}}</text></view>
+    </view>
+    <button class="tier-link" bindtap="openTierRules"><text>查看等级权益</text><text class="chevron">›</text></button>
+  </view>
+  <view wx:if="{{loadError && user.id}}" class="refresh-error"><text>{{loadError}}</text><button bindtap="load">重试</button></view>
+  <block wx:if="{{entries.length}}">
+    <text class="section-title">常用服务</text>
+    <view class="primary-services"><button wx:for="{{primaryEntries}}" wx:key="key" class="primary-service" data-key="{{item.key}}" bindtap="open"><view class="service-icon"><image src="{{item.iconPath}}" mode="aspectFit"/><text wx:if="{{item.badgeCount}}" class="entry-count">{{item.badgeCount > 99 ? '99+' : item.badgeCount}}</text></view><view class="primary-copy"><text class="service-title">{{item.title}}</text><text class="service-description">{{item.description}}</text></view><text class="service-chevron">›</text></button></view>
+    <view class="service-grid"><button wx:for="{{serviceEntries}}" wx:key="key" class="service-entry" data-key="{{item.key}}" bindtap="open"><view class="service-icon"><image src="{{item.iconPath}}" mode="aspectFit"/><text wx:if="{{item.badgeCount}}" class="entry-count">{{item.badgeCount > 99 ? '99+' : item.badgeCount}}</text></view><text class="service-title">{{item.title}}</text><text class="service-chevron">›</text></button></view>
+    <view class="recharge-hint"><image src="/assets/icons/info-muted.png" mode="aspectFit"/><text>充值请到收银处办理</text></view>
+  </block>
+  <view wx:if="{{subscriptionPromptVisible}}" class="subscription-prompt"><view class="subscription-copy"><text class="subscription-title">开启消息提醒</text><text class="subscription-hint">及时接收订单、优惠券和活动消息</text></view><view class="subscription-actions"><button class="subscription-later" bindtap="postponeSubscription">暂不</button><button class="subscription-enable" bindtap="enableSubscription" loading="{{subscriptionPromptBusy}}">开启提醒</button></view></view>
+</view>

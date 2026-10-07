@@ -15,6 +15,7 @@ import { beginRestore, endRestore, withBackgroundTask } from './maintenance.js';
 import { walletBalance, debitAvailableWallet, debitReservedWallet } from './wallet.js';
 import { parseRefundItems, returnOrderStock, orderCostSql } from './refund-stock.js';
 import { validateWechatPayment, validateWechatRefund } from './payment-validation.js';
+import { storeName } from './branding.js';
 
 export const router = Router();
 const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
@@ -738,7 +739,7 @@ router.get('/runtime-config', (_req, res) => {
   if (!apiBaseUrl || (!/^https:\/\//i.test(apiBaseUrl) && !(process.env.NODE_ENV !== 'production' && isLocal))) {
     return res.status(503).json({ message: process.env.NODE_ENV === 'production' ? '小程序 API 地址尚未配置为 HTTPS' : '小程序 API 地址尚未配置；开发环境可使用 http://localhost:3001/api，正式环境必须使用 HTTPS' });
   }
-  res.json({ apiBaseUrl: apiBaseUrl.replace(/\/$/, '') });
+  res.json({ apiBaseUrl: apiBaseUrl.replace(/\/$/, ''), storeName: storeName() });
 });
 
 router.use('/sessions', requireWechatUser);
@@ -1985,20 +1986,21 @@ router.post('/me/phone', async (req, res) => {
   } catch (error) { res.status(error.code === 'SQLITE_CONSTRAINT_UNIQUE' ? 409 : error.status || 502).json({ message: error.code === 'SQLITE_CONSTRAINT_UNIQUE' ? '此手机号已绑定其他会员' : error.message, code: error.code || 'WECHAT_PHONE_ERROR' }); }
 });
 const miniEntries = {
-  app_name: { title: 'Echo HX Live Bar', type: 'text' },
+  app_name: { title: '', type: 'text' },
   home_title: { title: '今晚喝点什么？', type: 'text' },
   rewards: { title: '兑换中心', icon: 'gift', type: 'entry' },
   storage: { title: '我的存酒', icon: 'bottle', type: 'entry' },
   recharge: { title: '会员充值', icon: 'wallet', type: 'entry' },
   orders: { title: '我的订单', icon: 'receipt', type: 'entry' },
-  coupons: { title: '我的券包', icon: 'gift', type: 'entry' },
-  messages: { title: '消息中心', icon: 'card', type: 'entry' }
+  coupons: { title: '我的券包', icon: 'ticket', type: 'entry' },
+  messages: { title: '消息中心', icon: 'bell', type: 'entry' }
 };
-const miniIcons = ['gift','bottle','wallet','receipt','star','glass','card','bag'];
-router.get('/mini-page', (_req, res) => {
+const miniIcons = ['gift','bottle','wallet','receipt','star','glass','card','bag','ticket','bell'];
+function miniPageEntries() {
   const saved = Object.fromEntries(db.prepare('SELECT * FROM mini_page_settings').all().map(row => [row.key, row]));
-  res.json({ entries: Object.entries(miniEntries).map(([key, defaults]) => ({ key, title: saved[key]?.title || defaults.title, icon: saved[key]?.icon || defaults.icon, type: defaults.type })) });
-});
+  return Object.entries(miniEntries).map(([key, defaults]) => ({ key, title: key === 'app_name' ? storeName() : saved[key]?.title || defaults.title, icon: saved[key]?.icon || defaults.icon, type: defaults.type }));
+}
+router.get('/mini-page', (_req, res) => res.json({ entries: miniPageEntries() }));
 router.get('/wallet-packages', (_req, res) => res.json({ packages: db.prepare("SELECT id, name, pay_cents, stored_cents, bonus_cents FROM wallet_packages WHERE status = 'active' ORDER BY pay_cents").all().map(row => ({ id: row.id, name: row.name, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })) }));
 const rewardQuery = 'SELECT r.*, p.image_url AS product_image, p.name AS product_name FROM reward_items r LEFT JOIN products p ON p.id = r.product_id';
 const rewardView = row => ({ ...row, imageUrl: row.image_url || row.product_image || '', name: row.product_id ? row.product_name : row.name });
@@ -2202,7 +2204,7 @@ router.patch('/admin/rewards/:id', (req, res) => {
   db.prepare('UPDATE reward_items SET product_id = ?, name = ?, image_url = ?, points = ?, stock = ?, status = ? WHERE id = ?').run(item.productId, item.name, item.imageUrl, item.points, item.stock, item.status, current.id);
   audit(req, '修改积分奖品', item.name); res.json({ ok: true });
 });
-router.get('/admin/mini-page', (_req, res) => res.json({ entries: Object.entries(miniEntries).map(([key, defaults]) => ({ key, ...defaults, ...db.prepare('SELECT title, icon FROM mini_page_settings WHERE key = ?').get(key) })), icons: miniIcons }));
+router.get('/admin/mini-page', (_req, res) => res.json({ entries: miniPageEntries(), icons: miniIcons }));
 router.put('/admin/mini-page', (req, res) => {
   if (req.staff.role !== 'super') return res.status(403).json({ message: '仅超级管理员可修改小程序页面' });
   const entries = req.body?.entries;
@@ -2212,7 +2214,11 @@ router.put('/admin/mini-page', (req, res) => {
     return definition && title && title.length <= (definition.type === 'text' ? 30 : 8) && (definition.type === 'text' || miniIcons.includes(item.icon));
   });
   if (!valid) return res.status(400).json({ message: '小程序名称、首页标题或页面入口配置无效' });
-  db.transaction(() => { for (const item of entries) db.prepare('INSERT INTO mini_page_settings (key, title, icon) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET title = excluded.title, icon = excluded.icon').run(item.key, item.title.trim(), item.icon || miniEntries[item.key].icon || ''); audit(req, '修改小程序页面', entries.map(item => item.title).join('、')); })();
+  db.transaction(() => {
+    for (const item of entries) db.prepare('INSERT INTO mini_page_settings (key, title, icon) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET title = excluded.title, icon = excluded.icon').run(item.key, item.title.trim(), item.icon || miniEntries[item.key].icon || '');
+    db.prepare('UPDATE stores SET name = ? WHERE id = 1').run(entries.find(item => item.key === 'app_name').title.trim());
+    audit(req, '修改小程序页面', entries.map(item => item.title).join('、'));
+  })();
   res.json({ ok: true });
 });
 router.post('/admin/wallet-packages', (req, res) => { const r = db.prepare('INSERT INTO wallet_packages (store_id, name, pay_cents, stored_cents, bonus_cents, allow_bonus) VALUES (1, ?, ?, ?, ?, ?)').run(req.body.name, Math.round(Number(req.body.pay || 0) * 100), Math.round(Number(req.body.stored || 0) * 100), Math.round(Number(req.body.bonus || 0) * 100), req.body.allowBonus ? 1 : 0); audit(req, '新增储值套餐', req.body.name); res.status(201).json({ package: db.prepare('SELECT * FROM wallet_packages WHERE id = ?').get(r.lastInsertRowid) }); });

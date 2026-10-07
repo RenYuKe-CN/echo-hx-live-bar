@@ -1,7 +1,8 @@
 const api = require('../../utils/api');
+const branding = require('../../utils/branding');
 
 Page({
-  data: { avatarPath: '', avatarUrl: '', nickname: '', phone: '', birthdayType: '', birthdayTypeIndex: 0, birthdayTypes: ['不设置', '阳历', '农历'], birthdayDate: '', birthdayLocked: false, solarBirthday: '2000-01-01', lunarMonth: '1', lunarDay: '1', lunarMonthIndex: 0, lunarDayIndex: 0, lunarMonths: Array.from({ length: 12 }, (_, index) => String(index + 1)), lunarDays: Array.from({ length: 30 }, (_, index) => String(index + 1)), busy: false, error: '', profileSaved: false },
+  data: { avatarPath: '', avatarUrl: '', nickname: '', phone: '', ...branding.readSettings(), birthdayType: '', birthdayTypeIndex: 0, birthdayTypes: ['不设置', '阳历', '农历'], birthdayDate: '', birthdayLocked: false, solarBirthday: '2000-01-01', lunarMonth: '1', lunarDay: '1', lunarMonthIndex: 0, lunarDayIndex: 0, lunarMonths: Array.from({ length: 12 }, (_, index) => String(index + 1)), lunarDays: Array.from({ length: 30 }, (_, index) => String(index + 1)), busy: false, error: '', profileSaved: false },
   onLoad() {
     Promise.resolve(getApp().apiReady).then(() => api.request('/me')).then(({ user }) => {
       const birthdayType = user.birthdayType || '';
@@ -9,6 +10,9 @@ Page({
       const [birthdayMonth = '01', birthdayDay = '01'] = birthdayDate.split('-');
       this.setData({ nickname: user.nickname === '微信用户' ? '' : user.nickname, avatarUrl: user.avatarUrl || '', avatarPath: api.imageUrl(user.avatarUrl || ''), phone: user.phone || '', birthdayType, birthdayTypeIndex: ['', 'solar', 'lunar'].indexOf(birthdayType), birthdayDate, birthdayLocked: Boolean(birthdayType && birthdayDate), solarBirthday: `2000-${birthdayMonth}-${birthdayDay}`, lunarMonth: String(Number(birthdayMonth) || 1), lunarDay: String(Number(birthdayDay) || 1), lunarMonthIndex: (Number(birthdayMonth) || 1) - 1, lunarDayIndex: (Number(birthdayDay) || 1) - 1, profileSaved: Boolean(user.avatarUrl && user.nickname && user.nickname !== '微信用户') });
     }).catch(error => this.setData({ error: error.message }));
+  },
+  onShow() {
+    return api.request('/mini-page').then(configuration => this.setData(branding.saveSettings(configuration))).catch(() => this.setData(branding.readSettings()));
   },
   onChooseAvatar(e) {
     if (e.detail.avatarUrl) this.setData({ avatarPath: e.detail.avatarUrl, avatarUrl: '', profileSaved: false, error: '' });
