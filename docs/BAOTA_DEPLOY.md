@@ -17,7 +17,7 @@
 3. Git
 4. SQLite 数据库由 Node.js 依赖直接读写，不需要额外安装 `sqlite3` 命令行工具
 
-在 Node.js 版本管理器中安装并启用 **Node.js 20 LTS 或 22 LTS**。本项目要求 Node.js 20 及以上，Node.js 12、14、16、18 都不能使用。
+在 Node.js 版本管理器中安装并启用 **Node.js 22 或 24**。本项目当前 SQLite 依赖要求 Node.js 22 及以上，Node.js 20 及更旧版本不能使用。
 
 服务器需要一个已经解析到服务器 IP 的域名，并开放 80、443 端口。API 的 3001 端口只允许本机访问，不需要对公网开放。
 
@@ -84,7 +84,7 @@ MINIPROGRAM_API_BASE_URL=https://你的域名/api
 | 项目名称 | `echo-hx-live-bar-api` |
 | 项目路径 | `/www/wwwroot/echo-hx-live-bar` |
 | 启动文件 | `server/index.js` |
-| Node 版本 | 20 或 22 |
+| Node 版本 | 22 或 24 |
 | 端口 | `3001` |
 | 运行用户 | 通常为 `www` |
 
@@ -94,7 +94,7 @@ MINIPROGRAM_API_BASE_URL=https://你的域名/api
 node --env-file=.env server/index.js
 ```
 
-如果面板不支持 `--env-file`，就在 Node 项目的“环境变量”中逐项填写 `.env` 内容，启动文件仍填 `server/index.js`。
+服务启动时会自动读取项目根目录的 `.env`，无需面板支持 `--env-file`。面板中明确设置的环境变量优先于文件；启动文件仍填 `server/index.js`。
 
 点击启动后，在宝塔终端检查 API：
 
@@ -261,6 +261,8 @@ https://你的域名/admin
 https://你的域名/api/payments/wechat/notify
 ```
 
+退款回调为 `https://你的域名/api/payments/wechat/refund/notify`。`WECHAT_REFUND_NOTIFY_URL` 留空时会从支付回调地址推导；使用微信支付 PEM 公钥时，还须填写该公钥对应的 `WECHAT_PLATFORM_SERIAL`（`PUB_KEY_ID_` 开头），使用平台 X.509 证书时会自动解析序列号。
+
 美团、抖音核销也必须在后台填写对应平台分配的正式应用信息，并按照平台后台要求配置回调或白名单。
 
 ## 九、日常更新：只需要一条命令
@@ -336,7 +338,7 @@ cd /www/wwwroot/echo-hx-live-bar && bash scripts/backup.sh >> logs/backup.log 2>
 
 ### `vite: command not found`
 
-通常是没有安装开发依赖，或使用了错误的 Node/npm 环境。确认 Node.js 为 20 或 22，然后执行：
+通常是没有安装开发依赖，或使用了错误的 Node/npm 环境。确认 Node.js 为 22 或 24，然后执行：
 
 ```bash
 cd /www/wwwroot/echo-hx-live-bar
@@ -361,7 +363,7 @@ npm ci --include=dev
 
 ### `Unexpected token '||='`
 
-运行的仍是旧 Node.js。切换宝塔 Node.js 版本到 20 或 22，并确认终端和 Node 项目管理器使用的是同一个版本。
+运行的仍是旧 Node.js。切换宝塔 Node.js 版本到 22 或 24，并确认终端和 Node 项目管理器使用的是同一个版本。
 
 ### 更新提示“更新仅支持 main 分支”
 
@@ -405,7 +407,7 @@ curl -i https://你的域名/api/health
 
 ## 十二、上线检查清单
 
-- [ ] Node 项目使用 Node.js 20 或 22
+- [ ] Node 项目使用 Node.js 22 或 24
 - [ ] `https://你的域名/api/health` 返回 JSON
 - [ ] `/admin` 可以登录并已修改初始密码
 - [ ] 商品图片上传、库存和自动下架正常

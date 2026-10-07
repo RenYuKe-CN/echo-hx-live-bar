@@ -2,6 +2,21 @@ let maintenance = false;
 let activeRequests = 0;
 let waiters = [];
 
+function finishWork() {
+  activeRequests -= 1;
+  if (activeRequests <= (maintenance ? 1 : 0)) {
+    for (const resolve of waiters) resolve();
+    waiters = [];
+  }
+}
+
+export async function withBackgroundTask(task) {
+  if (maintenance) return;
+  activeRequests += 1;
+  try { return await task(); }
+  finally { finishWork(); }
+}
+
 export function trackApiRequest(req, res, next) {
   if (maintenance) return res.status(503).json({ message: '系统正在恢复备份，请稍后重试' });
   activeRequests += 1;
@@ -9,11 +24,7 @@ export function trackApiRequest(req, res, next) {
   const done = () => {
     if (finished) return;
     finished = true;
-    activeRequests -= 1;
-    if (activeRequests <= (maintenance ? 1 : 0)) {
-      for (const resolve of waiters) resolve();
-      waiters = [];
-    }
+    finishWork();
   };
   res.once('finish', done);
   res.once('close', done);

@@ -1,24 +1,12 @@
-import express from 'express';
-import './db.js';
-import { router } from './routes.js';
+import { createApp } from './app.js';
+import { startBusinessSchedulers } from './routes.js';
 import { startBackupScheduler } from './backup.js';
-import { trackApiRequest } from './maintenance.js';
 
-const app = express();
+const app = createApp();
 const port = process.env.PORT || 3001;
 const host = process.env.HOST || '127.0.0.1';
 
-app.use(express.json({ verify: (req, _res, buffer) => { req.rawBody = buffer.toString('utf8'); } }));
-app.use('/api', trackApiRequest, router);
-
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'echo-hx-live-bar-api', time: new Date().toISOString() });
-});
-
-app.get('/api/dashboard/summary', (_req, res) => {
-  res.json({ todayRevenue: 28460, activeOrders: 12, tableUsage: 72.3, membersAdded: 248 });
-});
-
+const stopBusinessSchedulers = startBusinessSchedulers();
 const server = app.listen(port, host, () => {
   console.log(`Echo HX API listening on http://${host}:${port}`);
   startBackupScheduler();
@@ -26,6 +14,7 @@ const server = app.listen(port, host, () => {
 
 const shutdown = signal => {
   console.log(`${signal}: shutting down`);
+  stopBusinessSchedulers();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10000).unref();
 };

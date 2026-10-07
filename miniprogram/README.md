@@ -8,7 +8,7 @@
 
 如果打开的是上一级项目目录，也可以使用项目根目录的 `project.config.json`，两种打开方式都已配置。
 
-开发 API 地址默认使用 `http://localhost:3001/api`。电脑端预览请在微信开发者工具中关闭“校验合法域名、web-view（业务域名）、TLS 版本以及 HTTPS 证书”；真机调试需要改为可访问的 HTTPS 域名，并在正式发布前配置 request 合法域名。小程序启动时会优先读取后台的 `public_api_base_url`，配置不可用时在开发环境回退到本机 API。
+当前引导 API 地址为 `https://www.9bar.cn/api`；连接本地测试服务时，先将 `utils/api.js` 中的 `BOOTSTRAP_API_URL` 改为 `http://localhost:3001/api`，发布前恢复正式 HTTPS 地址。电脑端预览请在微信开发者工具中关闭“校验合法域名、web-view（业务域名）、TLS 版本以及 HTTPS 证书”；真机调试需要可访问的 HTTPS 域名，并在正式发布前配置 request 合法域名。小程序启动时会从引导 API 读取后台的 `public_api_base_url`；读取失败时回退到引导地址。
 
 微信登录流程已经接通：小程序调用 `wx.login` 获取临时 `code`，后端使用超级管理员后台配置的 AppID/AppSecret 调用微信 `jscode2session` 换取 openid，再创建登录会话。若登录失败，小程序会显示微信接口返回的错误信息，不会静默使用演示用户。
 
@@ -26,4 +26,4 @@
 
 如果返回 `40013`，通常是 AppID 或 AppSecret 不匹配；返回 `40029` 是 code 无效或重复使用；如果请求失败，则检查 API 服务、开发者工具合法域名校验和 `http://localhost:3001/api/health`。
 
-当前支付按钮会创建待支付订单并返回微信支付适配层提示，不会伪造支付成功。真实微信支付需要补充商户号、AppID、API v3 密钥、证书和 HTTPS 回调。
+支付按钮会创建待支付订单并调起微信支付，收到客户端成功回调后仍会查询服务端状态，确认到账才显示“支付成功”；暂未确认时显示“支付状态核对中”。真实微信支付须配置商户号、AppID、API v3 密钥、私钥、平台证书或公钥及 HTTPS 回调，并完成商户环境联调。使用公钥时须同时设置对应的 `WECHAT_PLATFORM_SERIAL`（`PUB_KEY_ID_` 开头）。

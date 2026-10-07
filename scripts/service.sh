@@ -4,15 +4,12 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PID_FILE="$ROOT_DIR/data/echo-hx-api.pid"
 LOG_FILE="$ROOT_DIR/logs/api.log"
-ENV_FILE="$ROOT_DIR/.env"
-
-load_env() { [[ -f "$ENV_FILE" ]] && set -a && source "$ENV_FILE" && set +a; }
 status() { [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
 start() {
   if status; then echo "服务已运行，PID $(cat "$PID_FILE")"; return; fi
   mkdir -p "$ROOT_DIR/data" "$ROOT_DIR/logs"
-  load_env
   cd "$ROOT_DIR"
+  node scripts/check-node.mjs
   nohup node server/index.js >>"$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   sleep 1

@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
-    "dev": "concurrently \"vite --host 0.0.0.0\" \"node server/index.js\"",
+    "dev": "concurrently \"vite --host 0.0.0.0\" \"node scripts/dev-server.mjs\"",
     "build": "vite build",
     "prestart": "node scripts/check-node.mjs",
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "test": "node --test"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

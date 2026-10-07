@@ -17,6 +17,7 @@ export const integrationDefinitions = {
   wechat_notify_url: { label: '微信支付回调地址', group: 'wechatPay', required: true, secret: false, env: 'WECHAT_NOTIFY_URL' },
   wechat_refund_notify_url: { label: '微信退款回调地址（https://域名/api/payments/wechat/refund/notify）', group: 'wechatPay', required: false, secret: false, env: 'WECHAT_REFUND_NOTIFY_URL' },
   wechat_platform_certificate: { label: '微信支付平台证书或公钥', group: 'wechatPay', required: true, secret: true, env: 'WECHAT_PLATFORM_CERTIFICATE' },
+  wechat_platform_serial: { label: '微信支付公钥 ID（使用公钥时必填，PUB_KEY_ID_ 开头）', group: 'wechatPay', required: false, secret: false, env: 'WECHAT_PLATFORM_SERIAL' },
   meituan_client_id: { label: '美团客户端 ID', group: 'meituan', required: true, secret: false, env: 'MEITUAN_CLIENT_ID' },
   meituan_client_secret: { label: '美团客户端密钥', group: 'meituan', required: true, secret: true, env: 'MEITUAN_CLIENT_SECRET' },
   douyin_client_key: { label: '抖音客户端 Key', group: 'douyin', required: true, secret: false, env: 'DOUYIN_CLIENT_KEY' },
@@ -52,6 +53,10 @@ export function getIntegrationStatus() {
     if (definition.required && !values[key]) { group.configured = false; group.missing.push(key); }
   }
   const storage = groups.storage || (groups.storage = { configured: true, missing: [], label: 'storage' });
+  if (/BEGIN (?:RSA )?PUBLIC KEY/.test(values.wechat_platform_certificate) && !values.wechat_platform_serial) {
+    groups.wechatPay.configured = false;
+    groups.wechatPay.missing.push('wechat_platform_serial');
+  }
   if (values.storage_provider && values.storage_provider !== 'local') {
     for (const key of ['storage_endpoint', 'storage_region', 'storage_bucket', 'storage_access_key', 'storage_secret_key']) {
       if (!values[key]) { storage.configured = false; storage.missing.push(key); }

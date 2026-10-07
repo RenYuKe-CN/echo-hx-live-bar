@@ -58,7 +58,7 @@ Page({
       const now = Date.now();
       this.setData({ orders: data.orders.map(item => ({
         ...item,
-        fulfillmentLabel: item.status === 'completed' ? '已送达' : item.paymentStatusLabel === '已支付' ? '待送达' : item.paymentStatusLabel,
+        fulfillmentLabel: item.status === 'refunded' ? '已退款' : item.status === 'completed' ? '已送达' : item.paymentStatusLabel === '已支付' ? '待送达' : item.paymentStatusLabel,
         payableText: Number(item.payableAmount).toFixed(2),
         discountText: Number(item.discountAmount).toFixed(2),
         memberDiscountText: Number(item.memberDiscount || 0).toFixed(2),
@@ -100,16 +100,11 @@ Page({
     const orderNo = event.currentTarget.dataset.orderNo;
     if (!orderNo || this.data.busyOrderNo) return;
     this.setData({ busyOrderNo: orderNo });
-    api.request(`/me/orders/${encodeURIComponent(orderNo)}/pay`, { method: 'POST' }).then(data => {
+    api.request(`/me/orders/${encodeURIComponent(orderNo)}/pay`, { method: 'POST' }).then(async data => {
       if (!data.payment) return this.loadOrders();
-      wx.requestPayment({
-        ...data.payment,
-        success: () => {
-          wx.showToast({ title: '支付成功', icon: 'success' });
-          this.loadOrders();
-        },
-        fail: error => wx.showToast({ title: error.errMsg?.includes('cancel') ? '已取消支付' : '支付未完成', icon: 'none' })
-      });
+      const confirmed = await api.payWithWechat(data.payment, orderNo);
+      wx.showToast({ title: confirmed ? '支付成功' : '支付状态核对中', icon: confirmed ? 'success' : 'none' });
+      return this.loadOrders();
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ busyOrderNo: '' }));
   },
 

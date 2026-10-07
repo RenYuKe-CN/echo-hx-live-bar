@@ -80,7 +80,7 @@ data/            运行时数据库、上传图片和备份（不提交 Git）
 dist/            npm run build 生成的网页静态资源（不上传微信）
 ```
 
-需要 Node.js **20 或 22**（项目要求 Node.js 20+）、npm、Git；服务器建议使用 Nginx 和 HTTPS。生产环境只让 Nginx 对外提供 443，API 默认监听 `127.0.0.1:3001`；Node 进程必须拥有 `data/` 的读写权限。
+需要 Node.js **22 或 24**（当前 SQLite 依赖要求 Node.js 22+）、npm、Git；服务器建议使用 Nginx 和 HTTPS。生产环境只让 Nginx 对外提供 443，API 默认监听 `127.0.0.1:3001`；Node 进程必须拥有 `data/` 的读写权限。
 
 ### 本地开发
 
@@ -92,13 +92,17 @@ npm run dev
 
 默认预览地址：顾客网页 `http://localhost:5173/`，后台 `http://localhost:5173/admin`，健康检查 `http://127.0.0.1:3001/api/health`。本地预览不等于微信开发者工具真机环境；小程序请按 [小程序说明](miniprogram/README.md) 导入 `miniprogram/` 并配置合法域名。
 
+API 启动会自动读取项目根目录的 `.env`，进程管理器传入的同名变量优先；可用 `ECHO_ENV_FILE` 指定其他配置文件。`npm run dev` 明确使用开发模式，`npm start` 和直接运行 `server/index.js` 使用文件或进程提供的 `NODE_ENV`。
+
+运行 `npm test` 可验证支付回调、冻结余额、桌台权限、退款回库、报表、小程序登录恢复及旧备份升级。GitHub Actions 在 Node.js 22 和 24 上执行这些测试及前端构建；测试使用临时数据库和模拟微信响应，不访问真实商户。
+
 ### 宝塔部署（推荐）
 
 完整操作和 Nginx 配置见 [宝塔面板部署教程](docs/BAOTA_DEPLOY.md)。最短路径：
 
-1. 宝塔安装 Node.js 20/22、Nginx、Git，配置域名解析和 HTTPS。
+1. 宝塔安装 Node.js 22/24、Nginx、Git，配置域名解析和 HTTPS。
 2. 克隆仓库到 `/www/wwwroot/echo-hx-live-bar`，在项目目录运行 `bash scripts/manage.sh install`；它会检查 Node、安装锁定依赖、创建未存在的 `.env` 并构建 `dist/`。
-3. 配置 `.env`；宝塔“Node 项目”以项目根目录为工作目录运行 `server/index.js`，确保传入 `.env` 环境变量，监听 3001；**只使用宝塔托管这一套进程**。
+3. 配置 `.env`；宝塔“Node 项目”以项目根目录为工作目录运行 `server/index.js`，启动时自动读取根目录 `.env`，监听 3001；**只使用宝塔托管这一套进程**。
 4. 宝塔站点根目录指向 `dist/`，将 `/api/` 反向代理到 `http://127.0.0.1:3001`，保留 `/admin` 及 `/assets/`；根路径 `/` 返回 404，禁止通过网页顾客预览下单。
 5. 验证 `https://你的域名/api/health` 返回 JSON、`/admin` 可登录、`/` 返回 404；再配置小程序和支付。
 
@@ -106,11 +110,15 @@ npm run dev
 
 ### 非宝塔部署
 
-以 `/var/www/echo-hx-live-bar` 为示例目录：安装 Node.js 20/22、Git、Nginx，克隆后运行 `bash scripts/install.sh`，配置 `.env`，使用一种持久进程管理方式运行 Node API，并以 [Nginx 示例](deploy/nginx.conf.example) 提供 `dist/` 和 `/api/`。仅使用脚本管理进程时可执行 `bash scripts/service.sh start|stop|restart|status`；**不要与宝塔 Node 项目或其他进程管理器同时启动**。HTTPS 证书与域名须自行配置。
+以 `/var/www/echo-hx-live-bar` 为示例目录：安装 Node.js 22/24、Git、Nginx，克隆后运行 `bash scripts/install.sh`，配置 `.env`，使用一种持久进程管理方式运行 Node API，并以 [Nginx 示例](deploy/nginx.conf.example) 提供 `dist/` 和 `/api/`。仅使用脚本管理进程时可执行 `bash scripts/service.sh start|stop|restart|status`；**不要与宝塔 Node 项目或其他进程管理器同时启动**。HTTPS 证书与域名须自行配置。
 
 ### 环境变量与小程序合法域名
 
 首次安装复制 `.env.example` 为 `.env`。至少设置强密码 `ADMIN_INITIAL_PASSWORD`、`NODE_ENV=production`、`HOST=127.0.0.1`、`PORT=3001` 和正式 `MINIPROGRAM_API_BASE_URL=https://你的域名/api`。首次后台账号为 `admin`；如未提供初始密码，查看 API 启动日志中的随机密码，登录后及时修改。
+
+微信支付平台证书的序列号由服务端解析；若配置的是 PEM 公钥，则必须同时填写对应的 `WECHAT_PLATFORM_SERIAL`，可在服务器环境变量或后台“接口配置”中设置。退款回调使用 `https://你的域名/api/payments/wechat/refund/notify`，可通过 `WECHAT_REFUND_NOTIFY_URL` 单独指定；留空时从支付回调地址推导，避免退款通知进入支付接口。
+
+支付或退款请求超时不代表失败。服务端保留待核对状态和必要的预占资源，定时查询退款、关闭过期支付；退款重试沿用原退款单号。待支付微信订单不能直接改为线下已收款，若改用现金或商家收款码，请先取消微信订单再通过收银台重新下单。
 
 **API 基础地址包含 `/api`；微信公众平台的 request、uploadFile、downloadFile 合法域名只填 `https://你的域名`，不得带 `/api` 或接口路径。**在后台修改运行时 API 地址后，小程序仍需要能访问原来的引导地址；更换域名时新旧域名都应加入微信合法域名并验证。正式小程序须在微信开发者工具中使用真实 AppID，上传并发布相应版本。详细授权、支付及图片域名设置见 [小程序说明](miniprogram/README.md) 与 [宝塔教程](docs/BAOTA_DEPLOY.md)。
 
@@ -129,9 +137,11 @@ bash scripts/manage.sh update    # 更新 origin/main；宝塔托管需手动重
 
 若服务器上有直接编辑的代码，更新脚本会把本地差异保存到 `backups/update-时间/`，但后续运行以 GitHub `main` 为准；业务配置 `.env` 和 `data/` 不随 Git 覆盖。不要提交 `.env`、`data/`、`backups/`、数据库、图片或支付私钥到 GitHub。
 
+退款回库会记录订单商品的实际退回数量，利润仅冲回已回库商品的成本；已送达退款保留已消费成本。旧数据库或旧备份首次升级时会补录可确认的历史回库数量，不再次修改库存。若旧版本已经造成重复回库，需要对照库存流水和实物盘点人工修正，升级不会自动改写这部分历史库存。
+
 ## 上线检查
 
-- `node --version` 为 20+；构建成功且 `dist/index.html` 存在；Node 进程可读写 `data/`、`logs/`。
+- `node --version` 为 22+；构建成功且 `dist/index.html` 存在；Node 进程可读写 `data/`、`logs/`。
 - HTTPS 下 `/api/health` 返回 JSON、`/admin` 可登录、网站 `/` 返回 404；3001 不对公网开放。
 - 管理员已修改初始密码、分配最小权限；商品图片、库存和桌台码可正常访问。
 - 小程序使用正确 AppID，request/uploadFile/downloadFile 域名和版本配置正确；头像昵称手机号经过真实授权流程验证。

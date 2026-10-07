@@ -22,7 +22,7 @@ HELP
 }
 
 require_node() {
-  command -v node >/dev/null || { echo '请先安装 Node.js 20 或更高版本' >&2; exit 1; }
+  command -v node >/dev/null || { echo '请先安装 Node.js 22 或更高版本' >&2; exit 1; }
   node scripts/check-node.mjs
   command -v npm >/dev/null || { echo '未找到 npm，请检查宝塔终端使用的 Node 版本' >&2; exit 1; }
 }

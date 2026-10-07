@@ -1,7 +1,9 @@
+import './env.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
+import { backfillReturnedQuantities } from './refund-stock.js';
 
 export const dataDir = path.resolve(process.env.DATA_DIR || 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -194,7 +196,9 @@ db.prepare('INSERT OR IGNORE INTO backup_settings (id) VALUES (1)').run();
 // Keep the first SQLite release useful after schema upgrades as well as on a fresh install.
 const ensureColumn = (table, column, definition) => {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
-  if (!columns.some(item => item.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  if (columns.some(item => item.name === column)) return false;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  return true;
 };
 ensureColumn('users', 'phone', 'TEXT');
 ensureColumn('users', 'wechat_openid', 'TEXT');
@@ -243,6 +247,14 @@ ensureColumn('orders', 'coupon_id', 'INTEGER REFERENCES user_coupons(id)');
 ensureColumn('orders', 'coupon_discount_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('refund_requests', 'items_json', "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('refund_transactions', 'items_json', "TEXT NOT NULL DEFAULT '[]'");
+export function migrateRefundStock(database = db) {
+  if (database.prepare('PRAGMA table_info(order_items)').all().some(column => column.name === 'returned_quantity')) return;
+  database.transaction(() => {
+    database.exec('ALTER TABLE order_items ADD COLUMN returned_quantity INTEGER NOT NULL DEFAULT 0 CHECK(returned_quantity >= 0 AND returned_quantity <= quantity)');
+    backfillReturnedQuantities(database);
+  })();
+}
+migrateRefundStock();
 ensureColumn('coupon_definitions', 'voucher_type', "TEXT NOT NULL DEFAULT 'discount'");
 ensureColumn('coupon_definitions', 'gift_product_id', 'INTEGER REFERENCES products(id)');
 db.prepare('UPDATE coupon_definitions SET allow_stack_member_discount = 1 WHERE allow_stack_member_discount = 0').run();
@@ -380,6 +392,7 @@ export function reopenDatabase() {
   if (db.open) db.close();
   db = new Database(databasePath);
   configureDatabase(db);
+  migrateRefundStock();
 }
 
 export function centsToMoney(cents) { return Number((cents / 100).toFixed(2)); }

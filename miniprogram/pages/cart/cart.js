@@ -50,13 +50,16 @@ Page({
     if (!this.data.items.length || this.data.submitting) return;
     const id = getApp().globalData.sessionId;
     this.setData({ submitting: true });
-    api.request('/sessions/' + id + '/orders', { method: 'POST', data: { paymentMethod: this.data.method, userCouponId: this.data.selectedCouponId || undefined, note: this.data.note } }).then(data => {
+    api.request('/sessions/' + id + '/orders', { method: 'POST', data: { paymentMethod: this.data.method, userCouponId: this.data.selectedCouponId || undefined, note: this.data.note } }).then(async data => {
       if (data.payment.status === 'paid') {
         this.setData({ items: [], totals: emptyTotals, selectedCouponId: '', note: '' });
-        wx.showToast({ title: '余额支付成功', icon: 'success' });
+        wx.showToast({ title: data.order.payable_amount_cents === 0 ? '优惠券抵扣成功' : '余额支付成功', icon: 'success' });
         wx.navigateTo({ url: '/pages/order/order' });
       } else {
-        wx.requestPayment({ ...data.payment.payment, success: () => { this.setData({ items: [], totals: emptyTotals, selectedCouponId: '', note: '' }); wx.showToast({ title: '支付成功', icon: 'success' }); setTimeout(() => wx.navigateTo({ url: '/pages/order/order' }), 500); }, fail: error => { wx.showToast({ title: error.errMsg?.includes('cancel') ? '已取消支付' : '支付未完成', icon: 'none' }); this.refresh(); } });
+        const confirmed = await api.payWithWechat(data.payment.payment, data.order.order_no);
+        this.setData({ items: [], totals: emptyTotals, selectedCouponId: '', note: '' });
+        wx.showToast({ title: confirmed ? '支付成功' : '支付状态核对中', icon: confirmed ? 'success' : 'none' });
+        wx.navigateTo({ url: '/pages/order/order' });
       }
     }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ submitting: false }));
   },
