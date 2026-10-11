@@ -1,10 +1,14 @@
 const api = require('../../utils/api');
 const branding = require('../../utils/branding');
+const service = require('../../utils/service');
 const { moneyText, productIcon } = require('../../utils/presentation');
 Page({
-  data: { products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, pendingProducts: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, couponCheckout: null, selectedCouponId: '', totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: 'A-08', ...branding.readSettings(), loading: true, loadError: '', cartBusy: false, detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
+  data: { ...service.initialData, products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, pendingProducts: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, couponCheckout: null, selectedCouponId: '', totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: '', ...branding.readSettings(), loading: true, loadError: '', cartBusy: false, detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
+  ...service.methods,
   onLoad() { this.tableVersion = -1; },
-  onShow() { return this.load(); },
+  onHide() { this.stopServicePolling(); },
+  onUnload() { this.stopServicePolling(); },
+  onShow() { this.startServicePolling(); return this.load().then(() => this.refreshServices()); },
   load() {
     const app = getApp();
     const version = app.globalData.tableVersion;
@@ -13,13 +17,13 @@ Page({
     if (this.tableVersion !== version) {
       this.tableVersion = version;
       this.pendingCartActions = new Map();
-      this.setData({ cart: [], cartMap: {}, pendingProducts: {}, cartBusy: false, totalQty: 0 });
+      this.setData({ ...service.initialData, cart: [], cartMap: {}, pendingProducts: {}, cartBusy: false, totalQty: 0 });
     }
     return Promise.resolve(app.apiReady).then(() => app.globalData.pendingScene ? api.request('/tables/resolve?scene=' + encodeURIComponent(app.globalData.pendingScene)).then(result => result.table.tableNo) : app.globalData.tableNo).then(tableNo => {
       if (version !== app.globalData.tableVersion || requestVersion !== this.loadVersion) return null;
       app.globalData.tableNo = tableNo;
       this.setData({ tableNo });
-      return Promise.all([api.request('/products?storeId=1'), api.request('/tables/' + encodeURIComponent(tableNo) + '/session'), api.request('/mini-page')]);
+      return Promise.all([api.request('/products?storeId=1'), tableNo && app.globalData.hasScannedTable ? api.request('/tables/' + encodeURIComponent(tableNo) + '/session') : Promise.resolve({ session: { id: null }, user: app.globalData.user || {} }), api.request('/mini-page')]);
     }).then(result => {
       if (!result || version !== app.globalData.tableVersion || requestVersion !== this.loadVersion) return;
       const [products, session, page] = result;
@@ -27,7 +31,7 @@ Page({
       app.globalData.miniPage = page.entries;
       app.globalData.sessionId = session.session.id;
       app.globalData.user = session.user;
-      const profileReady = Boolean(session.user.phone && session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户');
+      const profileReady = Boolean(session.user.phone && session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户') || !session.session.id;
       this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.memberLevel || '会').charAt(0), authVisible: !profileReady && !this.authPostponed, authStep: session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户' ? 'phone' : 'profile', authAvatarPath: session.user.avatarUrl ? api.imageUrl(session.user.avatarUrl) : '', authAvatarUrl: session.user.avatarUrl || '', authNickname: session.user.nickname === '微信用户' ? '' : (session.user.nickname || ''), authError: '' });
       this.filter();
       return this.refreshCart().then(() => this.consumePendingCoupon());
@@ -51,7 +55,7 @@ Page({
   cartContext() { const app = getApp(); return { sessionId: app.globalData.sessionId, tableVersion: app.globalData.tableVersion }; },
   isCurrentCart(context) { const current = this.cartContext(); return current.sessionId === context.sessionId && current.tableVersion === context.tableVersion; },
   refreshCart(context = this.cartContext()) {
-    if (!this.isCurrentCart(context)) return Promise.resolve(null);
+    if (!context.sessionId || !this.isCurrentCart(context)) return Promise.resolve(null);
     const version = this.cartRefreshVersion = (this.cartRefreshVersion || 0) + 1;
     return api.request('/sessions/' + context.sessionId + '/cart').then(data => {
       if (!this.isCurrentCart(context) || version !== this.cartRefreshVersion) return null;
@@ -120,6 +124,7 @@ Page({
     return this.updateProductQuantity(id, delta);
   },
   updateProductQuantity(id, delta) {
+    if (!getApp().globalData.sessionId) { wx.showToast({ title: '请先用微信扫描桌台码', icon: 'none' }); return Promise.resolve(false); }
     this.pendingCartActions = this.pendingCartActions || new Map();
     if (this.pendingCartActions.has(id)) return Promise.resolve(false);
     const product = this.data.visibleProducts.find(item => item.id === id);

@@ -4,6 +4,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { backfillReturnedQuantities } from './refund-stock.js';
+import { migrateOperations } from './operations-schema.js';
 
 export const dataDir = path.resolve(process.env.DATA_DIR || 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -255,6 +256,7 @@ export function migrateRefundStock(database = db) {
   })();
 }
 migrateRefundStock();
+migrateOperations(db);
 ensureColumn('coupon_definitions', 'voucher_type', "TEXT NOT NULL DEFAULT 'discount'");
 ensureColumn('coupon_definitions', 'gift_product_id', 'INTEGER REFERENCES products(id)');
 db.prepare('UPDATE coupon_definitions SET allow_stack_member_discount = 1 WHERE allow_stack_member_discount = 0').run();
@@ -393,6 +395,7 @@ export function reopenDatabase() {
   db = new Database(databasePath);
   configureDatabase(db);
   migrateRefundStock();
+  migrateOperations(db);
 }
 
 export function centsToMoney(cents) { return Number((cents / 100).toFixed(2)); }

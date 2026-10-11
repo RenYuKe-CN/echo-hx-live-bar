@@ -16,6 +16,7 @@ import { walletBalance, debitAvailableWallet, debitReservedWallet } from './wall
 import { parseRefundItems, returnOrderStock, orderCostSql } from './refund-stock.js';
 import { validateWechatPayment, validateWechatRefund } from './payment-validation.js';
 import { storeName } from './branding.js';
+import { registerWorkdeskRoutes, workEvent, workOrderView, fulfillmentLines, refundHold, hasDeliveryInProgress, cancelReadyBatchesForRefund } from './workdesk.js';
 
 export const router = Router();
 const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
@@ -51,11 +52,13 @@ const paginationView = (page, pageSize, total) => {
   const safePage = Math.min(page, totalPages);
   return { page: safePage, pageSize, total, totalPages, hasNext: safePage < totalPages, hasPrevious: safePage > 1 };
 };
-const modules = ['dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','coupons','messages','reports','losses','backups'];
+const modules = ['workdesk','dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','coupons','messages','reports','losses','backups'];
+const workspaces = ['admin','cashier','waiter'];
+const workspaceDefaults = workspace => workspace === 'waiter' ? ['workdesk'] : workspace === 'cashier' ? ['pos','orders'] : ['dashboard','orders','workdesk'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); const supplied = crypto.scryptSync(password, salt, 64); return hash?.length === 128 && crypto.timingSafeEqual(supplied, Buffer.from(hash, 'hex')); };
 const normalizePermissions = permissions => [...new Set(permissions.map(permission => permission === 'inventory' ? 'products' : permission).filter(permission => modules.includes(permission) && permission !== 'reports'))];
-const publicAccount = row => ({ id: row.id, username: row.username, displayName: row.display_name, role: row.role, permissions: row.role === 'super' ? [...modules, 'accounts', 'settings', 'logs', 'mini-page'] : normalizePermissions(JSON.parse(row.permissions)), status: row.status });
+const publicAccount = row => ({ id: row.id, username: row.username, displayName: row.display_name, role: row.role, workspace: row.role === 'super' ? 'admin' : row.workspace || 'admin', permissions: row.role === 'super' ? [...modules, 'accounts', 'settings', 'logs', 'mini-page'] : normalizePermissions(JSON.parse(row.permissions)), status: row.status });
 const audit = (req, action, detail = '') => db.prepare('INSERT INTO operation_logs (operator, action, detail) VALUES (?, ?, ?)').run(req.staff.username, action, String(detail));
 const syncProductAvailability = () => {
   db.prepare("UPDATE products SET status = 'inactive', auto_unlisted = 1 WHERE stock - reserved_stock <= 0 AND status = 'active'").run();
@@ -135,17 +138,19 @@ router.post('/admin/change-password', (req, res) => {
 });
 router.get('/admin/accounts', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM staff_accounts').get().value; return res.json({ accounts: db.prepare('SELECT * FROM staff_accounts ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset).map(publicAccount), modules: modules.filter(module => module !== 'reports'), pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/accounts', (req, res) => {
-  const { username, displayName, password, role, permissions = [] } = req.body || {};
+  const { username, displayName, password, role, workspace = 'admin', permissions = workspaceDefaults(workspace) } = req.body || {};
   if (!/^[a-zA-Z0-9_]{3,32}$/.test(username || '') || String(password || '').length < 10 || !['manager','staff'].includes(role) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p) || p === 'reports')) return res.status(400).json({ message: '账号、密码或权限无效（数据报表仅超管可见，密码至少 10 位）' });
-  try { const r = db.prepare('INSERT INTO staff_accounts (username, display_name, password_hash, role, permissions) VALUES (?, ?, ?, ?, ?)').run(username, String(displayName || username), hashPassword(password), role, JSON.stringify(permissions)); audit(req, '创建账号', username); res.status(201).json({ account: publicAccount(db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(r.lastInsertRowid)) }); }
+  if (!workspaces.includes(workspace) || (workspace === 'waiter' && !permissions.includes('workdesk')) || (workspace === 'cashier' && !permissions.includes('pos'))) return res.status(400).json({ message: '工作台配置无效，服务员需要服务工作台权限，收银需要收银点单权限' });
+  try { const r = db.prepare('INSERT INTO staff_accounts (username, display_name, password_hash, role, permissions, workspace) VALUES (?, ?, ?, ?, ?, ?)').run(username, String(displayName || username), hashPassword(password), role, JSON.stringify(permissions), workspace); audit(req, '创建账号', username); res.status(201).json({ account: publicAccount(db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(r.lastInsertRowid)) }); }
   catch (error) { res.status(409).json({ message: '账号名已存在' }); }
 });
 router.patch('/admin/accounts/:id', (req, res) => {
   const account = db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(req.params.id);
   if (!account || account.role === 'super') return res.status(400).json({ message: '不可修改超级管理员账号' });
-  const { role = account.role, status = account.status, permissions = JSON.parse(account.permissions), password, displayName = account.display_name } = req.body || {};
+  const { role = account.role, status = account.status, permissions = JSON.parse(account.permissions), password, displayName = account.display_name, workspace = account.workspace || 'admin' } = req.body || {};
   if (!['manager','staff'].includes(role) || !['active','disabled'].includes(status) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p) || p === 'reports') || (password && String(password).length < 10)) return res.status(400).json({ message: '账号配置无效（数据报表仅超级管理员可见）' });
-  db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ? WHERE id = ?').run(role, status, JSON.stringify(permissions.filter(p => p !== 'reports')), displayName, password ? hashPassword(password) : account.password_hash, account.id);
+  if (!workspaces.includes(workspace) || (workspace === 'waiter' && !permissions.includes('workdesk')) || (workspace === 'cashier' && !permissions.includes('pos'))) return res.status(400).json({ message: '工作台与权限不匹配' });
+  db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ?, workspace = ? WHERE id = ?').run(role, status, JSON.stringify(permissions.filter(p => p !== 'reports')), displayName, password ? hashPassword(password) : account.password_hash, workspace, account.id);
   if (status === 'disabled' || password) db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(account.id);
   audit(req, '修改账号', account.username); res.json({ ok: true });
 });
@@ -275,10 +280,12 @@ function queueUserMessage(userId, type, values = {}, relatedType = null, related
 
 // Build one consistent set of values for every order notification. The full
 // list is used by site messages; the shorter summary fits WeChat fields.
-function orderMessageValues(order) {
+function orderMessageValues(order, deliveredOnly = false) {
   const row = order || {};
   const items = row.id
-    ? db.prepare('SELECT product_name, quantity FROM order_items WHERE order_id = ? ORDER BY id').all(row.id)
+    ? db.prepare(deliveredOnly
+      ? 'SELECT product_name, delivered_quantity AS quantity FROM order_items WHERE order_id = ? AND delivered_quantity > 0 ORDER BY id'
+      : 'SELECT product_name, quantity FROM order_items WHERE order_id = ? ORDER BY id').all(row.id)
     : [];
   const productList = items.map(item => `${item.product_name} × ${item.quantity}`).join('、');
   const summaryItems = items.slice(0, 2).map(item => `${item.product_name}×${item.quantity}`);
@@ -318,12 +325,13 @@ function refundItemQuantities(orderId) {
 
 function orderRefundLines(orderId) {
   const used = refundItemQuantities(orderId);
-  return db.prepare(`SELECT oi.id, oi.product_id, oi.product_name, oi.quantity, oi.paid_price_cents, oi.original_price_cents
+  return db.prepare(`SELECT oi.id, oi.product_id, oi.product_name, oi.quantity, oi.delivered_quantity, oi.paid_price_cents, oi.original_price_cents
     FROM order_items oi WHERE oi.order_id = ? ORDER BY oi.id`).all(orderId).map(row => ({
     ...row,
     usedQuantity: used.get(row.id) || 0,
-    availableQuantity: Math.max(0, row.quantity - (used.get(row.id) || 0)),
-    refundable: row.paid_price_cents > 0 && row.quantity > (used.get(row.id) || 0)
+    baseQuantity: Math.max(0, row.quantity - (used.get(row.id) || 0)),
+    availableQuantity: Math.max(0, row.quantity - row.delivered_quantity - (used.get(row.id) || 0)),
+    refundable: row.paid_price_cents > 0 && row.quantity - row.delivered_quantity > (used.get(row.id) || 0)
   }));
 }
 
@@ -342,7 +350,8 @@ function normalizeRefundSelection(orderId, input) {
   for (const [orderItemId, quantity] of quantities) {
     const line = lines.find(item => item.id === orderItemId);
     if (!line) throw new Error('退款商品不属于当前订单');
-    if (!line.refundable) throw new Error(`商品“${line.product_name}”是赠送商品，不能申请金额退款`);
+    if (line.paid_price_cents <= 0) throw new Error(`商品“${line.product_name}”是赠送商品，不能申请金额退款`);
+    if (!line.refundable) throw new Error(`商品“${line.product_name}”已送达或已退款，不能重复申请退款`);
     if (quantity > line.availableQuantity) throw new Error(`商品“${line.product_name}”最多可退款 ${line.availableQuantity} 件`);
     selected.push({ orderItemId, quantity, productId: line.product_id, name: line.product_name });
   }
@@ -354,11 +363,11 @@ function calculateRefundAmount(order, selectedItems) {
   const lineMap = new Map(lines.map(line => [line.id, line]));
   const totals = refundTotals(order.id);
   const remainingAmount = Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing);
-  const totalBase = lines.reduce((sum, line) => sum + Math.max(0, line.paid_price_cents * line.availableQuantity), 0);
+  const totalBase = lines.reduce((sum, line) => sum + Math.max(0, line.paid_price_cents * line.baseQuantity), 0);
   const selectedBase = selectedItems.reduce((sum, item) => sum + (lineMap.get(item.orderItemId)?.paid_price_cents || 0) * item.quantity, 0);
   if (!totalBase || !selectedBase) throw new Error('所选商品没有可退款金额');
   const selectedById = new Map(selectedItems.map(item => [item.orderItemId, item.quantity]));
-  const selectedAllRemaining = lines.filter(line => line.refundable).every(line => selectedById.get(line.id) === line.availableQuantity);
+  const selectedAllRemaining = lines.filter(line => line.paid_price_cents > 0 && line.baseQuantity > 0).every(line => selectedById.get(line.id) === line.baseQuantity);
   const amount = selectedAllRemaining
     ? remainingAmount
     : Math.min(remainingAmount, Math.round(remainingAmount * selectedBase / totalBase));
@@ -380,6 +389,16 @@ function refundView(order) {
   return { refundedAmount: centsToMoney(totals.refunded), refundedRevenueAmount: centsToMoney(totals.refundedRevenue), refundedBonusAmount: centsToMoney(totals.refundedBonus), refundedCents: Number(totals.refunded), refundedRevenueCents: Number(totals.refundedRevenue), refundedBonusCents: Number(totals.refundedBonus), processingCents: Number(totals.processing), refundableAmount: centsToMoney(Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing)), refundRequest: request && { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason, items: refundItemsView(request.items_json), rejectReason: request.reject_reason, createdAt: request.created_at, reviewedAt: request.reviewed_at }, refundTransaction: transaction && { id: transaction.id, status: transaction.status, amount: centsToMoney(transaction.amount_cents), items: refundItemsView(transaction.items_json), wechatCents: Number(transaction.wechat_cents || 0), createdAt: transaction.created_at, completedAt: transaction.completed_at } };
 }
 
+const REFUND_FAILURE_PAUSE = '退款失败，请管理员核实后再恢复配货';
+function failRefund(refundId) {
+  db.transaction(() => {
+    const refund = db.prepare('SELECT * FROM refund_transactions WHERE id=?').get(refundId);
+    if (!refund || !['pending', 'processing'].includes(refund.status)) return;
+    db.prepare("UPDATE refund_transactions SET status='failed' WHERE id=?").run(refundId);
+    if (db.prepare("UPDATE orders SET fulfillment_pause_reason=?,fulfillment_revision=fulfillment_revision+1 WHERE id=? AND status='awaiting_delivery' AND fulfillment_pause_reason='' ").run(REFUND_FAILURE_PAUSE,refund.order_id).changes) workEvent('order_changed',refund.order_id);
+  })();
+}
+
 function completeRefund(refundId, wechatResult = null) {
   const result = db.transaction(() => {
     const refund = db.prepare('SELECT * FROM refund_transactions WHERE id = ?').get(refundId);
@@ -393,8 +412,13 @@ function completeRefund(refundId, wechatResult = null) {
     }
     const refunded = refundTotals(order.id).refunded;
     const fullyRefunded = refunded >= order.payable_amount_cents;
+    cancelReadyBatchesForRefund(order.id, refund.items_json, fullyRefunded);
     returnOrderStock(db, order, parseRefundItems(refund.items_json), fullyRefunded);
+    db.prepare("UPDATE orders SET fulfillment_pause_reason='' WHERE id=? AND fulfillment_pause_reason=?").run(order.id,REFUND_FAILURE_PAUSE);
     if (fullyRefunded) db.prepare("UPDATE orders SET status = 'refunded' WHERE id = ?").run(order.id);
+    else if (order.status === 'awaiting_delivery' && !db.prepare('SELECT COALESCE(SUM(quantity-returned_quantity-delivered_quantity),0) AS remaining FROM order_items WHERE order_id=?').get(order.id).remaining) {
+      db.prepare("UPDATE orders SET status='completed', delivered_at=COALESCE((SELECT MAX(delivered_at) FROM fulfillment_batches WHERE order_id=? AND status='delivered'),CURRENT_TIMESTAMP) WHERE id=?").run(order.id, order.id);
+    }
     // Reverse earned points proportionately, without taking the balance below zero.
     const earned = db.prepare("SELECT COALESCE(SUM(points),0) AS value FROM points_ledger WHERE order_id = ? AND reason = '订单消费'").get(order.id).value;
     const reversed = -db.prepare("SELECT COALESCE(SUM(points),0) AS value FROM points_ledger WHERE order_id = ? AND reason = '订单退款'").get(order.id).value;
@@ -413,6 +437,7 @@ function completeRefund(refundId, wechatResult = null) {
 
 function beginRefund(order, amount, reason, requestId = null, refundItems = []) {
   return db.transaction(() => {
+    if (hasDeliveryInProgress(order.id)) throw new Error('订单有商品正在配送，请核实送达或转交后再处理退款');
     const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     const totals = refundTotals(order.id);
     if (fresh.payment_status !== 'paid' || !['awaiting_delivery', 'completed'].includes(fresh.status) || amount <= 0 || amount + totals.refunded + totals.processing > fresh.payable_amount_cents) throw new Error('订单可退金额不足或状态已变化');
@@ -437,13 +462,14 @@ async function dispatchRefund(refund, order) {
     const data = await createRefund({ outTradeNo: order.order_no, outRefundNo: refund.out_refund_no, reason: refund.reason || '订单退款', refundCents: refund.wechat_cents, totalCents: order.wechat_paid_cents });
     validateWechatRefund(refund, order, data, getIntegrationValues());
     if (data.status === 'SUCCESS') completeRefund(refund.id, data);
-    else if (['CLOSED', 'ABNORMAL'].includes(data.status)) db.prepare("UPDATE refund_transactions SET status = 'failed' WHERE id = ? AND status != 'success'").run(refund.id);
+    else if (['CLOSED', 'ABNORMAL'].includes(data.status)) failRefund(refund.id);
     else db.prepare("UPDATE refund_transactions SET status = 'processing', wechat_refund_id = ? WHERE id = ? AND status = 'pending'").run(data.refund_id || null, refund.id);
     return data.status || 'PROCESSING';
   } catch (error) {
     // A timeout is ambiguous: do not issue another refund with a new number.
     const definitiveFailure = error.code === 'INTEGRATION_NOT_CONFIGURED' || (error.status >= 400 && error.status < 500 && ![408, 409, 429].includes(error.status));
-    db.prepare("UPDATE refund_transactions SET status = ? WHERE id = ? AND status IN ('pending','processing')").run(definitiveFailure ? 'failed' : 'processing', refund.id);
+    if (definitiveFailure) failRefund(refund.id);
+    else db.prepare("UPDATE refund_transactions SET status = 'processing' WHERE id = ? AND status IN ('pending','processing')").run(refund.id);
     console.error(`微信退款 ${refund.out_refund_no} ${definitiveFailure ? '申请失败' : '状态待核对'}: ${error.message}`);
     return definitiveFailure ? 'FAILED' : 'PROCESSING';
   }
@@ -454,7 +480,7 @@ async function reconcileRefund(refund) {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(refund.order_id);
   validateWechatRefund(refund, order, data, getIntegrationValues());
   if (data.status === 'SUCCESS') completeRefund(refund.id, data);
-  else if (['CLOSED', 'ABNORMAL'].includes(data.status)) db.prepare("UPDATE refund_transactions SET status = 'failed' WHERE id = ? AND status != 'success'").run(refund.id);
+  else if (['CLOSED', 'ABNORMAL'].includes(data.status)) failRefund(refund.id);
   else db.prepare("UPDATE refund_transactions SET status = 'processing' WHERE id = ? AND status = 'pending'").run(refund.id);
   return data.status;
 }
@@ -751,6 +777,10 @@ router.use('/sessions/:sessionId', (req, res, next) => {
   next();
 });
 router.use('/me', requireWechatUser);
+registerWorkdeskRoutes(router, {
+  currentUserId, audit,
+  completedOrder: id => { const order = db.prepare('SELECT * FROM orders WHERE id=?').get(id); queueUserMessage(order.payer_user_id, 'order_completed', orderMessageValues(order, true), 'order_completed', id, `订单已送达：${order.order_no}`); }
+});
 
 function getOrCreateSession(storeId, tableId, userId) {
   let session = db.prepare("SELECT * FROM table_sessions WHERE store_id = ? AND table_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(storeId, tableId);
@@ -1119,6 +1149,7 @@ function settleOrder(order, method, req, reserved = true) {
   const settleCartItem = db.prepare("UPDATE cart_items SET status = 'settled' WHERE id = ?");
   items.forEach(item => { if (item.cart_item_id) settleCartItem.run(item.cart_item_id); });
   db.prepare("UPDATE orders SET status = 'awaiting_delivery', payment_status = 'paid', payment_method = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ?").run(method, order.id);
+  workEvent('order_new', Number(order.id));
   consumeCoupon(order);
   const points = Math.floor(order.payable_amount_cents / 100 * memberPricing(order.payer_user_id).pointsRate);
   db.prepare('UPDATE users SET points = points + ? WHERE id = ?').run(points, order.payer_user_id);
@@ -1241,7 +1272,7 @@ router.post('/payments/wechat/refund/notify', (req, res) => {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(refund.order_id);
     validateWechatRefund(refund, order, payload, getIntegrationValues());
     if (payload.refund_status === 'SUCCESS') completeRefund(refund.id, payload);
-    else if (['CLOSED', 'ABNORMAL'].includes(payload.refund_status)) db.prepare("UPDATE refund_transactions SET status = 'failed' WHERE id = ? AND status != 'success'").run(refund.id);
+    else if (['CLOSED', 'ABNORMAL'].includes(payload.refund_status)) failRefund(refund.id);
     res.json({ code: 'SUCCESS', message: '成功' });
   } catch (error) { res.status(['WECHAT_SIGNATURE_INVALID', 'WECHAT_SERIAL_MISMATCH'].includes(error.code) ? 401 : error.status || 500).json({ code: 'FAIL', message: error.message }); }
 });
@@ -1576,7 +1607,7 @@ function fulfillmentLabel(order) {
 function userOrderItems(orderId) {
   const used = refundItemQuantities(orderId);
   return db.prepare(`SELECT oi.id, oi.product_id, oi.product_name, oi.quantity,
-    oi.original_price_cents, oi.paid_price_cents, p.image_url
+    oi.original_price_cents, oi.paid_price_cents, oi.delivered_quantity, p.image_url
     FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id
     WHERE oi.order_id = ? ORDER BY oi.id`).all(orderId).map(item => ({
       id: item.id,
@@ -1589,8 +1620,10 @@ function userOrderItems(orderId) {
       originalSubtotal: centsToMoney(item.original_price_cents * item.quantity),
       paidSubtotal: centsToMoney(item.paid_price_cents * item.quantity),
       refundedQuantity: used.get(item.id) || 0,
-      refundAvailableQuantity: item.paid_price_cents > 0 ? Math.max(0, item.quantity - (used.get(item.id) || 0)) : 0,
-      refundSelectable: item.paid_price_cents > 0 && item.quantity > (used.get(item.id) || 0)
+      deliveredQuantity: item.delivered_quantity,
+      refundBaseQuantity: Math.max(0, item.quantity - (used.get(item.id) || 0)),
+      refundAvailableQuantity: item.paid_price_cents > 0 ? Math.max(0, item.quantity - item.delivered_quantity - (used.get(item.id) || 0)) : 0,
+      refundSelectable: item.paid_price_cents > 0 && item.quantity - item.delivered_quantity > (used.get(item.id) || 0)
     }));
 }
 function userOrderView(row, includeItems = false) {
@@ -1629,8 +1662,19 @@ function userOrderView(row, includeItems = false) {
     canCancel: row.payment_status === 'pending',
     canHide: row.payment_status !== 'pending',
     canRefund: row.payment_status === 'paid' && row.status === 'awaiting_delivery' && Number(refund.refundableAmount) > 0 && !Number(refund.processingCents) && refund.refundRequest?.status !== 'pending',
-    ...refund
+    ...refund,
+    fulfillment: workOrderView(row),
+    refundPaymentRemaining: refund.refundableAmount
   };
+  const lines = orderRefundLines(row.id);
+  const available = lines.filter(line => line.refundable).map(line => ({ orderItemId: line.id, quantity: line.availableQuantity }));
+  const inTransit = hasDeliveryInProgress(row.id);
+  if (row.payment_status === 'paid' && row.status === 'awaiting_delivery') {
+    order.statusLabel = order.fulfillment.paused ? (refundHold(row.id) ? '退款处理中' : '待核实') : order.fulfillment.items.some(item => item.deliveredQuantity > 0) ? '部分送达' : ({ waiting:'待接单',preparing:'配货中',ready:'待配送',delivering:'配送中' })[order.fulfillment.state] || '待配送';
+  }
+  order.canRefund = order.canRefund && !inTransit && available.length > 0;
+  if (available.length && !inTransit) { try { order.refundableAmount = centsToMoney(calculateRefundAmount(row, available)); } catch { order.refundableAmount = 0; } }
+  else order.refundableAmount = 0;
   if (includeItems) order.items = userOrderItems(row.id);
   return order;
 }
@@ -1726,6 +1770,7 @@ router.patch('/admin/tables/:id', (req, res) => {
   const status = req.body?.status == null ? table.status : String(req.body.status);
   if (!tableNo || tableNo.length > 30) return res.status(400).json({ message: '桌号不能为空且不能超过 30 个字' });
   if (!['available', 'disabled'].includes(status)) return res.status(400).json({ message: '桌台状态无效' });
+  if (tableNo !== table.table_no && db.prepare("SELECT 1 FROM table_sessions WHERE table_id=? AND status='open'").get(table.id)) return res.status(409).json({ message: '本桌会话尚未结束，请先处理订单和服务需求后再改桌号，避免送错桌' });
   if (status === 'disabled' && db.prepare("SELECT id FROM table_sessions WHERE table_id = ? AND status = 'open'").get(table.id)) return res.status(409).json({ message: '当前桌台正在使用，请先结束本桌后再停用' });
   if (db.prepare('SELECT id FROM tables WHERE store_id = ? AND table_no = ? AND id != ? AND status != ?').get(table.store_id, tableNo, table.id, 'disabled')) return res.status(409).json({ message: '这个桌号已经存在' });
   db.prepare('UPDATE tables SET table_no = ?, status = ? WHERE id = ?').run(tableNo, status, table.id);
@@ -1746,8 +1791,23 @@ router.delete('/admin/tables/:id', (req, res) => {
   audit(req, '删除桌台', table.table_no);
   res.json({ ok: true, mode: 'deleted' });
 });
-router.post('/admin/tables/:id/close', (req, res) => { const session = db.prepare("SELECT id FROM table_sessions WHERE table_id = ? AND status = 'open'").get(req.params.id); if (session) { db.prepare("UPDATE table_sessions SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = ?").run(session.id); audit(req, '结束桌台', req.params.id); } res.json({ ok: true }); });
+router.post('/admin/tables/:id/close', (req, res) => {
+  const session = db.prepare("SELECT id FROM table_sessions WHERE table_id=? AND status='open'").get(req.params.id);
+  if (session) {
+    if (db.prepare("SELECT 1 FROM orders WHERE session_id=? AND (payment_status='pending' OR (payment_status='paid' AND status='awaiting_delivery'))").get(session.id)
+      || db.prepare("SELECT 1 FROM service_requests WHERE session_id=? AND status!='completed'").get(session.id)) return res.status(409).json({ message: '本桌还有订单或服务需求未完成，请先处理，避免遗漏' });
+    db.prepare("UPDATE table_sessions SET status='closed',closed_at=CURRENT_TIMESTAMP WHERE id=?").run(session.id); audit(req,'结束桌台',req.params.id);
+  }
+  res.json({ok:true});
+});
 
+router.get('/admin/orders/notifications', (req, res) => {
+  const latest = db.prepare("SELECT COALESCE(MAX(id),0) AS id FROM work_events WHERE kind='order_new'").get().id;
+  if (req.query.after == null) return res.json({ events: [], cursor: latest });
+  const after = Math.max(0, Number.parseInt(req.query.after,10) || 0);
+  const events = db.prepare("SELECT id,entity_id AS orderId FROM work_events WHERE kind='order_new' AND id>? AND id<=? ORDER BY id LIMIT 200").all(after,latest);
+  res.json({ events, cursor: events.length===200 ? events.at(-1).id : latest });
+});
 router.get('/admin/orders', (req, res) => {
   const { page, pageSize, offset } = parsePagination(req);
   const total = db.prepare('SELECT COUNT(*) AS value FROM orders').get().value;
@@ -1806,21 +1866,10 @@ router.post('/admin/refunds/:id/query', async (req, res) => {
   catch (error) { res.status(error.status || 503).json({ message: error.message }); }
 });
 router.post('/admin/orders/:id/deliver', (req, res) => {
-  const result = db.transaction(() => {
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
-    if (!order) return { code: 404, message: '订单不存在' };
-    if (order.status === 'completed') return { code: 200 };
-    if (order.payment_status !== 'paid' || order.status !== 'awaiting_delivery') return { code: 409, message: '仅已支付的待送达订单可确认送达' };
-    if (db.prepare("SELECT id FROM refund_requests WHERE order_id = ? AND status = 'pending' LIMIT 1").get(order.id) || db.prepare("SELECT id FROM refund_transactions WHERE order_id = ? AND status IN ('pending','processing') LIMIT 1").get(order.id)) return { code: 409, message: '该订单有退款申请或退款处理中，请先完成退款处理后再确认送达' };
-    db.prepare("UPDATE orders SET status = 'completed', delivered_at = CURRENT_TIMESTAMP WHERE id = ?").run(order.id);
-    audit(req, '确认订单送达', order.order_no);
-    return { code: 200 };
-  })();
-  if (result.code === 200 && !result.message) {
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
-    if (order) queueUserMessage(order.payer_user_id, 'order_completed', orderMessageValues(order), 'order_completed', req.params.id, `订单已送达：${order.order_no}`);
-  }
-  res.status(result.code).json(result.message ? { message: result.message } : { ok: true });
+  const order = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
+  if (!order) return res.status(404).json({ message: '订单不存在' });
+  if (order.status === 'completed') return res.json({ ok: true });
+  res.status(409).json({ message: '请到服务工作台领取配送批次，再确认实际送达，避免重复配送' });
 });
 router.post('/admin/orders/:id/mark-paid', (req, res) => {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
@@ -2046,6 +2095,7 @@ router.post('/me/orders/:orderNo/refund-requests', requireWechatUser, (req, res)
   const userId = currentUserId(req);
   const order = db.prepare("SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?").get(req.params.orderNo, userId);
   if (!order) return res.status(404).json({ message: '订单不存在' });
+  if (hasDeliveryInProgress(order.id)) return res.status(409).json({ message: '商品正在配送，请先核实配送状态后再申请退款' });
   const totals = refundTotals(order.id);
   const refundable = order.payable_amount_cents - totals.refunded - totals.processing;
   if (order.payment_status !== 'paid' || order.status !== 'awaiting_delivery') return res.status(409).json({ message: '仅未送达的已支付订单可以申请退款' });

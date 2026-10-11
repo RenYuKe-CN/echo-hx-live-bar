@@ -11,7 +11,7 @@
       <view class="section-title"><text>商品清单</text><text>{{order.items.length}} 项</text></view>
       <view wx:for="{{order.items}}" wx:key="id" class="item">
         <view class="item-image-wrap"><image wx:if="{{item.image}}" class="item-image" src="{{item.image}}" mode="aspectFill"/><view wx:else class="item-placeholder">{{item.initial}}</view></view>
-        <view class="item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">数量 × {{item.quantity}} · 单价 ¥{{item.paidPriceText}}</text><text wx:if="{{item.originalPriceText !== item.paidPriceText}}" class="item-original">原价 ¥{{item.originalPriceText}} / 件</text></view>
+        <view class="item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">数量 × {{item.quantity}} · 单价 ¥{{item.paidPriceText}}</text><text wx:if="{{order.paymentStatus === 'paid'}}" class="item-meta">已送达 {{item.deliveredQuantity}} 件{{item.refundedQuantity ? ' · 已退款 ' + item.refundedQuantity + ' 件' : ''}}</text><text wx:if="{{item.originalPriceText !== item.paidPriceText}}" class="item-original">原价 ¥{{item.originalPriceText}} / 件</text></view>
         <view class="item-price"><text wx:if="{{item.originalSubtotalText !== item.paidSubtotalText}}" class="item-strike">¥{{item.originalSubtotalText}}</text><text class="item-total">¥{{item.paidSubtotalText}}</text></view>
       </view>
       <view wx:if="{{!order.items.length}}" class="empty-inline">暂无商品明细</view>

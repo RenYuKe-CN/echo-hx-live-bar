@@ -30,6 +30,7 @@ function request(path, options = {}, retried = false) {
   return new Promise((resolve, reject) => wx.request({
     url: API_BASE_URL + path, method: options.method || 'GET', data: options.data || {},
     header: { 'content-type': 'application/json', ...authHeaders() },
+    ...(options.timeout ? { timeout: options.timeout } : {}),
     success(res) {
       if (res.statusCode >= 200 && res.statusCode < 300) return resolve(res.data);
       if (res.statusCode === 401 && !retried) return renewLogin(previousToken).then(() => request(path, options, true)).then(resolve, reject);

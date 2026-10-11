@@ -33,7 +33,7 @@ export function returnOrderStock(database, order, selectedItems, fullyRefunded) 
   const items = database.prepare('SELECT * FROM order_items WHERE order_id = ? ORDER BY id').all(order.id);
   const selected = new Map(selectedItems.map(item => [item.orderItemId, item.quantity]));
   for (const item of items) {
-    const remaining = Math.max(0, item.quantity - item.returned_quantity);
+    const remaining = Math.max(0, item.quantity - item.returned_quantity - (item.delivered_quantity || 0));
     const quantity = fullyRefunded ? remaining : Math.min(remaining, selected.get(item.id) || 0);
     if (!quantity) continue;
     database.prepare('UPDATE order_items SET returned_quantity = returned_quantity + ? WHERE id = ?').run(quantity, item.id);

@@ -20,7 +20,7 @@ export function miniappFixture(options = {}) {
     { id: 4, name: '西柚气泡', category: '无酒精', detail: '无酒精特调', price: 32, memberPrice: 29, referenceMemberPrice: 29, stock: 100 }
   ];
   const cart = options.cart || [{ id: 1, product_id: 1, quantity: 2 }, { id: 2, product_id: 2, quantity: 1 }];
-  const app = { globalData: { tableVersion: 0, tableNo: 'A-08', sessionId: 1 }, apiReady: Promise.resolve() };
+  const app = { globalData: { tableVersion: 0, tableNo: 'A-08', hasScannedTable: true, sessionId: 1 }, apiReady: Promise.resolve() };
   const wx = { getStorageSync: key => store.get(key), setStorageSync: (key, value) => store.set(key, value), setNavigationBarTitle: ({title}) => titles.push(title), showToast() {}, navigateTo: data => calls.push({ navigate: data.url }) };
   const api = {
     imageUrl: value => value,
@@ -33,6 +33,7 @@ export function miniappFixture(options = {}) {
       if (url === '/me/coupons') return clone(options.coupons || { coupons: [], couponCount: 0 });
       if (url.startsWith('/products')) return { products: clone(products), categories: ['推荐', '啤酒', '鸡尾酒', '小吃', '套餐', '无酒精'], membership: { active: options.isMember !== false } };
       if (url.startsWith('/tables/')) return { session: { id: 1 }, user: clone(profile.user) };
+      if (url === '/sessions/1/services') return { types: { help: '呼叫服务员', tissue: '需要纸巾', cleanup: '收拾桌面', remind: '催单', other: '其他帮助' }, requests: [] };
       if (url === '/sessions/1/cart') return { items: clone(cart), totals: { original: 144, member: options.isMember === false ? 144 : 129, discount: options.isMember === false ? 0 : 15 } };
       if (request.method === 'POST' || request.method === 'PATCH') return { ok: true };
       throw new Error('Unexpected mock request: ' + url);
@@ -44,7 +45,7 @@ export function miniappFixture(options = {}) {
     if (filename.endsWith('/utils/subscription.js')) return { hasShownPrompt: () => true };
     if (modules.has(filename)) return modules.get(filename);
     const module = { exports: {} };
-    const context = { module, wx, getApp: () => app, console, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) };
+    const context = { module, wx, setInterval: () => 1, clearInterval() {}, getApp: () => app, console, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) };
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), context, { filename });
     modules.set(filename, module.exports); return module.exports;
   }
@@ -61,7 +62,7 @@ export function miniappFixture(options = {}) {
       }
       if (callback) callback.call(this);
     } };
-    instance.onLoad?.(); return instance;
+    instance.onLoad?.({}); return instance;
   }
   return { loadPage, loadModule, app, api, wx, store, calls, titles, updates, profile, products, cart, configuration };
 }

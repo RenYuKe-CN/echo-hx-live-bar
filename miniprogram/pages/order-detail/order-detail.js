@@ -71,15 +71,15 @@ Page({
   calculateRefundEstimate() {
     const order = this.data.order;
     if (!order) return;
-    const eligible = order.items.filter(item => item.refundSelectable);
-    const totalBase = eligible.reduce((sum, item) => sum + Number(item.paidPrice || 0) * Number(item.refundAvailableQuantity || 0), 0);
+    const eligible = order.items.filter(item => Number(item.paidPrice) > 0 && Number(item.refundBaseQuantity ?? item.refundAvailableQuantity) > 0);
+    const totalBase = eligible.reduce((sum, item) => sum + Number(item.paidPrice || 0) * Number(item.refundBaseQuantity ?? item.refundAvailableQuantity ?? 0), 0);
     const selectedBase = this.data.refundItems.reduce((sum, selected) => {
       const item = order.items.find(row => row.id === selected.orderItemId);
       return sum + (item ? Number(item.paidPrice || 0) * selected.quantity : 0);
     }, 0);
-    const remaining = Number(order.refundableAmount || 0);
+    const remaining = Number(order.refundPaymentRemaining ?? order.refundableAmount ?? 0);
     const selectedById = new Map(this.data.refundItems.map(item => [Number(item.orderItemId), Number(item.quantity)]));
-    const selectedAllRemaining = eligible.length > 0 && eligible.every(item => selectedById.get(Number(item.id)) === Number(item.refundAvailableQuantity || 0));
+    const selectedAllRemaining = eligible.length > 0 && eligible.every(item => selectedById.get(Number(item.id)) === Number(item.refundBaseQuantity ?? item.refundAvailableQuantity ?? 0));
     const amount = selectedAllRemaining
       ? remaining
       : totalBase > 0 ? Math.min(remaining, Math.round(remaining * selectedBase * 100 / totalBase) / 100) : 0;

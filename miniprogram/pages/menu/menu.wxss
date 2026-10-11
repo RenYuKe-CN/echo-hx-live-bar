@@ -1,3 +1,4 @@
+@import "menu-service.wxss";
 @import "menu-overlays.wxss";
 .menu-page{padding:26rpx 28rpx 180rpx;box-sizing:border-box}
 .menu-heading{display:flex;align-items:center;justify-content:space-between;gap:20rpx;margin-bottom:26rpx}

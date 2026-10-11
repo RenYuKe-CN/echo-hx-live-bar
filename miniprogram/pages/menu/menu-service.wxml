@@ -1,0 +1,14 @@
+<view wx:if="{{serviceVisible}}" class="service-mask" catchtap="closeService">
+  <view class="service-sheet" catchtap="noop">
+    <view class="service-head"><view><text class="service-title">呼叫服务员</text><text class="service-subtitle">{{tableNo}} 桌 · {{appName}}</text></view><button bindtap="closeService" disabled="{{serviceBusy}}" aria-label="关闭服务需求">×</button></view>
+    <scroll-view scroll-y="true" class="service-body">
+      <view class="service-choices"><button wx:for="{{serviceTypes}}" wx:key="key" class="service-choice {{serviceType === item.key ? 'chosen' : ''}}" data-type="{{item.key}}" bindtap="selectServiceType" disabled="{{serviceBusy}}">{{item.label}}</button></view>
+      <text class="service-note-label">服务需求备注{{serviceType === 'other' ? '（必填）' : '（可选）'}}</text>
+      <textarea class="service-note" value="{{serviceNote}}" maxlength="300" placeholder="可以说明具体需求，例如需要两份纸巾、帮忙收拾桌面" bindinput="onServiceNote" disabled="{{serviceBusy}}"/>
+      <text class="service-copy">服务员领取后会显示处理人。同桌同类需求会合并，补充的备注也会一起收到。</text>
+      <view wx:if="{{serviceLoadError}}" class="service-error"><text>{{serviceLoadError}}</text><button bindtap="refreshServices">刷新状态</button></view>
+      <view wx:if="{{serviceRequests.length}}" class="service-history"><text class="service-note-label">本桌服务记录</text><view wx:for="{{serviceRequests}}" wx:key="id" class="service-record"><view class="service-record-top"><text>{{item.title}}</text><text class="service-status {{item.status}}">{{item.statusLabel}}</text></view><text wx:if="{{item.notesText}}" class="service-record-note">{{item.notesText}}</text><text wx:if="{{item.callCount > 1}}" class="service-owner">本桌已呼叫 {{item.callCount}} 次</text><text wx:if="{{item.assignedStaff}}" class="service-owner">处理人：{{item.assignedStaff}}</text><text wx:if="{{item.completionNote}}" class="service-owner">处理说明：{{item.completionNote}}</text></view></view>
+    </scroll-view>
+    <button class="service-submit" bindtap="submitService" loading="{{serviceBusy}}" disabled="{{serviceBusy}}">通知服务员</button>
+  </view>
+</view>

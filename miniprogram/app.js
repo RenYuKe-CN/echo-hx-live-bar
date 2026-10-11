@@ -1,7 +1,7 @@
 const api = require('./utils/api');
 const branding = require('./utils/branding');
 App({
-  globalData: { sessionId: null, tableNo: 'A-08', pendingScene: '', pendingCouponId: '', pendingCouponMode: '', tableVersion: 0, user: null },
+  globalData: { sessionId: null, tableNo: '', hasScannedTable: false, pendingScene: '', pendingCouponId: '', pendingCouponMode: '', tableVersion: 0, user: null },
   onLaunch(options) {
     api.setUserId(1);
     this.initialize();
@@ -28,6 +28,7 @@ App({
   applyLaunchOptions(options = {}) {
     const query = options.query || {};
     if (query.scene) {
+      this.globalData.hasScannedTable = true;
       let scene = query.scene;
       try { scene = decodeURIComponent(scene); } catch {}
       if (scene !== this.globalData.pendingScene) {
@@ -35,7 +36,9 @@ App({
         this.globalData.sessionId = null;
         this.globalData.tableVersion++;
       }
-    } else if (query.table && query.table !== this.globalData.tableNo) {
+    } else if (query.table) {
+      this.globalData.hasScannedTable = true;
+      if (query.table === this.globalData.tableNo) return;
       this.globalData.pendingScene = '';
       this.globalData.tableNo = query.table;
       this.globalData.sessionId = null;

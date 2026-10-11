@@ -1,7 +1,7 @@
 <view class="menu-page">
   <view class="menu-heading">
     <view class="heading-copy"><text class="heading-title">{{homeTitle}}</text><text class="heading-hint">同桌可一起加单</text></view>
-    <view class="table-chip"><image src="/assets/icons/table-green.png" mode="aspectFit"/><text>{{tableNo}} 桌</text></view>
+    <view class="heading-actions"><view class="table-chip"><image src="/assets/icons/table-green.png" mode="aspectFit"/><text>{{tableNo ? tableNo + ' 桌' : '请先扫码'}}</text></view><button class="call-service" bindtap="openService"><image src="/assets/icons/bell-green.png" mode="aspectFit"/><text>呼叫服务员</text><text wx:if="{{servicePendingCount}}" class="call-service-count">{{servicePendingCount}}</text></button></view>
   </view>
   <button class="membership-strip" bindtap="openTierRules" aria-label="查看会员等级权益">
     <view class="member-label"><view class="member-mark"><image src="/assets/icons/crown-gold.png" mode="aspectFit"/></view><text>{{isMember ? user.memberLevel : '普通会员'}}</text></view>
@@ -39,3 +39,5 @@
   </view>
 </view>
 <include src="menu-overlays.wxml"/>
+
+<include src="menu-service.wxml"/>

@@ -43,7 +43,7 @@ beforeEach(() => {
     db.prepare('DELETE FROM mini_page_settings').run();
     db.prepare("UPDATE stores SET name='Test Store' WHERE id=1").run();
     db.prepare('INSERT OR REPLACE INTO staff_sessions(token_hash,account_id,expires_at) VALUES(?,1,?)').run(hash(tokens.admin), new Date(Date.now() + 3600000).toISOString());
-    for (const table of ['user_coupons', 'refund_transactions', 'refund_requests', 'inventory_logs', 'wallet_transactions', 'points_ledger', 'order_items', 'orders', 'cart_items', 'session_members', 'table_sessions', 'wechat_sessions', 'user_messages']) db.prepare(`DELETE FROM ${table}`).run();
+    for (const table of ['work_events','fulfillment_batch_items','fulfillment_batches','service_submit_commands','service_request_notes','service_requests','user_coupons', 'refund_transactions', 'refund_requests', 'inventory_logs', 'wallet_transactions', 'points_ledger', 'order_items', 'orders', 'cart_items', 'session_members', 'table_sessions', 'wechat_sessions', 'user_messages']) db.prepare(`DELETE FROM ${table}`).run();
     db.prepare("UPDATE users SET member_tier_id=NULL,member_level='普通会员',member_discount=1,member_expires_at=NULL,points=0").run();
     db.prepare("UPDATE users SET phone='13800138001',wechat_openid='openid-1' WHERE id=1").run();
     db.prepare("UPDATE member_tiers SET status='inactive'").run();
@@ -232,6 +232,18 @@ test('verified duplicate payment notifications settle stock, wallet and points o
   assert.deepEqual(db.prepare('SELECT stored_cents,stored_reserved_cents FROM wallet_accounts WHERE user_id=1').get(), { stored_cents: 7000, stored_reserved_cents: 0 });
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM wallet_transactions WHERE type='order_payment'").get().n, 1);
   assert.equal(db.prepare('SELECT points FROM users WHERE id=1').get().points, 60);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM work_events WHERE kind='order_new' AND entity_id=100").get().n, 1);
+});
+
+test('an older pending order that pays late produces a fresh work event after newer orders', async () => {
+  makeOrder({ method: 'mixed', status: 'pending_payment', stored: 3000, wechat: 3000 });
+  db.prepare('UPDATE wallet_accounts SET stored_reserved_cents=3000 WHERE user_id=1').run();
+  const newer = await call('/admin/pos/orders', { token: tokens.admin, method: 'POST', body: { tableId: 1, phone: '13800138001', items: [{ productId: 1, quantity: 1 }], paymentMethod: 'cash', requestId: crypto.randomUUID() } });
+  assert.equal(newer.status, 201);
+  const cursor = db.prepare('SELECT MAX(id) AS id FROM work_events').get().id;
+  assert.equal((await notify(paymentPayload())).status, 200);
+  const feed = (await call(`/admin/workdesk?after=${cursor}`, { token: tokens.admin })).body;
+  assert.ok(feed.events.some(event => event.kind === 'order_new' && event.entity_id === 100));
 });
 
 test('signed but mismatched payment data cannot settle an order', async () => {
@@ -366,7 +378,7 @@ test('restoring a pre-migration backup backfills return quantities without resto
   await tar.x({ file: path.join(work, 'backups', backup.name), cwd: incoming });
   const legacyPath = path.join(incoming, 'database.sqlite');
   const legacy = new Database(legacyPath);
-  legacy.exec('ALTER TABLE order_items DROP COLUMN returned_quantity');
+  legacy.exec('ALTER TABLE order_items DROP COLUMN delivered_quantity; ALTER TABLE order_items DROP COLUMN returned_quantity');
   legacy.close();
   const manifestPath = path.join(incoming, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
