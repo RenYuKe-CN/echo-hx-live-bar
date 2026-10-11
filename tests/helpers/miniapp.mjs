@@ -52,7 +52,7 @@ export function miniappFixture(options = {}) {
   function loadPage(name) {
     const filename = path.join(root, 'pages', name, name + '.js');
     let definition;
-    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { wx, getApp: () => app, console, Page: value => { definition = value; }, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) }, { filename });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { wx, getApp: () => app, console, setInterval: () => 1, clearInterval() {}, Page: value => { definition = value; }, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) }, { filename });
     const instance = { ...definition, data: clone(definition.data), setData(value, callback) {
       const patch = clone(value); updates.push(patch);
       for (const [key, entry] of Object.entries(patch)) {

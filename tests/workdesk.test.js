@@ -43,7 +43,7 @@ const service=(type='help',note='',requestId=crypto.randomUUID(),token=tokens.us
 
 test('workspaces give waiter and cashier separate capabilities and never expose financial fields',async()=>{
  const worker=(await call('/admin/session',{token:tokens.workerA})).body.account;assert.equal(worker.workspace,'waiter');assert.deepEqual(worker.permissions,['workdesk']);
- const cashier=(await call('/admin/session',{token:tokens.cashier})).body.account;assert.equal(cashier.workspace,'cashier');assert.deepEqual(cashier.permissions,['pos','orders']);
+ const cashier=(await call('/admin/session',{token:tokens.cashier})).body.account;assert.equal(cashier.workspace,'cashier');assert.deepEqual(cashier.permissions,['pos','orders','group-buy']);
  assert.equal((await call('/admin/orders',{token:tokens.workerA})).status,403);assert.equal((await call('/admin/pos',{token:tokens.workerA})).status,403);assert.equal((await call('/admin/workdesk',{token:tokens.cashier})).status,403);
  paidOrder();const view=(await call('/admin/workdesk',{token:tokens.workerA})).body.orders[0];assert.equal(view.tableNo,'A-08');assert.equal(view.items[0].quantity,2);
  for(const field of['payable_amount_cents','profit','cost','storedPaid','phone','payer_user_id'])assert.equal(Object.hasOwn(view,field),false);

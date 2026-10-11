@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import { backfillReturnedQuantities } from './refund-stock.js';
 import { migrateOperations } from './operations-schema.js';
+import { migrateCatalog } from './catalog-schema.js';
 
 export const dataDir = path.resolve(process.env.DATA_DIR || 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -257,6 +258,7 @@ export function migrateRefundStock(database = db) {
 }
 migrateRefundStock();
 migrateOperations(db);
+migrateCatalog(db);
 ensureColumn('coupon_definitions', 'voucher_type', "TEXT NOT NULL DEFAULT 'discount'");
 ensureColumn('coupon_definitions', 'gift_product_id', 'INTEGER REFERENCES products(id)');
 db.prepare('UPDATE coupon_definitions SET allow_stack_member_discount = 1 WHERE allow_stack_member_discount = 0').run();
@@ -271,26 +273,26 @@ db.exec(`
     FROM order_items oi
     JOIN orders o ON o.id = oi.order_id
     WHERE oi.product_id = products.id AND o.payment_status = 'pending'
-  ), 0);
+  ), 0) + COALESCE((SELECT SUM(rs.quantity) FROM redemption_stock rs JOIN group_buy_redemptions r ON r.id=rs.redemption_id WHERE rs.product_id=products.id AND r.state IN ('verifying','unknown','verified')),0);
   UPDATE orders SET status = 'awaiting_delivery' WHERE status = 'paid' AND payment_status = 'paid';
   DROP TRIGGER IF EXISTS products_empty_update;
   DROP TRIGGER IF EXISTS products_empty_insert;
   DROP TRIGGER IF EXISTS products_available_restore;
   UPDATE products SET status = 'inactive', auto_unlisted = 1
-    WHERE stock - reserved_stock <= 0 AND status = 'active';
+    WHERE kind = 'basic' AND stock - reserved_stock <= 0 AND status = 'active';
   CREATE TRIGGER products_empty_update AFTER UPDATE OF stock, reserved_stock, status ON products
-  WHEN NEW.stock - NEW.reserved_stock <= 0 AND NEW.status = 'active'
+  WHEN NEW.kind = 'basic' AND NEW.stock - NEW.reserved_stock <= 0 AND NEW.status = 'active'
   BEGIN
     UPDATE products SET status = 'inactive', auto_unlisted = 1 WHERE id = NEW.id;
     INSERT INTO operation_logs (operator, action, detail) VALUES ('系统', '缺货自动下架', NEW.name);
   END;
   CREATE TRIGGER products_empty_insert AFTER INSERT ON products
-  WHEN NEW.stock - NEW.reserved_stock <= 0 AND NEW.status = 'active'
+  WHEN NEW.kind = 'basic' AND NEW.stock - NEW.reserved_stock <= 0 AND NEW.status = 'active'
   BEGIN
     UPDATE products SET status = 'inactive', auto_unlisted = 1 WHERE id = NEW.id;
   END;
   CREATE TRIGGER products_available_restore AFTER UPDATE OF stock, reserved_stock ON products
-  WHEN NEW.stock - NEW.reserved_stock > 0 AND NEW.status = 'inactive' AND NEW.auto_unlisted = 1
+  WHEN NEW.kind = 'basic' AND NEW.stock - NEW.reserved_stock > 0 AND NEW.status = 'inactive' AND NEW.auto_unlisted = 1
   BEGIN
     UPDATE products SET status = 'active', auto_unlisted = 0 WHERE id = NEW.id;
     INSERT INTO operation_logs (operator, action, detail) VALUES ('系统', '库存恢复自动上架', NEW.name);
@@ -396,6 +398,7 @@ export function reopenDatabase() {
   configureDatabase(db);
   migrateRefundStock();
   migrateOperations(db);
+  migrateCatalog(db);
 }
 
 export function centsToMoney(cents) { return Number((cents / 100).toFixed(2)); }

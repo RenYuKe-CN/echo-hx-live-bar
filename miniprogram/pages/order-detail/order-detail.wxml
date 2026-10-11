@@ -7,6 +7,7 @@
       <text class="table">桌号 {{order.tableNo || '未记录'}}</text>
     </view>
 
+    <view wx:if="{{order.bundleGroups.length}}" class="section"><view class="section-title"><text>套餐明细</text></view><view wx:for="{{order.bundleGroups}}" wx:key="id" class="info-row"><text>{{item.name}} × {{item.quantity}}</text><text>¥{{item.amount}}</text></view></view>
     <view class="section">
       <view class="section-title"><text>商品清单</text><text>{{order.items.length}} 项</text></view>
       <view wx:for="{{order.items}}" wx:key="id" class="item">

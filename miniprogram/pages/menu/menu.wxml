@@ -1,19 +1,5 @@
-<view class="menu-page">
-  <view class="menu-heading">
-    <view class="heading-copy"><text class="heading-title">{{homeTitle}}</text><text class="heading-hint">同桌可一起加单</text></view>
-    <view class="heading-actions"><view class="table-chip"><image src="/assets/icons/table-green.png" mode="aspectFit"/><text>{{tableNo ? tableNo + ' 桌' : '请先扫码'}}</text></view><button class="call-service" bindtap="openService"><image src="/assets/icons/bell-green.png" mode="aspectFit"/><text>呼叫服务员</text><text wx:if="{{servicePendingCount}}" class="call-service-count">{{servicePendingCount}}</text></button></view>
-  </view>
-  <button class="membership-strip" bindtap="openTierRules" aria-label="查看会员等级权益">
-    <view class="member-label"><view class="member-mark"><image src="/assets/icons/crown-gold.png" mode="aspectFit"/></view><text>{{isMember ? user.memberLevel : '普通会员'}}</text></view>
-    <view class="member-link"><text>会员权益</text><text class="chevron">›</text></view>
-  </button>
-  <scroll-view scroll-x="true" class="category-tabs"><button wx:for="{{categories}}" wx:key="*this" class="category-tab {{category === item ? 'is-active' : ''}}" data-category="{{item}}" bindtap="selectCategory">{{item}}</button></scroll-view>
-  <view wx:if="{{loading && !products.length}}" class="menu-loading" aria-label="正在加载菜单"><view wx:for="{{[1,2,3]}}" wx:key="*this" class="skeleton-row"><view class="skeleton-art"/><view class="skeleton-copy"><view/><view/><view/></view></view></view>
-  <view wx:elif="{{loadError && !products.length}}" class="menu-state"><image src="/assets/icons/info-muted.png" mode="aspectFit"/><text class="state-title">菜单暂时未能加载</text><text class="state-copy">{{loadError}}</text><button class="state-retry" bindtap="retryLoad">重新加载</button></view>
-  <view wx:else class="product-list">
-    <view wx:if="{{loadError}}" class="refresh-error"><text>{{loadError}}</text><button bindtap="retryLoad">重试</button></view>
-    <view wx:if="{{!visibleProducts.length}}" class="menu-state"><image src="/assets/icons/glass-muted.png" mode="aspectFit"/><text class="state-title">{{category === '推荐' ? '暂无在售商品' : '这个分类暂无商品'}}</text><text class="state-copy">可以稍后再来看看</text></view>
-    <view wx:for="{{visibleProducts}}" wx:key="id" class="product-row">
+<template name="menuProduct">
+    <view class="product-row">
       <view class="product-art" data-id="{{item.id}}" bindtap="showDetail" role="button" aria-label="查看{{item.name}}详情">
         <image wx:if="{{item.imageUrl}}" class="product-photo" src="{{item.imageUrl}}" mode="aspectFill" data-id="{{item.id}}" data-src="{{item.imageUrl}}" binderror="onProductImageError"/>
         <view wx:else class="product-placeholder"><image src="{{item.placeholderIcon}}" mode="aspectFit"/><text>商品图片</text></view>
@@ -29,9 +15,37 @@
             <button class="counter-button counter-plus" disabled="{{pendingProducts[item.id] || item.remainingQuantity <= 0}}" data-id="{{item.id}}" data-delta="1" bindtap="change" aria-label="添加{{item.name}}"><view>+</view></button>
           </view>
         </view>
-        <text class="product-stock {{item.stock <= 5 ? 'stock-low' : ''}}">剩余 {{item.stock}} 件{{item.remainingQuantity <= 0 ? ' · 已达可选数量' : ''}}</text>
+        <text wx:if="{{item.componentsText}}" class="product-composition">{{item.componentsText}}</text>
+        <text class="product-stock {{item.stock <= 5 ? 'stock-low' : ''}}">剩余 {{item.stock}} {{item.unit || '件'}}{{item.remainingQuantity <= 0 ? ' · 已达可选数量' : ''}}</text>
       </view>
     </view>
+</template>
+<view class="menu-page">
+  <view class="menu-heading">
+    <view class="heading-copy"><text class="heading-title">{{homeTitle}}</text><text class="heading-hint">同桌可一起加单</text></view>
+    <view class="heading-actions"><view class="table-chip"><image src="/assets/icons/table-green.png" mode="aspectFit"/><text>{{tableNo ? tableNo + ' 桌' : '请先扫码'}}</text></view><button class="call-service" bindtap="openService"><image src="/assets/icons/bell-green.png" mode="aspectFit"/><text>呼叫服务员</text><text wx:if="{{servicePendingCount}}" class="call-service-count">{{servicePendingCount}}</text></button></view>
+  </view>
+  <view class="menu-tools"><button class="membership-strip" bindtap="openTierRules" aria-label="查看会员等级权益">
+    <view class="member-label"><view class="member-mark"><image src="/assets/icons/crown-gold.png" mode="aspectFit"/></view><text>{{isMember ? user.memberLevel : '普通会员'}}</text></view>
+    <view class="member-link"><text>会员权益</text><text class="chevron">›</text></view>
+  </button><button class="group-buy-entry" bindtap="openGroupBuy"><image src="/assets/icons/ticket-green.png" mode="aspectFit"/><text>团购兑换</text></button></view>
+  <view class="catalog-body">
+    <scroll-view class="category-sidebar" scroll-y="{{true}}" scroll-into-view="{{sidebarTarget}}" scroll-with-animation="{{true}}">
+      <button wx:for="{{categories}}" wx:key="*this" id="category-{{index}}" class="category-tab {{category === item ? 'is-active' : ''}}" data-category="{{item}}" bindtap="selectCategory" aria-label="{{item}}分类">{{item}}</button>
+    </scroll-view>
+    <scroll-view class="product-scroll" scroll-y="{{true}}" scroll-into-view="{{targetSection}}" scroll-with-animation="{{true}}" bindscroll="onCatalogScroll" bindtouchstart="onCatalogTouch">
+      <view wx:if="{{loading && !products.length}}" class="menu-loading"><view wx:for="{{[1,2,3]}}" wx:key="*this" class="skeleton-row"><view class="skeleton-art"/><view class="skeleton-copy"><view/><view/><view/></view></view></view>
+      <view wx:elif="{{loadError && !products.length}}" class="menu-state"><text class="state-title">菜单暂时未能加载</text><text class="state-copy">{{loadError}}</text><button class="state-retry" bindtap="retryLoad">重新加载</button></view>
+      <view wx:else class="product-list">
+        <view wx:if="{{loadError}}" class="refresh-error"><text>{{loadError}}</text><button bindtap="retryLoad">重试</button></view>
+        <view wx:if="{{!visibleProducts.length}}" class="menu-state"><text class="state-title">暂无在售商品</text><text class="state-copy">可以稍后再来看看</text></view>
+        <view wx:for="{{sections}}" wx:for-item="section" wx:key="id" id="{{section.id}}" class="catalog-section">
+          <view class="catalog-section-title">{{section.name}}</view>
+          <block wx:for="{{section.productIndexes}}" wx:for-item="productIndex" wx:key="*this"><template is="menuProduct" data="{{item: visibleProducts[productIndex], isMember, cartMap, pendingProducts}}"/></block>
+        </view>
+        <view style="height:{{catalogTailHeight}}px"/>
+      </view>
+    </scroll-view>
   </view>
   <view class="checkout-dock">
     <view class="checkout-summary" bindtap="preview" role="button" aria-label="查看本桌购物车"><view class="checkout-bag"><image src="/assets/icons/bag-gold.png" mode="aspectFit"/><text wx:if="{{totalQty}}" class="checkout-count">{{totalQty > 99 ? '99+' : totalQty}}</text></view><view class="checkout-amount"><text class="checkout-total">¥{{couponCheckout ? couponCheckout.payableText : totals.memberText}}</text><text class="checkout-caption">已选 {{totalQty}} 件{{couponCheckout ? ' · 已使用优惠券' : ''}}</text></view></view>

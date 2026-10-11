@@ -3,9 +3,10 @@ const branding = require('../../utils/branding');
 const service = require('../../utils/service');
 const { moneyText, productIcon } = require('../../utils/presentation');
 Page({
-  data: { ...service.initialData, products: [], visibleProducts: [], categories: ['推荐'], category: '推荐', cart: [], cartMap: {}, pendingProducts: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, couponCheckout: null, selectedCouponId: '', totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: '', ...branding.readSettings(), loading: true, loadError: '', cartBusy: false, detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
+  data: { ...service.initialData, products: [], visibleProducts: [], categories: [], sections: [], category: '', targetSection: '', sidebarTarget: '', catalogTailHeight: 0, cart: [], cartMap: {}, pendingProducts: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, couponCheckout: null, selectedCouponId: '', totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: '', ...branding.readSettings(), loading: true, loadError: '', cartBusy: false, detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
   ...service.methods,
   onLoad() { this.tableVersion = -1; },
+  onReady() { this.measureCatalog(); },
   onHide() { this.stopServicePolling(); },
   onUnload() { this.stopServicePolling(); },
   onShow() { this.startServicePolling(); return this.load().then(() => this.refreshServices()); },
@@ -41,13 +42,51 @@ Page({
   },
   retryLoad() { const app = getApp(); if (app.globalData.loginError && app.initialize) app.initialize(); return this.load(); },
   filter() {
-    const list = (this.data.category === '推荐' ? this.data.products : this.data.products.filter(p => p.category === this.data.category)).map(p => ({ ...p, initial: (p.name || '商品').charAt(0), imageUrl: p.image_url && this.failedImages?.[p.id] !== api.imageUrl(p.image_url) ? api.imageUrl(p.image_url) : '', placeholderIcon: productIcon(p), remainingQuantity: Math.max(0, Number(p.stock) - (this.data.cartMap[p.id] || 0)), priceText: moneyText(p.price), memberPriceText: moneyText(p.memberPrice), referenceMemberPriceText: moneyText(p.referenceMemberPrice ?? p.price), showDiscount: this.data.isMember && p.memberPrice < p.price }));
-    this.setData({ visibleProducts: list });
+    const list = this.data.products.map(p => ({ ...p, initial: (p.name || '商品').charAt(0), imageUrl: p.image_url && this.failedImages?.[p.id] !== api.imageUrl(p.image_url) ? api.imageUrl(p.image_url) : '', placeholderIcon: productIcon(p), remainingQuantity: Math.max(0, Number(p.stock) - (this.data.cartMap[p.id] || 0)), priceText: moneyText(p.price), memberPriceText: moneyText(p.memberPrice), referenceMemberPriceText: moneyText(p.referenceMemberPrice ?? p.price), showDiscount: this.data.isMember && p.memberPrice < p.price, componentsText: (p.components || []).map(c => `${c.name} × ${c.quantity}${c.unit}`).join(' · ') }));
+    const categories = [...new Set(this.data.categories.concat(list.map(p => p.category)))].filter(c => list.some(p => p.category === c));
+    const sections = categories.map((name,index) => ({ name, id: `section-${index}`, categoryId: `category-${index}`, productIndexes: list.map((p,i) => p.category === name ? i : -1).filter(i => i >= 0) }));
+    this.setData({ visibleProducts: list, categories, sections, category: categories.includes(this.data.category) ? this.data.category : categories[0] || '' }, () => this.measureCatalog());
     if (this.data.detailProduct) this.setData({ detailProduct: list.find(item => item.id === this.data.detailProduct.id) || this.data.detailProduct });
   },
   onProductImageError(e) { const id = Number(e.currentTarget.dataset.id); this.failedImages = { ...this.failedImages, [id]: e.currentTarget.dataset.src }; this.filter(); },
   openTierRules() { wx.navigateTo({ url: '/pages/member-tiers/member-tiers' }); },
-  selectCategory(e) { this.setData({ category: e.currentTarget.dataset.category }); this.filter(); },
+  selectCategory(e) {
+    const category = e.currentTarget.dataset.category, index = this.data.categories.indexOf(category);
+    if (index < 0) return;
+    this.categoryJump = { index, until: Date.now() + 1000 };
+    this.setData({ category, sidebarTarget: `category-${index}`, targetSection: '' }, () => this.setData({ targetSection: `section-${index}` }));
+  },
+  measureCatalog() {
+    const query = this.createSelectorQuery?.() || wx.createSelectorQuery?.().in(this);
+    if (!query || !this.data.sections.length) return;
+    query.select('.product-scroll').boundingClientRect();
+    query.selectAll('.catalog-section').boundingClientRect();
+    query.select('.product-scroll').scrollOffset();
+    query.exec(result => {
+      const [viewport, sections, position] = result || [];
+      if (!viewport || !sections?.length) return;
+      this.catalogHeight = viewport.height;
+      this.sectionOffsets = sections.map(r => r.top - viewport.top + (position?.scrollTop ?? this.lastCatalogScroll ?? 0));
+      const tail = Math.max(0, Math.ceil(viewport.height - sections[sections.length - 1].height));
+      if (tail !== this.data.catalogTailHeight) this.setData({ catalogTailHeight: tail });
+    });
+  },
+  onCatalogTouch() { this.categoryJump = null; },
+  onCatalogScroll(e) {
+    const top = Math.max(0,e.detail.scrollTop || 0); this.lastCatalogScroll = top;
+    if (!this.sectionOffsets?.length) return;
+    if (this.categoryJump) {
+      const target = this.sectionOffsets[this.categoryJump.index];
+      if (Math.abs(top-target)<3 || Date.now()>this.categoryJump.until) this.categoryJump = null;
+      else return;
+    }
+    let index = 0;
+    this.sectionOffsets.forEach((offset,i) => { if (offset <= top + 12) index=i; });
+    const category = this.data.categories[index];
+    if (category && category !== this.data.category) this.setData({ category, sidebarTarget: `category-${index}` });
+  },
+  onResize() { this.measureCatalog(); },
+  openGroupBuy() { wx.navigateTo({ url: '/pages/group-buy/group-buy' }); },
   showDetail(e) { const product = this.data.visibleProducts.find(item => item.id === Number(e.currentTarget.dataset.id)); if (product) this.setData({ detailProduct: product }); },
   closeDetail() { this.setData({ detailProduct: null }); },
   noop() {},
@@ -65,13 +104,14 @@ Page({
       const updates = { cart: data.items, cartMap, totals: { ...data.totals, originalText: moneyText(data.totals.original), memberText: moneyText(data.totals.member) }, totalQty: data.items.reduce((n, i) => n + i.quantity, 0) };
       // Quantity changes must not replace the product rows or their photos.
       const availability = new Map(data.items.map(item => [Number(item.product_id), Number(item.availableStock ?? item.stock)]));
+      Object.entries(data.stockByProduct || {}).forEach(([id,stock])=>availability.set(Number(id),Number(stock)));
       this.data.products.forEach((product, index) => {
         const stock = availability.get(product.id);
         if (Number.isFinite(stock) && stock !== product.stock) updates[`products[${index}].stock`] = stock;
       });
       this.data.visibleProducts.forEach((product, index) => {
         const stock = Number.isFinite(availability.get(product.id)) ? availability.get(product.id) : product.stock;
-        const remaining = Math.max(0, Number(stock) - (cartMap[product.id] || 0));
+        const remaining = data.remainingByProduct?.[product.id] ?? Math.max(0, Number(stock) - (cartMap[product.id] || 0));
         if (stock !== product.stock) updates[`visibleProducts[${index}].stock`] = stock;
         if (remaining !== product.remainingQuantity) updates[`visibleProducts[${index}].remainingQuantity`] = remaining;
         if (this.data.detailProduct?.id === product.id) {
@@ -79,7 +119,7 @@ Page({
           if (remaining !== this.data.detailProduct.remainingQuantity) updates['detailProduct.remainingQuantity'] = remaining;
         }
       });
-      this.setData(updates);
+      this.setData(updates, () => this.measureCatalog());
       if (this.data.selectedCouponId) return this.refreshCouponCheckout(this.data.selectedCouponId, context);
       return data;
     }).catch(error => { if (this.isCurrentCart(context)) throw error; return null; });
