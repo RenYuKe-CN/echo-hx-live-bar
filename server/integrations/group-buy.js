@@ -1,12 +1,13 @@
 import crypto from 'node:crypto';
 import { getIntegrationValues } from '../config.js';
+import { meituanCapability, meituanProvider } from './meituan.js';
 
 let tokenCache;
 const error = message => Object.assign(new Error(message), { status:503 });
 export function groupBuyCapabilities() {
   const c=getIntegrationValues();
   return {
-    meituan:{ready:false,message:'美团自助兑换待开通，请联系服务员核销'},
+    meituan:meituanCapability(c),
     douyin:{ready:c.douyin_redemption_enabled==='1' && !!(c.douyin_client_key && c.douyin_client_secret && c.douyin_poi_id),message:'抖音自助兑换待开通，请联系服务员核销'}
   };
 }
@@ -31,6 +32,7 @@ async function douyinToken(c) {
 export function groupBuyProvider(platform) {
   if(!groupBuyCapabilities()[platform]?.ready)throw error(groupBuyCapabilities()[platform]?.message || '团购平台无效');
   const c=getIntegrationValues();
+  if(platform==='meituan')return meituanProvider(c,request);
   const call=async (action,payload,method='GET')=>{
     const token=await douyinToken(c),url=new URL(`https://open.douyin.com/goodlife/v1/fulfilment/certificate/${action}/`);
     if(c.douyin_account_id)payload.account_id=c.douyin_account_id;

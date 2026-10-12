@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 const work=fs.mkdtempSync(path.join(os.tmpdir(),'echo-catalog-tests-'));
-Object.assign(process.env,{DATA_DIR:work,ECHO_ENV_FILE:path.join(work,'.env'),NODE_ENV:'production',ALLOW_DEMO_USER:'false',ADMIN_INITIAL_PASSWORD:'catalog-test-password',DOUYIN_CLIENT_KEY:'fixture-key',DOUYIN_CLIENT_SECRET:'fixture-secret',DOUYIN_POI_ID:'fixture-poi',DOUYIN_REDEMPTION_ENABLED:'0'});
+Object.assign(process.env,{DATA_DIR:work,ECHO_ENV_FILE:path.join(work,'.env'),NODE_ENV:'production',ALLOW_DEMO_USER:'false',ADMIN_INITIAL_PASSWORD:'catalog-test-password',DOUYIN_CLIENT_KEY:'fixture-key',DOUYIN_CLIENT_SECRET:'fixture-secret',DOUYIN_POI_ID:'fixture-poi',DOUYIN_REDEMPTION_ENABLED:'0',MEITUAN_DEVELOPER_ID:'100567',MEITUAN_SIGN_KEY:'fixture-mt-sign-key',MEITUAN_VENDOR_SHOP_ID:'fixture-mt-shop',MEITUAN_ERP_ID:'fixture-erp',MEITUAN_ERP_NAME:'顾客自助核销',MEITUAN_REDEMPTION_ENABLED:'0'});
 const {db}=await import('../server/db.js');
 const {createApp}=await import('../server/app.js');
 const {migrateCatalog}=await import('../server/catalog-schema.js');
@@ -21,6 +21,7 @@ before(async()=>{
 });
 beforeEach(()=>{
   process.env.DOUYIN_REDEMPTION_ENABLED='0';
+  process.env.MEITUAN_REDEMPTION_ENABLED='0';process.env.MEITUAN_VENDOR_SHOP_ID='fixture-mt-shop';
   for(const name of ['work_events','fulfillment_batch_items','fulfillment_batches','service_submit_commands','service_request_notes','service_requests','redemption_stock','group_buy_redemptions','refund_transactions','refund_requests','user_messages','points_ledger','wallet_transactions','inventory_logs','order_items','orders','cart_items','session_members','table_sessions','group_buy_mappings','bundle_components','wechat_sessions','staff_sessions'])db.prepare(`DELETE FROM ${name}`).run();
   db.prepare("DELETE FROM products WHERE id>6").run();db.prepare("UPDATE products SET kind='basic',stock=100,reserved_stock=0,status='active',sellable=1,cost_cents=500,price_cents=2000,member_price_cents=NULL,unit='瓶',safety_stock=20,target_stock=100,recipe_version=1").run();
   db.prepare("UPDATE products SET cost_cents=800,unit='份',price_cents=4000 WHERE id=4").run();db.prepare('UPDATE staff_accounts SET password_hash=? WHERE id=1').run(adminHash);
@@ -137,4 +138,116 @@ test('super admin directly changes own and managed passwords; other sessions are
   assert.equal((await call('/admin/change-password',{token:tokens.cashier,method:'POST',body:{newPassword:'new-cashier-password'}})).status,400);
   assert.equal((await admin('/accounts/2/reset-password','POST',{password:'reset-cashier-password'})).status,200);assert.equal((await call('/admin/session',{token:tokens.cashier})).status,401);
   assert.equal((await call('/admin/login',{token:null,method:'POST',body:{username:'cashier',password:'reset-cashier-password'}})).status,200);
+});
+
+const mtCode='000012345678',mtDeal='9223372036854775800';
+function meituanMock({timeout=false,prepareRejected=false,receiptMismatch=false,couponPatch={},queryMutation={},history='success',historyWait}={}) {
+  process.env.MEITUAN_REDEMPTION_ENABLED='1';
+  db.prepare("INSERT INTO group_buy_mappings(store_id,platform,external_product_id,external_sku_id,product_id,name,price_cents,fee_rate) VALUES(1,'meituan',?,'whole-package',?,'美团双人套餐',8999,5)").run(mtDeal,bundleId);
+  const calls=[];let queries=0,context;
+  globalThis.fetch=async(url,options)=>{
+    const parameters=Object.fromEntries(new URLSearchParams(options.body)),biz=JSON.parse(parameters.biz),action=String(url).split('/coupon/')[1];
+    calls.push({action,biz,parameters,options});
+    assert.equal(parameters.businessId,'79');assert.equal(parameters.version,'2');assert.equal(parameters.developerId,'100567');assert.match(parameters.sign,/^[a-f0-9]{40}$/);
+    const sorted=Object.keys(parameters).filter(key=>key!=='sign').sort().map(key=>key+parameters[key]).join('');
+    assert.equal(parameters.sign,crypto.createHash('sha1').update('fixture-mt-sign-key'+sorted).digest('hex'));
+    assert.equal(options.method,'POST');assert.equal(biz.vendorShopId,'fixture-mt-shop');
+    const response=data=>new Response(JSON.stringify({code:'OP_SUCCESS',traceId:'fixture-trace',data}));
+    if(action==='status/query') {
+      queries++;
+      return response({status:10,couponStatus:10,dealType:2,dealId:mtDeal,dealTitle:'美团双人套餐',dealValue:'120.00',realAmount:'89.99',dealRuleCouponLimit:-1,
+        dealSkuMappingDetail:{count:1,vendorSkus:['whole-package']},...couponPatch,...(queries>1?queryMutation:{})});
+    }
+    if(action==='batchPrepare') {
+      if(prepareRejected)return new Response(JSON.stringify({code:'COUPON_UNAVAILABLE',msg:'private code'}));
+      return response(undefined);
+    }
+    if(action==='batchConsume') {
+      context=biz;
+      const saved=db.prepare('SELECT * FROM group_buy_redemptions WHERE platform=\'meituan\'').get();
+      assert.equal(saved.state,'verifying');assert.equal(JSON.parse(saved.provider_json).verificationContext.vendorOrderId,biz.vendorOrderId);
+      if(timeout)throw new Error('fixture timeout after redemption may have reached platform');
+      return response({toPayAmount:biz.toPayAmount,couponCodeInfoList:[{couponCode:receiptMismatch?'other-coupon':biz.couponCodes[0]}]});
+    }
+    if(action==='queryLocalListByDate') {
+      if(historyWait)await historyWait();
+      if(history==='empty')return response({total:0,vendorOrderList:[]});
+      return response({total:1,vendorOrderList:[{vendorOrderId:history==='other-order'?'OTHER-ORDER':context.vendorOrderId,count:1,dealInfoList:[{dealId:history==='other-deal'?'OTHER-DEAL':mtDeal,dealType:2,couponCodeList:[mtCode],couponDetailList:[{couponCode:mtCode,couponStatus:history==='cancelled'?25:10,realAmount:history==='other-amount'?'1.00':'89.99'}]}]}]});
+    }
+    throw new Error('Unexpected Meituan request: '+action);
+  };
+  return calls;
+}
+const mtQuery=()=>call('/sessions/1/group-buy/query',{method:'POST',body:{platform:'meituan',code:mtCode}});
+test('Meituan is disabled until all direct-connect credentials and an explicit switch are configured',async()=>{
+  assert.equal((await call('/sessions/1/group-buy')).body.platforms.meituan.ready,false);
+  assert.equal((await mtQuery()).status,503);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM group_buy_redemptions').get().n,0);
+  process.env.MEITUAN_REDEMPTION_ENABLED='1';process.env.MEITUAN_VENDOR_SHOP_ID='';
+  assert.equal((await mtQuery()).status,503);assert.deepEqual(stock(1),{stock:100,reserved_stock:0});
+});
+test('Meituan query, preflight and consume create one delivery order with real components and exact revenue',async()=>{
+  const calls=meituanMock(),q=await mtQuery();assert.equal(q.status,200);const id=q.body.records[0].id;
+  assert.equal(q.body.records[0].amount,89.99);assert.equal(q.body.records[0].components[0].quantity,6);assert.equal(calls.length,1);
+  assert.equal(calls[0].biz.couponCode,mtCode);assert.equal(db.prepare('SELECT certificate_id FROM group_buy_redemptions WHERE id=?').get(id).certificate_id,mtCode);
+  const result=await consume(id);assert.equal(result.body.record.state,'success');assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
+  assert.deepEqual(calls.map(c=>c.action),['status/query','status/query','batchPrepare','batchConsume']);
+  const consumed=calls.at(-1).biz;assert.equal(result.body.record.orderNo,consumed.vendorOrderId);assert.equal(consumed.toPayAmount,'120.00');
+  assert.equal(consumed.orderSkus[0].vendorSkuId,'whole-package');assert.equal(consumed.orderSkus[0].unitPrice,'120.00');assert.equal(consumed.orderSkus[0].count,1);assert.equal(consumed.erpName,'顾客自助核销');
+  assert.equal((await consume(id)).body.record.orderNo,result.body.record.orderNo);assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);
+  const order=db.prepare('SELECT * FROM orders WHERE order_no=?').get(result.body.record.orderNo);assert.equal(order.source_channel,'meituan');assert.equal(order.payable_amount_cents,8999);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM work_events WHERE kind=\'order_new\' AND entity_id=?').get(order.id).n,1);
+  const amount=db.prepare('SELECT SUM(quantity*paid_price_cents) AS amount FROM order_items WHERE order_id=?').get(order.id).amount;assert.equal(amount,8999);
+});
+test('Meituan cannot consume an unmapped package or insufficient shared goods',async()=>{
+  const calls=meituanMock();db.prepare("DELETE FROM group_buy_mappings WHERE platform='meituan'").run();assert.equal((await mtQuery()).status,409);assert.equal(calls.length,1);
+  db.prepare("INSERT INTO group_buy_mappings(store_id,platform,external_product_id,product_id,name) VALUES(1,'meituan',?,?,'双人套餐')").run(mtDeal,bundleId);
+  const q=await mtQuery();assert.equal(q.status,200);db.prepare('UPDATE products SET stock=5 WHERE id=1').run();
+  assert.equal((await consume(q.body.records[0].id)).status,409);assert.equal(calls.some(c=>c.action==='batchConsume'),false);
+});
+test('Meituan revalidates changed vouchers and preflight rejection releases stock without consuming',async()=>{
+  for(const options of [{prepareRejected:true},{queryMutation:{couponStatus:20}},{queryMutation:{realAmount:'1.00'}}]) {
+    db.prepare("DELETE FROM group_buy_redemptions").run();db.prepare("DELETE FROM group_buy_mappings WHERE platform='meituan'").run();
+    const calls=meituanMock(options),q=await mtQuery(),result=await consume(q.body.records[0].id);
+    assert.equal(result.body.record.state,'failed');assert.deepEqual(stock(1),{stock:100,reserved_stock:0});assert.equal(calls.some(c=>c.action==='batchConsume'),false);
+  }
+});
+test('Meituan limit and merchant configuration are checked before dispatching consumption',async()=>{
+  const calls=meituanMock({couponPatch:{dealRuleCouponLimit:1}}),q=await mtQuery(),id=q.body.records[0].id;
+  assert.match(q.body.records[0].rulesText,/上限：1 张/);
+  process.env.MEITUAN_VENDOR_SHOP_ID='other-shop';assert.equal((await consume(id)).status,503);assert.equal(calls.some(c=>c.action==='batchConsume'),false);
+  process.env.MEITUAN_VENDOR_SHOP_ID='fixture-mt-shop';assert.equal((await consume(id)).body.record.state,'success');
+  assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
+});
+test('Meituan timeout holds stock across restart and exact original order history recovers once without a second consumption',async()=>{
+  const calls=meituanMock({timeout:true}),q=await mtQuery(),id=q.body.records[0].id;
+  assert.equal((await consume(id)).body.record.state,'unknown');assert.deepEqual(stock(1),{stock:100,reserved_stock:6});migrateCatalog(db);
+  assert.equal((await admin('/tables/1/close','POST',{})).status,409);
+  assert.equal((await consume(id)).body.record.state,'unknown');assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);
+  const record=(await admin(`/group-buy/${id}/recheck`,'POST')).body.record;assert.equal(record.state,'success');assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
+  const history=calls.find(c=>c.action==='queryLocalListByDate');assert.equal(history.biz.vendorOrderId,record.orderNo);assert.match(history.biz.date,/^\d{4}-\d{2}-\d{2}$/);
+  assert.equal((await admin(`/group-buy/${id}/recheck`,'POST')).body.record.orderNo,record.orderNo);assert.equal(calls.filter(c=>c.action==='queryLocalListByDate').length,1);
+  assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,1);
+});
+test('missing, cancelled, mismatched order/deal/amount history never releases or fulfills an ambiguous Meituan voucher',async()=>{
+  for(const history of ['empty','cancelled','other-order','other-deal','other-amount']) {
+    for(const table of ['redemption_stock','group_buy_redemptions'])db.prepare(`DELETE FROM ${table}`).run();db.prepare("DELETE FROM group_buy_mappings WHERE platform='meituan'").run();db.prepare('UPDATE products SET reserved_stock=0').run();
+    const calls=meituanMock({timeout:true,history}),q=await mtQuery(),id=q.body.records[0].id;await consume(id);
+    assert.equal((await admin(`/group-buy/${id}/recheck`,'POST')).body.record.state,'unknown',history);assert.deepEqual(stock(1),{stock:100,reserved_stock:6});
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,0);assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);
+  }
+});
+test('incomplete Meituan success receipts remain unknown until original-order evidence is available',async()=>{
+  meituanMock({receiptMismatch:true});const q=await mtQuery(),id=q.body.records[0].id;
+  assert.equal((await consume(id)).body.record.state,'unknown');assert.deepEqual(stock(1),{stock:100,reserved_stock:6});
+  assert.equal((await admin(`/group-buy/${id}/recheck`,'POST')).body.record.state,'success');assert.equal(stock(1).stock,94);
+});
+test('concurrent Meituan result checks share one request and cannot race an administrator release',{timeout:5000},async()=>{
+  let complete;const waiting=new Promise(resolve=>{complete=resolve;});const calls=meituanMock({timeout:true,historyWait:()=>waiting});
+  const q=await mtQuery(),id=q.body.records[0].id;await consume(id);
+  assert.equal((await call(`/admin/group-buy/${id}/recheck`,{token:tokens.waiter,method:'POST'})).status,403);
+  const first=admin(`/group-buy/${id}/recheck`,'POST'),second=admin(`/group-buy/${id}/recheck`,'POST');
+  while(!calls.some(c=>c.action==='queryLocalListByDate'))await new Promise(resolve=>setImmediate(resolve));
+  assert.equal((await admin(`/group-buy/${id}/resolve`,'POST',{outcome:'failed',platformChecked:true,reason:'人工确认平台未核销'})).status,200);
+  complete();assert.equal((await first).body.record.state,'failed');assert.equal((await second).body.record.state,'failed');
+  assert.equal(calls.filter(c=>c.action==='queryLocalListByDate').length,1);assert.deepEqual(stock(1),{stock:100,reserved_stock:0});assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,0);
 });

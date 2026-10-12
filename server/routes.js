@@ -19,7 +19,7 @@ import { storeName } from './branding.js';
 import { registerWorkdeskRoutes, workEvent, workOrderView, fulfillmentLines, refundHold, hasDeliveryInProgress, cancelReadyBatchesForRefund } from './workdesk.js';
 import { catalogProduct, getCatalogProduct, assertStock, reserveStock, insertSaleItems, logStock, cartAvailability } from './catalog.js';
 import { registerCatalogRoutes } from './catalog-routes.js';
-import { registerGroupBuyRoutes, finalizeRedemption } from './group-buy.js';
+import { registerGroupBuyRoutes, finalizeRedemption, reconcileMeituanRedemptions } from './group-buy.js';
 
 export const router = Router();
 const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
@@ -1411,7 +1411,7 @@ export function startBusinessSchedulers() {
   const tick = async () => {
     if (checking) return;
     checking = true;
-    try { await withBackgroundTask(async () => { await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); }); }
+    try { await withBackgroundTask(async () => { await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); await reconcileMeituanRedemptions(settleOrder); }); }
     catch (error) { console.error(`[wechat] 支付退款对账失败: ${error.message}`); }
     finally { checking = false; }
   };

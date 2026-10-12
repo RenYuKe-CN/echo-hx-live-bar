@@ -20,6 +20,7 @@ export function redemptionView(row) {
   }
   if(restrictions.time?.use_time_type===2)rules.push(`可用时段：${(restrictions.time.time_period_list||[]).map(p=>`${p.start_time}～${p.end_time}${p.end_time_is_next_day?'（次日）':''}`).join('、')}`);
   try{const raw=restrictions.attrs?.catering_voucher_limit_use_rule,rule=typeof raw==='string'?JSON.parse(raw):raw;if(rule?.limit_type>1)rules.push(`每${({2:'人',3:'桌',4:'次消费'})[rule.limit_type]||'次'}限用 ${rule.limit_use_num} 张`);}catch{/* Preserve the record; confirmation rejects malformed restrictions. */}
+  if(restrictions.maxPerRedemption)rules.push(`平台用券数量上限：${restrictions.maxPerRedemption} 张`);
   return {id:row.id,platform:row.platform,platformName:platforms[row.platform],voucher:maskVoucher(row.voucher_code),name:snapshot.product.name,
     amount:row.amount_cents/100,state:row.state,error:row.error,source:row.source,createdAt:row.created_at,
     orderNo:row.order_id ? db.prepare('SELECT order_no FROM orders WHERE id=?').get(row.order_id)?.order_no : null,
@@ -67,8 +68,19 @@ function reserveRedemption(row,requestId) {
   for(const [id,quantity] of requirements)db.prepare('INSERT INTO redemption_stock VALUES(?,?,?)').run(row.id,id,quantity);
   db.prepare("UPDATE group_buy_redemptions SET state='verifying',request_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(requestId,row.id);
 }
+function releaseRedemption(row,message,operatorId=null) {
+  for(const p of db.prepare('SELECT * FROM redemption_stock WHERE redemption_id=?').all(row.id)) {
+    if(!db.prepare('UPDATE products SET reserved_stock=reserved_stock-? WHERE id=? AND reserved_stock>=?').run(p.quantity,p.product_id,p.quantity).changes)throw catalogError('预占库存异常，请核对');
+  }
+  db.prepare('DELETE FROM redemption_stock WHERE redemption_id=?').run(row.id);
+  db.prepare("UPDATE group_buy_redemptions SET state='failed',error=?,operator_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(message,operatorId,row.id);
+}
 function validateRestrictions(row,voucher) {
   const r=voucher.restrictions;if(!r)return;
+  // Meituan defines a coupon-count ceiling, not a per-table ownership rule.
+  // This flow consumes one coupon per command; platform preflight validates
+  // its full eligibility rules. Don't invent a cumulative per-table limit.
+  if(r.maxPerRedemption!=null && r.maxPerRedemption<1)throw catalogError('已超出平台用券数量限制');
   const now=Date.now();
   if((r.start && Number(r.start)*1000>now)||(r.end && Number(r.end)*1000<now))throw catalogError('团购券不在有效期内');
   const date=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(now)).map(p=>[p.type,p.value]));
@@ -80,7 +92,7 @@ function validateRestrictions(row,voucher) {
   if(unavailable?.can_no_use_week_day?.includes(day) || unavailable?.can_no_use_date?.some(d=>now>=Number(d.start_time)*1000 && now<=Number(d.end_time)*1000))throw catalogError('今天或当前时段不可使用此券');
   if(r.offPeak?.idle_time_limit_type===2)throw catalogError('错峰套餐需由服务员核对使用时段');
   const parseRule=v=>{if(!v)return null;try{return typeof v==='string'?JSON.parse(v):v;}catch{throw catalogError('套餐使用限制需由服务员核对');}};
-  const rule=parseRule(r.attrs.catering_voucher_limit_use_rule),generic=parseRule(r.attrs.limit_use_rule);
+  const rule=parseRule(r.attrs?.catering_voucher_limit_use_rule),generic=parseRule(r.attrs?.limit_use_rule);
   const limit=rule?.limit_type>1 ? Number(rule.limit_use_num) : generic?.is_limit_use ? Number(generic.use_num_per_consume) : 0;
   if(limit){const personal=rule?.limit_type===2;const total=db.prepare(`SELECT COUNT(*) AS value FROM group_buy_redemptions WHERE session_id=? AND mapping_id=? AND state IN ('verifying','unknown','verified','success')${personal?' AND user_id=?':''}`).get(...[row.session_id,row.mapping_id,...(personal?[row.user_id]:[])]).value;if(total>=limit)throw catalogError('已达到本桌或本人的套餐用券数量限制');}
 }
@@ -89,7 +101,7 @@ export function finalizeRedemption(id,settleOrder,req={}) {
     const row=db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(id);
     if(row.state==='success')return redemptionView(row);
     if(row.state!=='verified')throw catalogError('核销结果尚未确认');
-    const snapshot=JSON.parse(row.snapshot_json),orderNo=`GB${Date.now()}${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const snapshot=JSON.parse(row.snapshot_json),voucher=JSON.parse(row.provider_json),orderNo=voucher.verificationContext?.vendorOrderId || `GB${Date.now()}${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
     const orderId=db.prepare("INSERT INTO orders(order_no,session_id,payer_user_id,original_amount_cents,discount_amount_cents,payable_amount_cents,payment_method,source_channel,note) VALUES(?,?,?,?,?,?,'group_buy',?,?)")
       .run(orderNo,row.session_id,row.user_id,row.amount_cents,0,row.amount_cents,row.platform,`${platforms[row.platform]}团购兑换 · ${snapshot.product.name}`).lastInsertRowid;
     insertSaleItems(orderId,snapshot.product.id,1,{snapshot,originalPrice:row.amount_cents,paidPrice:row.amount_cents});
@@ -107,14 +119,18 @@ export async function consumeRedemption({id,sessionId,userId,requestId},settleOr
   if(['success','verifying','unknown'].includes(row.state))return redemptionView(row);
   validSession(sessionId,userId);
   if(row.state!=='prepared')throw catalogError('请重新查询券码');
-  const voucher=JSON.parse(row.provider_json);
+  let voucher=JSON.parse(row.provider_json);
   if(voucher.expiresAt<Date.now())throw catalogError('查询结果已过期，请重新查询');
   const adapter=provider || groupBuyProvider(row.platform);
+  if(adapter.verificationContext)voucher={...voucher,verificationContext:adapter.verificationContext(voucher,requestId,{id:row.id,product:JSON.parse(row.snapshot_json).product})};
   db.transaction(()=>{
     row=db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(id);if(row.state!=='prepared')throw catalogError('兑换正在处理');
     if(voucher.verifyToken && db.prepare("SELECT 1 FROM group_buy_redemptions WHERE id!=? AND platform=? AND json_extract(provider_json,'$.verifyToken')=? AND state IN ('verifying','unknown','verified','success')").get(id,row.platform,voucher.verifyToken))throw catalogError('本次查询已有券开始核销，请重新查询剩余券');
     validateRestrictions(row,voucher);
     reserveRedemption(row,requestId);
+    // Persist the merchant order and original verification request *before*
+    // dispatch, so a timeout or restart can be checked without consuming again.
+    db.prepare('UPDATE group_buy_redemptions SET provider_json=? WHERE id=?').run(JSON.stringify(voucher),id);
   })();
   try {
     const result=await adapter.verify(voucher,requestId);
@@ -124,9 +140,48 @@ export async function consumeRedemption({id,sessionId,userId,requestId},settleOr
     db.prepare("UPDATE group_buy_redemptions SET state='verified',provider_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='verifying'").run(JSON.stringify({...voucher,verification:result}),id);
     return finalizeRedemption(id,settleOrder);
   } catch(error) {
+    if(error.redemptionRejected) {
+      db.transaction(()=>{
+        const live=db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(id);
+        if(live.state==='verifying' && live.request_id===requestId)releaseRedemption(live,error.message);
+      })();
+      return redemptionView(db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(id));
+    }
     db.prepare("UPDATE group_buy_redemptions SET state='unknown',error='核销结果待核对，请勿重复兑换',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='verifying'").run(id);
     return redemptionView(db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(id));
   }
+}
+const reconciliationTasks=new Map(),lastReconciliation=new Map();
+export async function reconcileRedemption(id,settleOrder,req={}) {
+  if(reconciliationTasks.has(id))return reconciliationTasks.get(id);
+  const task=(async()=>{
+    const row=db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(id);
+    if(!row)throw catalogError('兑换记录不存在',404);
+    if(row.state==='verified')return finalizeRedemption(id,settleOrder,req);
+    if(row.state!=='unknown' || row.platform!=='meituan' || row.source!=='api')return redemptionView(row);
+    lastReconciliation.set(id,Date.now());
+    const voucher=JSON.parse(row.provider_json);
+    try {
+      const result=await groupBuyProvider(row.platform).reconcile(voucher);
+      if(result?.certificateId===row.certificate_id && result.verifyId) {
+        const changed=db.prepare("UPDATE group_buy_redemptions SET state='verified',provider_json=?,error='',updated_at=CURRENT_TIMESTAMP WHERE id=? AND state='unknown' AND request_id=?")
+          .run(JSON.stringify({...voucher,verification:result}),id,row.request_id);
+        if(changed.changes)return finalizeRedemption(id,settleOrder,req);
+      }
+    } catch { /* Missing permissions or inconclusive history retain the hold. */ }
+    return redemptionView(db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(id));
+  })();
+  reconciliationTasks.set(id,task);
+  try{return await task;}finally{reconciliationTasks.delete(id);}
+}
+export async function reconcileMeituanRedemptions(settleOrder) {
+  if(!groupBuyCapabilities().meituan.ready)return;
+  const rows=db.prepare("SELECT id FROM group_buy_redemptions WHERE state='unknown' AND platform='meituan' AND source='api'").all();
+  const ids=new Set(rows.map(row=>row.id));
+  for(const id of lastReconciliation.keys())if(!ids.has(id))lastReconciliation.delete(id);
+  // Fair rotation prevents one unresolved coupon from blocking newer records.
+  rows.sort((a,b)=>(lastReconciliation.get(a.id)||0)-(lastReconciliation.get(b.id)||0));
+  for(let offset=0;offset<Math.min(rows.length,10);offset+=5)await Promise.all(rows.slice(offset,Math.min(offset+5,10)).map(row=>reconcileRedemption(row.id,settleOrder)));
 }
 export function registerGroupBuyRoutes(router,{currentUserId,audit,settleOrder}) {
   const handled=fn=>async(req,res)=>{try{await fn(req,res);}catch(e){res.status(e.status || 409).json({message:e.message});}};
@@ -141,6 +196,12 @@ export function registerGroupBuyRoutes(router,{currentUserId,audit,settleOrder})
     res.json({platforms:groupBuyCapabilities(),mappings,records:all.slice((page-1)*pageSize,page*pageSize),pending:records.filter(r=>['verifying','unknown','verified'].includes(r.state)),pagination:{page,pageSize,total:all.length,totalPages,hasPrevious:page>1,hasNext:page<totalPages}});
   }));
   const manager=req=>{if(!['super','manager'].includes(req.staff.role))throw catalogError('仅管理员可配置套餐映射或核对异常',403);};
+  router.post('/admin/group-buy/:id/recheck',handled(async(req,res)=>{
+    manager(req);
+    const record=await withBackgroundTask(()=>reconcileRedemption(req.params.id,settleOrder,req));
+    audit(req,'查询平台团购核销结果',`${req.params.id} ${record.state}`);
+    res.json({record});
+  }));
   const mappingSave=(req,res,current)=>{
     manager(req);const b=req.body || {},platform=b.platform??current?.platform,external=String(b.externalProductId??current?.external_product_id??'').trim(),sku=String(b.externalSkuId??current?.external_sku_id??'').trim(),product=getCatalogProduct(Number(b.productId??current?.product_id));
     const amount=Math.round(Number(b.price??(current?.price_cents||0)/100)*100),fee=Number(b.feeRate??current?.fee_rate??0),status=b.status??current?.status??'active';
@@ -187,7 +248,7 @@ export function registerGroupBuyRoutes(router,{currentUserId,audit,settleOrder})
       if(!row || !['unknown','verified'].includes(row.state))throw catalogError('此记录无需人工核对');
       let record;
       if(b.outcome==='success') {if(!String(b.verifyId || '').trim())throw catalogError('请填写平台核销凭证编号',400);db.prepare("UPDATE group_buy_redemptions SET state='verified',operator_id=?,provider_json=? WHERE id=?").run(req.staff.id,JSON.stringify({...JSON.parse(row.provider_json),manualEvidence:{verifyId:b.verifyId,reason}}),row.id);record=finalizeRedemption(row.id,settleOrder,req);}
-      else {for(const p of db.prepare('SELECT * FROM redemption_stock WHERE redemption_id=?').all(row.id)){if(!db.prepare('UPDATE products SET reserved_stock=reserved_stock-? WHERE id=? AND reserved_stock>=?').run(p.quantity,p.product_id,p.quantity).changes)throw catalogError('预占库存异常，请核对');}db.prepare('DELETE FROM redemption_stock WHERE redemption_id=?').run(row.id);db.prepare("UPDATE group_buy_redemptions SET state='failed',error=?,operator_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").run(reason,req.staff.id,row.id);record=redemptionView(db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(row.id));}
+      else {releaseRedemption(row,reason,req.staff.id);record=redemptionView(db.prepare('SELECT * FROM group_buy_redemptions WHERE id=?').get(row.id));}
       audit(req,'人工核对团购结果',`${row.id} ${b.outcome} ${reason}`);return record;
     })();
     res.json({record:result});

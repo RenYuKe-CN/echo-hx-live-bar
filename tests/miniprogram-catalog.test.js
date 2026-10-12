@@ -30,3 +30,18 @@ test('redemption retries reuse the same durable command and stale table results 
   fixture.app.globalData.tableVersion++;fixture.app.globalData.sessionId=2;await page.onShow();complete({record:{id:'r-1',state:'success',name:'旧桌套餐',amount:99}});await pending;
   assert.equal(page.data.preview.length,0);assert.equal(page.data.code,'');
 });
+test('a recovered redemption updates both the preview and history and exposes its delivery order',async()=>{
+  const record={id:'mt-recovery',platform:'meituan',state:'success',name:'双人套餐',amount:89.99,orderNo:'GBMT-recovered'};
+  const fixture=miniappFixture({request:async url=>url.endsWith('/group-buy')?{platforms:{meituan:{ready:true}},records:[record]}:undefined});
+  const page=fixture.loadPage('group-buy');page.data.preview=[{...record,state:'unknown',orderNo:null}];page.data.code='000012345678';page.data.error='结果尚未确认';
+  await page.onShow();assert.equal(page.data.preview[0].state,'success');assert.equal(page.data.preview[0].orderNo,'GBMT-recovered');assert.equal(page.data.records[0].state,'success');assert.equal(page.data.code,'');assert.equal(page.data.error,'');
+});
+test('a client timeout immediately refreshes server status so an in-progress redemption starts polling',async()=>{
+  let dispatched=false;
+  const fixture=miniappFixture({request:async url=>{
+    if(url.endsWith('/consume')){dispatched=true;throw new Error('client timeout');}
+    if(url.endsWith('/group-buy'))return {platforms:{meituan:{ready:true}},records:dispatched?[{id:'mt-slow',state:'verifying',name:'双人套餐',amount:89.99}]:[]};
+  }}),page=fixture.loadPage('group-buy');await page.onShow();page.data.preview=[{id:'mt-slow',state:'prepared'}];
+  await page.consume({currentTarget:{dataset:{id:'mt-slow'}}});
+  assert.equal(page.data.preview[0].state,'verifying');assert.equal(page.data.records[0].state,'verifying');assert.equal(page.data.busy,false);
+});

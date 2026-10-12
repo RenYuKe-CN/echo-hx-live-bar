@@ -11,7 +11,7 @@ Page({
   onUnload(){this.onHide();},
   current(){const d=getApp().globalData;return this.context?.sessionId===d.sessionId && this.context.tableVersion===d.tableVersion;},
   matches(context){const d=getApp().globalData;return context?.sessionId===d.sessionId && context.tableVersion===d.tableVersion;},
-  async load(){if(!this.data.connected)return this.setData({loading:false,error:'请先扫描桌台码再兑换团购券'});const version=this.readVersion=(this.readVersion||0)+1;try{const data=await api.request(`/sessions/${this.context.sessionId}/group-buy`);if(!this.current() || version!==this.readVersion)return;this.setData({platforms:data.platforms,records:data.records.map(format),loading:false});}catch(e){if(this.current() && version===this.readVersion)this.setData({loading:false,error:e.message});}},
+  async load(){if(!this.data.connected)return this.setData({loading:false,error:'请先扫描桌台码再兑换团购券'});const version=this.readVersion=(this.readVersion||0)+1;try{const data=await api.request(`/sessions/${this.context.sessionId}/group-buy`);if(!this.current() || version!==this.readVersion)return;const records=data.records.map(format),preview=this.data.preview.map(item=>records.find(record=>record.id===item.id)||item);this.setData({platforms:data.platforms,records,preview,loading:false,...(preview.some(item=>item.state==='success')?{code:'',error:''}:{})});}catch(e){if(this.current() && version===this.readVersion)this.setData({loading:false,error:e.message});}},
   choosePlatform(e){if(this.data.busy)return;this.queryVersion=(this.queryVersion||0)+1;this.setData({platform:e.currentTarget.dataset.platform,preview:[],error:''});},
   onCode(e){this.queryVersion=(this.queryVersion||0)+1;this.setData({code:e.detail.value,preview:[],error:''});},
   paste(){if(this.data.busy)return;wx.getClipboardData({success:res=>{if(!this.data.busy)this.onCode({detail:{value:String(res.data||'').trim()}});},fail:()=>this.setData({error:'未能读取剪贴板，请手动粘贴券码'})});},
@@ -28,7 +28,7 @@ Page({
     const context={...this.context},key=`echoGroupBuyCommand:${id}`,command=wx.getStorageSync(key)||requestId();wx.setStorageSync(key,command);
     this.setData({busy:true,error:''});
     try{const result=await api.request(`/sessions/${context.sessionId}/group-buy/${id}/consume`,{method:'POST',data:{requestId:command},timeout:20000});if(!this.matches(context))return;this.setData({preview:[format(result.record)],code:result.record.state==='success'?'':this.data.code});await this.load();}
-    catch(e){if(this.matches(context))this.setData({error:'兑换结果尚未确认，请刷新记录或联系服务员，重复请求不会重复配送。'});}finally{if(this.matches(context))this.setData({busy:false});}
+    catch(e){if(this.matches(context)){this.setData({error:'兑换结果尚未确认，请刷新记录或联系服务员，重复请求不会重复配送。'});await this.load();}}finally{if(this.matches(context))this.setData({busy:false});}
   },
   openOrder(e){if(e.currentTarget.dataset.order)wx.navigateTo({url:`/pages/order-detail/order-detail?orderNo=${encodeURIComponent(e.currentTarget.dataset.order)}`});}
 });
