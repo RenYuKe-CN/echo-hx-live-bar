@@ -30,6 +30,8 @@
 
 美团 `realAmount` 是文档定义的商家实收估算金额（手续费未扣除），存为团购收入，不能标成真实到账金额；真实结算继续由超级管理员另行录入。`dealValue` 是套餐面额，用于远端整套 SKU 的 `unitPrice` 与订单 `toPayAmount`，两者保持相等。本地套餐售价与参考团购售价不覆盖平台核销返回的金额。
 
+录入实际结算时同时填写到账日期时间，后续修正累计金额记录差额。核销记账与平台实际到账分别统计，不重复加入外部净收款；原核销订单可与本次开台的其他点单统一打印整桌小票。跨日统计及导出格式见 [账单与营业报表说明](PRINTING-AND-BUSINESS-REPORTS.md)。
+
 ## 请求与订单流程
 
 所有美团请求均由服务端向固定官方 HTTPS 地址发送表单 POST：`https://api-open-cater.meituan.com/dishconnect/tuangou/coupon/`。公共参数固定 `businessId=79`、`version=2`、UTF-8、秒级时间戳；`biz` 为完整 JSON 字符串。签名为 `SHA1(SignKey + 按字典序拼接的非空参数名和值)`，签名时不做 URL 编码，发送时做表单编码。平台超长数值 ID 按字符串解析，券码保留前导零。
