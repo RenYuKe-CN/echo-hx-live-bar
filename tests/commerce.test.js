@@ -130,6 +130,26 @@ test('waiters cannot view financial receipts or configure printers, while cashie
   const data=(await call('/admin/printing',{token:tokens.cashier})).body;assert.equal(data.canConfigure,false);assert.equal(JSON.stringify(data).includes('abcdefgh'),false);assert.equal(JSON.stringify(data).includes('fixture-ukey'),false);
   assert.equal((await call('/admin/printing/template',{token:tokens.cashier,method:'PUT',body:{}})).status,403);
 });
+test('receipt names follow branding in previews, allow a separate saved name and retain the original name on reprints',async()=>{
+  addOrder(100,'2026-10-13 10:00:00',3800);
+  const sample=template=>call('/admin/printing/template/preview',{method:'POST',body:{template,paperWidth:58}});
+  assert.equal((await sample({})).body.lines[0].text,'测试门店');
+  const entries=(await call('/admin/mini-page')).body.entries.map(e=>({...e,title:e.key==='app_name'?'联动门店':e.title}));
+  assert.equal((await call('/admin/mini-page',{method:'PUT',body:{entries}})).status,200);
+  assert.equal((await sample({})).body.lines[0].text,'联动门店');assert.equal((await preview()).body.lines[0].text,'联动门店');
+  assert.equal((await call('/admin/printing')).body.storeName,'联动门店');
+  const saved=await call('/admin/printing/template',{method:'PUT',body:{storeNameOverride:'  小票专用店名  '}});assert.equal(saved.status,200);assert.equal(saved.body.template.storeNameOverride,'小票专用店名');
+  assert.equal((await sample(saved.body.template)).body.lines[0].text,'小票专用店名');
+  assert.equal((await call(`/admin/printing/preview?scope=order&targetId=100&printerId=${printerId}`)).body.lines[0].text,'小票专用店名');
+  const p=(await preview()).body;assert.equal(p.lines[0].text,'小票专用店名');assert.equal(db.prepare('SELECT name FROM stores WHERE id=1').get().name,'联动门店');
+  for(const storeNameOverride of ['长'.repeat(41),'换行\n店名',null])assert.equal((await call('/admin/printing/template',{method:'PUT',body:{storeNameOverride}})).status,400);
+  const calls=feieMock({printed:true}),first=(await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:p.revision})).body.job;
+  assert.equal((await call(`/admin/printing/jobs/${first.id}/check`,{method:'POST',body:{}})).body.job.state,'printed');
+  assert.equal((await call('/admin/printing/template',{method:'PUT',body:{storeNameOverride:''}})).status,200);
+  assert.equal((await preview()).body.lines[0].text,'联动门店');assert.equal((await call(`/admin/printing/jobs/${first.id}`)).body.job.lines[0].text,'小票专用店名');
+  assert.equal((await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:first.revision,reprintOf:first.id,paperChecked:true,reason:'需要原版小票'})).status,201);
+  const copy=calls.filter(c=>c.action==='printMsg').at(-1).payload.content;assert.match(copy,/<CB>小票专用店名<\/CB>/);assert.equal(copy.includes('联动门店'),false);
+});
 test('disabled Feie cannot enqueue or fake a successful print',async()=>{
   addOrder(100,'2026-10-13 10:00:00',3800);const p=(await preview()).body;
   assert.equal((await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:p.revision})).status,503);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM print_jobs').get().n,0);

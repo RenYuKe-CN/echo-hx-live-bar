@@ -1,11 +1,13 @@
 import { db } from './db.js';
 import { commerceError,formatTime } from './business-time.js';
 import { isAllowedImageUrl } from './storage.js';
-const defaults={headerLines:[],footerLines:[{text:'感谢光临',align:'center',size:'normal'}],logoUrl:'',logoEnabled:false,qrImageUrl:'',qrMode:'none',qrContent:'',qrCaption:'扫码进入门店小程序',showComponents:true};
+const defaults={storeNameOverride:'',headerLines:[],footerLines:[{text:'感谢光临',align:'center',size:'normal'}],logoUrl:'',logoEnabled:false,qrImageUrl:'',qrMode:'none',qrContent:'',qrCaption:'扫码进入门店小程序',showComponents:true};
 export const receiptText=value=>String(value??'').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,'').replace(/</g,'＜').replace(/>/g,'＞');
 export function receiptTemplate(){const row=db.prepare('SELECT * FROM receipt_templates WHERE id=1').get();return {...defaults,...JSON.parse(row.settings_json),revision:row.revision};}
 export function normalizeReceiptTemplate(body) {
   const next={...defaults,...body};
+  if(typeof next.storeNameOverride!=='string'||next.storeNameOverride.length>40||/[\u0000-\u001f\u007f]/.test(next.storeNameOverride))throw commerceError('小票店名最多 40 个字，不能包含换行或控制字符');
+  next.storeNameOverride=next.storeNameOverride.trim();
   for(const section of ['headerLines','footerLines']) {
     if(!Array.isArray(next[section])||next[section].length>8)throw commerceError('抬头与末尾各最多 8 行');
     next[section]=next[section].map(line=>{
@@ -34,7 +36,7 @@ export function receiptLines(data,{paperWidth=58,template=receiptTemplate(),repr
   const add=(text,options={})=>{for(const piece of wrap(text,options.size==='large'?Math.floor(width/2):width))lines.push({text:piece,align:options.align||'left',size:options.size||'normal'});};
   const separator=()=>add('-'.repeat(width));
   const pair=(label,value)=>{const text=receiptText(label),right=receiptText(value);if(cells(text)+cells(right)+1>width){add(text);add(right,{align:'right'});}else add(text+' '.repeat(width-cells(text)-cells(right))+right);};
-  add(data.storeName,{align:'center',size:'large'});
+  add(template.storeNameOverride?.trim()||data.storeName,{align:'center',size:'large'});
   if(template.logoEnabled)lines.push({type:'logo',url:template.logoUrl});
   for(const line of template.headerLines)add(line.text,line);
   add(data.scope==='order'?'订单小票':data.sessionStatus==='closed'?'整桌消费账单':'消费清单（进行中）',{align:'center',size:'bold'});

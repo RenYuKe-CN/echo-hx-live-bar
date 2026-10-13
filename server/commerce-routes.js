@@ -1,5 +1,6 @@
 import QRCode from 'qrcode';
 import { db } from './db.js';
+import { storeName } from './branding.js';
 import { commerceError,commerceSettings,saveCommerceSettings,reportWindow,formatTime } from './business-time.js';
 import { businessReport,reportWorkbook } from './business-report.js';
 import { billData } from './bills.js';
@@ -22,11 +23,11 @@ export function registerCommerceRoutes(router,{audit}) {
   router.get('/admin/bills/:id',safe((req,res)=>res.json({bill:billData(Number(req.params.id))})));
   router.get('/admin/printing',safe((req,res)=>{
     const jobs=db.prepare('SELECT id FROM print_jobs ORDER BY created_at DESC,rowid DESC LIMIT 50').all().map(j=>printJobView(j.id));
-    res.json({provider:feieStatus(),template:receiptTemplate(),printers:db.prepare('SELECT * FROM receipt_printers ORDER BY id').all().map(printerView),jobs,canConfigure:req.staff.role==='super',canResolve:['super','manager'].includes(req.staff.role)});
+    res.json({provider:feieStatus(),storeName:storeName(),template:receiptTemplate(),printers:db.prepare('SELECT * FROM receipt_printers ORDER BY id').all().map(printerView),jobs,canConfigure:req.staff.role==='super',canResolve:['super','manager'].includes(req.staff.role)});
   }));
   router.put('/admin/printing/template',safe((req,res)=>{superOnly(req);res.json({template:saveReceiptTemplate(req.body)});audit(req,'更新小票固定版式');}));
   router.post('/admin/printing/template/preview',safe(async(req,res)=>{
-    superOnly(req);const template=normalizeReceiptTemplate(req.body.template),data={scope:'bill',targetId:0,billNo:'B0000000001',tableNo:'A08',storeName:'门店名称（实际使用后台店名）',sessionStatus:'closed',openedAt:new Date().toISOString(),closedAt:new Date().toISOString(),orders:[{orderNo:'示例订单',paymentStatus:'paid',paidAt:new Date().toISOString(),channels:[{label:'微信支付',amount:3800}],refunds:[],lines:[{name:'示例商品',quantity:1,unit:'瓶',amount:3800,original:3800,components:[]}]}],totals:{orders:1,paidOrders:1,pendingOrders:0,original:3800,memberDiscount:0,couponDiscount:0,paid:3800,refund:0,net:3800,channels:{wechat:3800}}};
+    superOnly(req);const template=normalizeReceiptTemplate(req.body.template),data={scope:'bill',targetId:0,billNo:'B0000000001',tableNo:'A08',storeName:storeName(),sessionStatus:'closed',openedAt:new Date().toISOString(),closedAt:new Date().toISOString(),orders:[{orderNo:'示例订单',paymentStatus:'paid',paidAt:new Date().toISOString(),channels:[{label:'微信支付',amount:3800}],refunds:[],lines:[{name:'示例商品',quantity:1,unit:'瓶',amount:3800,original:3800,components:[]}]}],totals:{orders:1,paidOrders:1,pendingOrders:0,original:3800,memberDiscount:0,couponDiscount:0,paid:3800,refund:0,net:3800,channels:{wechat:3800}}};
     res.json(await withQr({lines:receiptLines(data,{paperWidth:Number(req.body.paperWidth)===80?80:58,template}),paperWidth:Number(req.body.paperWidth)===80?80:58,example:true}));
   }));
   router.post('/admin/printing/assets',safe(async(req,res)=>{

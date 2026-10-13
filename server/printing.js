@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { db } from './db.js';
+import { storeName } from './branding.js';
 import { feieProvider,feieConfiguration } from './integrations/feie.js';
 import { billData,orderReceipt } from './bills.js';
 import { receiptTemplate,receiptLines,feieReceiptParts } from './receipts.js';
@@ -67,7 +68,7 @@ export async function createPrintJob(body,staff,{test=false}={}) {
   feieProvider();const config=feieConfiguration();
   if(printer.bound_user!==config.user||printer.bound_region!==config.region)throw commerceError('飞鹅账号或区域已改变，请重新确认设备绑定',409);
   let snapshot;
-  if(test) {const template=receiptTemplate(),data={scope:'order',targetId:0,billNo:'TEST',tableNo:'测试',storeName:'打印连接测试',sessionId:0,sessionStatus:'open',openedAt:new Date().toISOString(),closedAt:null,orders:[],totals:{orders:0,paidOrders:0,pendingOrders:0,original:0,memberDiscount:0,couponDiscount:0,paid:0,refund:0,net:0,channels:{}}};snapshot={data,template,paperWidth:printer.paper_width,revision:hash([template.revision,printer.paper_width]),lines:receiptLines(data,{paperWidth:printer.paper_width,template,operator:staff.display_name})};}
+  if(test) {const template=receiptTemplate(),data={scope:'order',targetId:0,billNo:'TEST',tableNo:'测试',storeName:storeName(),sessionId:0,sessionStatus:'open',openedAt:new Date().toISOString(),closedAt:null,orders:[],totals:{orders:0,paidOrders:0,pendingOrders:0,original:0,memberDiscount:0,couponDiscount:0,paid:0,refund:0,net:0,channels:{}}};snapshot={data,template,paperWidth:printer.paper_width,revision:hash([template.revision,printer.paper_width]),lines:receiptLines(data,{paperWidth:printer.paper_width,template,operator:staff.display_name})};}
   else if(request.reprintOf){const previous=db.prepare('SELECT * FROM print_jobs WHERE id=?').get(request.reprintOf);if(!previous)throw commerceError('原打印任务不存在',404);snapshot=JSON.parse(previous.snapshot_json);if(snapshot.revision!==request.expectedRevision)throw commerceError('补打版本与原任务不一致',409);if(snapshot.paperWidth!==printer.paper_width)throw commerceError('纸张规格已变化，请按原纸宽补打或重新预览新版',409);}
   else {snapshot=receiptPreview(request.scope,request.targetId,printer.id,staff.display_name);if(!request.expectedRevision||snapshot.revision!==request.expectedRevision)throw commerceError('订单、账单或模板已变化，请重新预览',409);}
   let reprint;
