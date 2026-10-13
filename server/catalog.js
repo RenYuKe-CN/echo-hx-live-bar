@@ -72,9 +72,9 @@ function allocate(total, weights) {
 }
 export function insertSaleItems(orderId, productId, quantity, { cartItemId = null, paidPrice, originalPrice, name, snapshot } = {}) {
   const product = snapshot?.product || db.prepare('SELECT * FROM products WHERE id=?').get(productId);
-  const insert = db.prepare('INSERT INTO order_items(order_id,cart_item_id,product_id,product_name,quantity,original_price_cents,paid_price_cents,cost_price_cents,bundle_group_id) VALUES(?,?,?,?,?,?,?,?,?)');
+  const insert = db.prepare('INSERT INTO order_items(order_id,cart_item_id,product_id,product_name,quantity,original_price_cents,paid_price_cents,cost_price_cents,bundle_group_id,unit_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?)');
   const original = originalPrice ?? product.price_cents, paid = paidPrice ?? original;
-  if (product.kind !== 'bundle') { insert.run(orderId,cartItemId,product.id,name || product.name,quantity,original,paid,product.cost_cents,null); return; }
+  if (product.kind !== 'bundle') { insert.run(orderId,cartItemId,product.id,name || product.name,quantity,original,paid,product.cost_cents,null,product.unit); return; }
   const components = snapshot?.components || componentsFor(productId);
   if (!components.length) throw catalogError('套餐组成不能为空');
   const totalCost = components.reduce((n,p) => n+p.cost_cents*p.component_quantity*quantity, product.extra_cost_cents*quantity);
@@ -89,7 +89,7 @@ export function insertSaleItems(orderId, productId, quantity, { cartItemId = nul
     const cuts = [...new Set([0,...remainders,count])].sort((a,b) => a-b);
     for (let i=1;i<cuts.length;i++) {
       const prices = floors.map((v,j) => v+(cuts[i-1]<remainders[j] ? 1 : 0));
-      insert.run(orderId,cartItemId,part.id,`${part.name}（${name || product.name}）`,cuts[i]-cuts[i-1],...prices,groupId);
+      insert.run(orderId,cartItemId,part.id,`${part.name}（${name || product.name}）`,cuts[i]-cuts[i-1],...prices,groupId,part.unit);
     }
   });
 }
@@ -99,6 +99,6 @@ export function recipeSnapshot(productId) {
   return { product, components: componentsFor(productId) };
 }
 export function logStock(productId, change, reason, { orderId = null, channel = 'adjustment', operator = '' } = {}) {
-  const product = db.prepare('SELECT stock FROM products WHERE id=?').get(productId);
-  db.prepare('INSERT INTO inventory_logs(product_id,change_quantity,stock_after,reason,order_id,channel,operator) VALUES(?,?,?,?,?,?,?)').run(productId,change,product.stock,reason,orderId,channel,operator);
+  const product = db.prepare('SELECT stock,unit FROM products WHERE id=?').get(productId);
+  db.prepare('INSERT INTO inventory_logs(product_id,change_quantity,stock_after,reason,order_id,channel,operator,unit_snapshot) VALUES(?,?,?,?,?,?,?,?)').run(productId,change,product.stock,reason,orderId,channel,operator,product.unit);
 }

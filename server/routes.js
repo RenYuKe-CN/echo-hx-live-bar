@@ -20,6 +20,11 @@ import { registerWorkdeskRoutes, workEvent, workOrderView, fulfillmentLines, ref
 import { catalogProduct, getCatalogProduct, assertStock, reserveStock, insertSaleItems, logStock, cartAvailability } from './catalog.js';
 import { registerCatalogRoutes } from './catalog-routes.js';
 import { registerGroupBuyRoutes, finalizeRedemption, reconcileMeituanRedemptions } from './group-buy.js';
+import { registerCommerceRoutes } from './commerce-routes.js';
+import { ensureBillIdentity,captureFinalBill } from './bills.js';
+import { reconcilePrintJobs } from './printing.js';
+import { businessReport } from './business-report.js';
+import { reportWindow } from './business-time.js';
 
 export const router = Router();
 const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
@@ -120,7 +125,7 @@ router.use('/admin', (req, res, next) => {
   if (!row) return res.status(401).json({ message: '请先登录管理后台' });
   req.staff = row;
   const segment = req.path.split('/')[1];
-  const section = ({ summary: 'dashboard', refunds: 'orders', inventory: 'products', 'wallet-packages': 'wallet', 'member-rules': 'members', 'member-tiers': 'members', categories: 'products', 'session': null, 'logout': null, 'change-password': null })[segment] ?? segment;
+  const section = ({ summary: 'dashboard', refunds: 'orders', printing:'orders',bills:'orders',inventory: 'products', 'wallet-packages': 'wallet', 'member-rules': 'members', 'member-tiers': 'members', categories: 'products', 'session': null, 'logout': null, 'change-password': null })[segment] ?? segment;
   if (['session','logout','change-password'].includes(segment)) return next();
   if ((segment === 'refunds' || /^\/orders\/[^/]+\/refund(?:$|\/)/.test(req.path)) && !['super', 'manager'].includes(row.role)) return res.status(403).json({ message: '仅超级管理员或管理员可处理退款' });
   const allowed = row.role === 'super' || JSON.parse(row.permissions).includes(section);
@@ -425,7 +430,10 @@ function completeRefund(refundId, wechatResult = null) {
     const refunded = refundTotals(order.id).refunded;
     const fullyRefunded = refunded >= order.payable_amount_cents;
     cancelReadyBatchesForRefund(order.id, refund.items_json, fullyRefunded);
+    const beforeReturn=db.prepare(`SELECT ${orderCostSql('o')} AS value FROM orders o WHERE id=?`).get(order.id).value;
     returnOrderStock(db, order, parseRefundItems(refund.items_json), fullyRefunded);
+    const afterReturn=db.prepare(`SELECT ${orderCostSql('o')} AS value FROM orders o WHERE id=?`).get(order.id).value;
+    db.prepare('UPDATE refund_transactions SET returned_cost_cents=? WHERE id=?').run(beforeReturn-afterReturn,refund.id);
     db.prepare("UPDATE orders SET fulfillment_pause_reason='' WHERE id=? AND fulfillment_pause_reason=?").run(order.id,REFUND_FAILURE_PAUSE);
     if (fullyRefunded) db.prepare("UPDATE orders SET status = 'refunded' WHERE id = ?").run(order.id);
     else if (order.status === 'awaiting_delivery' && !db.prepare('SELECT COALESCE(SUM(quantity-returned_quantity-delivered_quantity),0) AS remaining FROM order_items WHERE order_id=?').get(order.id).remaining) {
@@ -802,6 +810,7 @@ function getOrCreateSession(storeId, tableId, userId) {
     const result = db.prepare('INSERT INTO table_sessions (store_id, table_id, session_no) VALUES (?, ?, ?)').run(storeId, tableId, sessionNo);
     session = db.prepare('SELECT * FROM table_sessions WHERE id = ?').get(result.lastInsertRowid);
   }
+  ensureBillIdentity(session.id);
   db.prepare('INSERT OR IGNORE INTO session_members (session_id, user_id) VALUES (?, ?)').run(session.id, userId);
   return session;
 }
@@ -1411,7 +1420,7 @@ export function startBusinessSchedulers() {
   const tick = async () => {
     if (checking) return;
     checking = true;
-    try { await withBackgroundTask(async () => { await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); await reconcileMeituanRedemptions(settleOrder); }); }
+    try { await withBackgroundTask(async () => { await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); await reconcileMeituanRedemptions(settleOrder);await reconcilePrintJobs(); }); }
     catch (error) { console.error(`[wechat] 支付退款对账失败: ${error.message}`); }
     finally { checking = false; }
   };
@@ -1484,6 +1493,7 @@ router.post('/admin/pos/recharges', (req, res) => {
       db.prepare('INSERT OR IGNORE INTO wallet_accounts (user_id) VALUES (?)').run(member.id);
       db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents + ?, bonus_cents = bonus_cents + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(offer.stored_cents, offer.bonus_cents, member.id);
       const id = db.prepare('INSERT INTO wallet_transactions (user_id,type,pay_cents,stored_cents,bonus_cents,remark,pos_request_id) VALUES (?,\'recharge\',?,?,?,?,?)').run(member.id, offer.pay_cents, offer.stored_cents, offer.bonus_cents, `${offer.name} · ${paymentMethod} · ${req.staff.username}`, requestId).lastInsertRowid;
+      db.prepare('UPDATE wallet_transactions SET payment_channel=? WHERE id=?').run(paymentMethod,id);
       const before = db.prepare('SELECT member_tier_id, member_level FROM users WHERE id = ?').get(member.id);
       const after = syncMembership(member.id);
       if (before?.member_tier_id !== after?.member_tier_id) audit(req, '会员等级自动调整', `ID ${member.id}: ${before?.member_level || '普通会员'} -> ${after?.member_level || '普通会员'}`);
@@ -1705,9 +1715,8 @@ router.get('/admin/summary', (req, res) => {
   const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, o.note, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
   const pendingRefunds = canViewOrders && ['super', 'manager'].includes(req.staff.role) ? db.prepare("SELECT COUNT(*) AS value FROM refund_requests WHERE status = 'pending'").get().value : 0;
   const items = orderItems(pendingOrders.map(o => o.id));
-  const today = db.prepare("SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents + rt.external_cents) FROM refund_transactions rt WHERE rt.order_id = o.id AND rt.status = 'success'), 0)),0) AS revenue, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.offline_paid_cents ELSE 0 END),0) AS offline FROM orders o WHERE o.payment_status = 'paid' AND date(o.paid_at, 'localtime') = date('now','localtime')").get();
-  const todayRecharge = db.prepare("SELECT COALESCE(SUM(pay_cents),0) AS value FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') = date('now','localtime')").get().value;
-  res.json({ todayRevenue: centsToMoney(today.revenue), activeOrders, pendingPayment, pendingRefunds, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: centsToMoney(today.revenue), recharge: centsToMoney(todayRecharge), offline: centsToMoney(today.offline) }, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
+  const report=businessReport(reportWindow({})),today=report.totals;
+  res.json({ todayRevenue: today.revenue, activeOrders, pendingPayment, pendingRefunds, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: today.revenue, recharge: today.rechargeReceived, offline: today.offlineReceived },businessWindow:{startAt:report.window.start,endAt:report.window.end}, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
 });
 
 registerCatalogRoutes(router, { audit });
@@ -1718,7 +1727,7 @@ router.get('/admin/categories', (req, res) => { const { page, pageSize, offset }
 router.post('/admin/categories', (req, res) => { if (!req.body.name) return res.status(400).json({ message: '分类名称不能为空' }); const r = db.prepare('INSERT INTO categories (store_id, name, sort) VALUES (1, ?, ?)').run(req.body.name, Number(req.body.sort || 0)); res.status(201).json({ category: db.prepare('SELECT * FROM categories WHERE id = ?').get(r.lastInsertRowid) }); });
 router.patch('/admin/categories/:id', (req, res) => { db.prepare('UPDATE categories SET name = COALESCE(?, name), sort = COALESCE(?, sort), status = COALESCE(?, status) WHERE id = ?').run(req.body.name, req.body.sort == null ? null : Number(req.body.sort), req.body.status, req.params.id); res.json({ ok: true }); });
 
-router.get('/admin/tables', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare("SELECT COUNT(*) AS value FROM tables WHERE status != 'disabled'").get().value; return res.json({ tables: db.prepare("SELECT t.*, ts.session_no, ts.status AS session_status, COALESCE(SUM(o.payable_amount_cents),0) AS order_total FROM tables t LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'open' LEFT JOIN orders o ON o.session_id = ts.id AND o.payment_status = 'paid' WHERE t.status != 'disabled' GROUP BY t.id ORDER BY t.table_no LIMIT ? OFFSET ?").all(pageSize, offset).map(row => ({ ...row, orderTotal: centsToMoney(row.order_total) })), pagination: paginationView(page, pageSize, total) }); });
+router.get('/admin/tables', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare("SELECT COUNT(*) AS value FROM tables WHERE status != 'disabled'").get().value; return res.json({ tables: db.prepare("SELECT t.*, ts.id AS session_id, ts.session_no, ts.status AS session_status, COALESCE(SUM(o.payable_amount_cents),0) AS order_total FROM tables t LEFT JOIN table_sessions ts ON ts.table_id = t.id AND ts.status = 'open' LEFT JOIN orders o ON o.session_id = ts.id AND o.payment_status = 'paid' WHERE t.status != 'disabled' GROUP BY t.id ORDER BY t.table_no LIMIT ? OFFSET ?").all(pageSize, offset).map(row => ({ ...row, orderTotal: centsToMoney(row.order_total) })), pagination: paginationView(page, pageSize, total) }); });
 router.get('/admin/tables/:id/mini-code', async (req, res) => {
   const table = db.prepare("SELECT id, table_no FROM tables WHERE id = ? AND status != 'disabled'").get(req.params.id);
   if (!table) return res.status(404).json({ message: '桌台不存在或已停用' });
@@ -1775,7 +1784,8 @@ router.post('/admin/tables/:id/close', (req, res) => {
     if (db.prepare("SELECT 1 FROM orders WHERE session_id=? AND (payment_status='pending' OR (payment_status='paid' AND status='awaiting_delivery'))").get(session.id)
       || db.prepare("SELECT 1 FROM service_requests WHERE session_id=? AND status!='completed'").get(session.id)) return res.status(409).json({ message: '本桌还有订单或服务需求未完成，请先处理，避免遗漏' });
     if(db.prepare("SELECT 1 FROM group_buy_redemptions WHERE session_id=? AND state IN ('verifying','unknown','verified')").get(session.id))return res.status(409).json({message:'桌台有团购核销结果待确认，请先核对'});
-    db.prepare("UPDATE table_sessions SET status='closed',closed_at=CURRENT_TIMESTAMP WHERE id=?").run(session.id); audit(req,'结束桌台',req.params.id);
+    if(db.prepare("SELECT 1 FROM refund_transactions r JOIN orders o ON o.id=r.order_id WHERE o.session_id=? AND r.status IN ('pending','processing')").get(session.id))return res.status(409).json({message:'本桌有退款处理中，请核对后再结束桌台'});
+    db.transaction(()=>{db.prepare("UPDATE table_sessions SET status='closed',closed_at=CURRENT_TIMESTAMP WHERE id=?").run(session.id);captureFinalBill(session.id);audit(req,'结束桌台',req.params.id);})();
   }
   res.json({ok:true});
 });
@@ -2288,29 +2298,4 @@ router.patch('/admin/member-tiers/:id', (req, res) => {
   res.json({ tier: db.prepare('SELECT * FROM member_tiers WHERE id = ?').get(current.id) });
 });
 
-router.get('/admin/reports', (req, res) => {
-  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-  const today = todayLocalDate();
-  const end = datePattern.test(String(req.query.end || '')) ? String(req.query.end) : today;
-  const start = datePattern.test(String(req.query.start || '')) ? String(req.query.start) : db.prepare("SELECT date(?, '-29 day') AS day").get(today).day;
-  if (start > end) return res.status(400).json({ message: '开始日期不能晚于结束日期' });
-  const totals = db.prepare(`SELECT COALESCE(SUM(o.payable_amount_cents - o.bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents + rt.external_cents) FROM refund_transactions rt WHERE rt.order_id = o.id AND rt.status = 'success'), 0)),0) AS revenue, COALESCE(SUM(o.bonus_paid_cents),0) AS bonus, COALESCE(SUM(o.stored_paid_cents),0) AS stored, COALESCE(SUM(o.wechat_paid_cents),0) AS wechat, COALESCE(SUM(CASE WHEN o.payment_method = 'offline' THEN o.payable_amount_cents ELSE o.offline_paid_cents END),0) AS offline, COALESCE(SUM(${orderCostSql('o')}),0) AS cost FROM orders o WHERE payment_status = 'paid'`).get();
-  const losses = db.prepare('SELECT COALESCE(SUM(cost_cents),0) AS cost FROM stock_losses').get().cost;
-  const balance = db.prepare('SELECT COALESCE(SUM(stored_cents),0) AS stored, COALESCE(SUM(bonus_cents),0) AS bonus FROM wallet_accounts').get();
-  const recharge = db.prepare("SELECT COALESCE(SUM(pay_cents),0) AS amount FROM wallet_transactions WHERE type = 'recharge'").get().amount;
-  const daily = db.prepare(`SELECT days.day, COALESCE(o.orders,0) AS orders, COALESCE(o.revenue,0) AS revenue, COALESCE(o.order_cost,0) AS order_cost, COALESCE(o.offline,0) AS offline, COALESCE(r.recharge,0) AS recharge, COALESCE(l.loss_cost,0) AS loss_cost FROM (WITH RECURSIVE dates(day) AS (SELECT date(?) UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date(?)) SELECT day FROM dates) days LEFT JOIN (SELECT date(paid_at, 'localtime') AS day, COUNT(*) AS orders, SUM(payable_amount_cents - bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents + rt.external_cents) FROM refund_transactions rt WHERE rt.order_id = orders.id AND rt.status = 'success'), 0)) AS revenue, SUM(${orderCostSql('orders')}) AS order_cost, SUM(CASE WHEN payment_method = 'offline' THEN offline_paid_cents ELSE 0 END) AS offline FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(paid_at, 'localtime')) o ON o.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(pay_cents) AS recharge FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) r ON r.day = days.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(cost_cents) AS loss_cost FROM stock_losses WHERE date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) l ON l.day = days.day ORDER BY days.day DESC`).all(start, end, start, end, start, end, start, end).map(row => ({ day: row.day, orders: row.orders, revenue: centsToMoney(row.revenue), profit: centsToMoney(row.revenue - row.order_cost - row.loss_cost), recharge: centsToMoney(row.recharge), offline: centsToMoney(row.offline), orderCost: centsToMoney(row.order_cost), lossCost: centsToMoney(row.loss_cost) }));
-  const dailyPage = parsePagination(req, 'daily');
-  const dailyRows = daily.slice(dailyPage.offset, dailyPage.offset + dailyPage.pageSize);
-  res.json({ dateRange: { start, end }, today: daily.find(row => row.day === today) || daily[0], ...(req.staff.role === 'super' ? { totals: { revenue: centsToMoney(totals.revenue), bonusUsed: centsToMoney(totals.bonus), storedUsed: centsToMoney(totals.stored), wechatReceived: centsToMoney(totals.wechat), offlineReceived: centsToMoney(totals.offline), rechargeReceived: centsToMoney(recharge), outstandingStored: centsToMoney(balance.stored), outstandingBonus: centsToMoney(balance.bonus), orderCost: centsToMoney(totals.cost), lossCost: centsToMoney(losses), profit: centsToMoney(totals.revenue - totals.cost - losses) } } : {}), daily, dailyRows, dailyPagination: paginationView(dailyPage.page, dailyPage.pageSize, daily.length), byProduct: adminRows("SELECT product_name, SUM(quantity) AS quantity, SUM(paid_price_cents * quantity) AS amount FROM order_items oi JOIN orders o ON o.id = oi.order_id WHERE o.payment_status = 'paid' GROUP BY product_id ORDER BY quantity DESC LIMIT 20").map(row => ({ ...row, amount: centsToMoney(row.amount) })) });
-});
-
-router.get('/admin/reports/export', (req, res) => {
-  const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-  const today = todayLocalDate();
-  const end = datePattern.test(String(req.query.end || '')) ? String(req.query.end) : today;
-  const start = datePattern.test(String(req.query.start || '')) ? String(req.query.start) : end;
-  if (start > end) return res.status(400).send('开始日期不能晚于结束日期');
-  const rows = db.prepare(`WITH RECURSIVE dates(day) AS (SELECT date(?) UNION ALL SELECT date(day, '+1 day') FROM dates WHERE day < date(?)) SELECT dates.day, COALESCE(o.orders, 0) AS orders, COALESCE(o.revenue, 0) AS revenue, COALESCE(o.offline, 0) AS offline, COALESCE(o.order_cost, 0) AS order_cost, COALESCE(r.recharge, 0) AS recharge FROM dates LEFT JOIN (SELECT date(paid_at, 'localtime') AS day, COUNT(*) AS orders, SUM(payable_amount_cents - bonus_paid_cents - COALESCE((SELECT SUM(rt.stored_cents + rt.wechat_cents + rt.offline_cents + rt.external_cents) FROM refund_transactions rt WHERE rt.order_id = orders.id AND rt.status = 'success'), 0)) AS revenue, SUM(${orderCostSql('orders')}) AS order_cost, SUM(CASE WHEN payment_method = 'offline' THEN offline_paid_cents ELSE 0 END) AS offline FROM orders WHERE payment_status = 'paid' AND date(paid_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(paid_at, 'localtime')) o ON o.day = dates.day LEFT JOIN (SELECT date(created_at, 'localtime') AS day, SUM(pay_cents) AS recharge FROM wallet_transactions WHERE type = 'recharge' AND date(created_at, 'localtime') BETWEEN date(?) AND date(?) GROUP BY date(created_at, 'localtime')) r ON r.day = dates.day ORDER BY dates.day`).all(start, end, start, end, start, end);
-  const csv = ['日期,订单数,订单净销售额,充值收款,线下收款,订单商品成本,赠酒报损成本,净利润', ...rows.map(row => { const loss = db.prepare("SELECT COALESCE(SUM(cost_cents),0) AS value FROM stock_losses WHERE date(created_at, 'localtime') = date(?)").get(row.day).value; return [row.day, row.orders, (row.revenue / 100).toFixed(2), (row.recharge / 100).toFixed(2), (row.offline / 100).toFixed(2), (row.order_cost / 100).toFixed(2), (loss / 100).toFixed(2), ((row.revenue - row.order_cost - loss) / 100).toFixed(2)].join(','); })].join('\n');
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename="report-${start}-${end}.csv"; filename*=UTF-8''${encodeURIComponent(`经营报表-${start}-${end}.csv`)}`); res.send(`\ufeff${csv}`);
-});
+registerCommerceRoutes(router,{audit});

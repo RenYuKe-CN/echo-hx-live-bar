@@ -34,6 +34,13 @@ function sanitizeDatabaseSnapshot(destination) {
       // a fresh login also prevents a downloaded backup from reviving access.
       snapshot.prepare('DELETE FROM staff_sessions').run();
       snapshot.prepare('DELETE FROM wechat_sessions').run();
+      if(snapshot.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='receipt_printers'").get()) {
+        snapshot.prepare("UPDATE receipt_printers SET device_key='',bound=0").run();
+        // A backup can predate a printer accepting a task. Never send an old
+        // queued snapshot again automatically after a restore.
+        snapshot.prepare("UPDATE print_parts SET state='unknown' WHERE state IN ('queued','sending')").run();
+        snapshot.prepare("UPDATE print_jobs SET state='unknown',error='备份恢复后的任务需核对设备出纸情况' WHERE state NOT IN ('printed','confirmed','cancelled')").run();
+      }
     })();
   } finally {
     snapshot.close();

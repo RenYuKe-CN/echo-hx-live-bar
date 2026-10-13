@@ -36,6 +36,7 @@ before(async () => {
   db.prepare('INSERT INTO staff_sessions(token_hash,account_id,expires_at) VALUES(?,1,?)').run(hash(tokens.admin), new Date(Date.now() + 3600000).toISOString());
 });
 beforeEach(() => {
+  db.prepare("UPDATE commerce_settings SET open_time='00:00',close_time='00:00'").run();
   process.env.NODE_ENV = 'production';
   process.env.WECHAT_PLATFORM_CERTIFICATE = keys.publicKey.export({ type: 'spki', format: 'pem' });
   process.env.WECHAT_PLATFORM_SERIAL = 'PUB_KEY_ID_123456';
@@ -207,7 +208,7 @@ test('partial item refund then amount-only full refund returns each unit once', 
   assert.equal(report.today.orderCost, 10); assert.equal(report.today.profit, 20);
   const adminOrder = (await call('/admin/orders', { token: tokens.admin })).body.orders[0];
   assert.equal(adminOrder.cost, 10); assert.equal(adminOrder.profit, 20);
-  const csv = (await call('/admin/reports/export', { token: tokens.admin, raw: true })).body;
+  const csv = (await call('/admin/reports/export?format=csv', { token: tokens.admin, raw: true })).body;
   assert.match(csv, /,30\.00,0\.00,0\.00,10\.00,0\.00,20\.00/);
   assert.equal((await call('/admin/orders/100/refund', { token: tokens.admin, method: 'POST', body: { amount: 30 } })).status, 200);
   assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 100);

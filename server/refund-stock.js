@@ -38,9 +38,9 @@ export function returnOrderStock(database, order, selectedItems, fullyRefunded) 
     if (!quantity) continue;
     database.prepare('UPDATE order_items SET returned_quantity = returned_quantity + ? WHERE id = ?').run(quantity, item.id);
     database.prepare('UPDATE products SET stock = stock + ? WHERE id = ?').run(quantity, item.product_id);
-    const product = database.prepare('SELECT stock FROM products WHERE id = ?').get(item.product_id);
-    database.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason,order_id,channel) VALUES (?, ?, ?, ?,?,?)')
-      .run(item.product_id, quantity, product.stock, `订单退款 ${order.order_no}`,order.id,'refund');
+    const product = database.prepare('SELECT stock,unit FROM products WHERE id = ?').get(item.product_id);
+    database.prepare('INSERT INTO inventory_logs (product_id, change_quantity, stock_after, reason,order_id,channel,unit_snapshot) VALUES (?, ?, ?, ?,?,?,?)')
+      .run(item.product_id, quantity, product.stock, `订单退款 ${order.order_no}`,order.id,'refund',product.unit);
   }
 }
 

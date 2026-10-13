@@ -4,6 +4,7 @@ import { trackApiRequest } from './maintenance.js';
 
 export function createApp() {
   const app = express();
+  app.use('/api/admin/printing/assets',express.json({limit:'3mb'}));
   app.use(express.json({ verify: (req, _res, buffer) => { req.rawBody = buffer.toString('utf8'); } }));
   app.use('/api', trackApiRequest, router);
   app.get('/api/health', (_req, res) => res.json({ ok: true, service: 'echo-hx-live-bar-api', time: new Date().toISOString() }));
