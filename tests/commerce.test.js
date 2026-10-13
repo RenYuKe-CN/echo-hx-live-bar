@@ -106,9 +106,23 @@ test('settlements preserve actual arrival dates and record only correction diffe
 test('Excel export has seven typed, filterable sheets and preserves exact identifiers and coupon reconciliation',async()=>{
   ledgerFixture();const response=await call('/admin/reports/export?'+windowQuery,{binary:true});assert.equal(response.status,200);assert.ok(response.body.subarray(0,2).equals(Buffer.from('PK')));assert.ok(decodeURIComponent(response.headers.get('content-disposition')).includes('营业明细-202610131200-202610140600.xlsx'));
   const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(response.body);assert.deepEqual(workbook.worksheets.map(s=>s.name),['当日概览','桌台账单','订单明细','商品明细','收付流水','基础货品流水','会员充值记录']);
-  const orders=workbook.getWorksheet('订单明细');assert.ok(orders.autoFilter);assert.equal(orders.views[0].ySplit,4);const order=orders.getRows(5,orders.rowCount-4).find(r=>r.getCell(1).value==='000012345678901234567890');assert.equal(typeof order.getCell(1).value,'string');assert.equal(typeof order.getCell(12).value,'number');assert.ok(order.getCell(5).value instanceof Date);
+  const orders=workbook.getWorksheet('订单明细');assert.ok(orders.autoFilter);assert.equal(orders.views[0].ySplit,4);const order=orders.getRows(5,orders.rowCount-4).find(r=>r.getCell(1).value==='000012345678901234567890');assert.equal(typeof order.getCell(1).value,'string');const amountColumn=orders.getRow(4).values.indexOf('结算金额');assert.equal(typeof order.getCell(amountColumn).value,'number');assert.ok(order.getCell(5).value instanceof Date);
   const productRows=workbook.getWorksheet('商品明细').getRows(5,workbook.getWorksheet('商品明细').rowCount-4);const product=productRows.find(r=>r.getCell(1).value==='000012345678901234567890');assert.equal(product.getCell(8).value,110);assert.equal(product.getCell(9).value,10);assert.equal(product.getCell(10).value,100);
   assert.equal(productRows.filter(r=>r.getCell(4).value==='套餐').length,1);assert.equal(JSON.stringify(workbook.model).includes('fixture-ukey'),false);
+});
+test('export identifies payers by their own phone and stable member ID after a nickname change, including unbound accounts',async()=>{
+  const sameName='同名会员';db.prepare('UPDATE users SET nickname=? WHERE id=1').run(sameName);
+  const other=db.prepare('INSERT INTO users(nickname,phone) VALUES(?,?)').run(sameName,'13900139001').lastInsertRowid;
+  addOrder(100,'2026-10-13 04:20:00',3800);addOrder(101,'2026-10-13 05:10:00',4200);db.prepare('UPDATE orders SET payer_user_id=? WHERE id=101').run(other);
+  db.prepare("UPDATE users SET nickname='修改后昵称' WHERE id=1").run();
+  const exportOrders=async()=>{const response=await call('/admin/reports/export?'+windowQuery,{binary:true});assert.equal(response.status,200);const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(response.body);return workbook.getWorksheet('订单明细');};
+  const sheet=await exportOrders(),headers=sheet.getRow(4).values,nameColumn=headers.indexOf('付款人'),phoneColumn=headers.indexOf('付款人手机号'),idColumn=headers.indexOf('付款人会员ID');
+  assert.equal(phoneColumn,nameColumn+1);assert.equal(idColumn,phoneColumn+1);
+  const rows=sheet.getRows(5,sheet.rowCount-4),first=rows.find(r=>r.getCell(1).value==='000012345678901234567890'),second=rows.find(r=>r.getCell(1).value==='ORDER-101');
+  assert.equal(first.getCell(nameColumn).value,'修改后昵称');assert.equal(first.getCell(phoneColumn).value,'13800138001');assert.equal(first.getCell(idColumn).value,'1');assert.equal(first.getCell(phoneColumn).numFmt,'@');assert.equal(first.getCell(idColumn).numFmt,'@');
+  assert.equal(second.getCell(nameColumn).value,sameName);assert.equal(second.getCell(phoneColumn).value,'13900139001');assert.equal(second.getCell(idColumn).value,String(other));
+  db.prepare('UPDATE users SET phone=NULL WHERE id=1').run();const unbound=(await exportOrders()).getRows(5,2).find(r=>r.getCell(idColumn).value==='1');assert.equal(unbound.getCell(phoneColumn).value,'未绑定手机号');
+  assert.equal((await call('/admin/reports/export?'+windowQuery,{token:tokens.waiter})).status,403);
 });
 test('settings change the default overnight boundary and export title without depending on the server timezone',async()=>{
   const result=await call('/admin/reports/settings',{method:'PUT',body:{timezone:'Asia/Kuala_Lumpur',openTime:'15:30',closeTime:'05:15',exportTitle:'晚场营业'}});assert.equal(result.status,200);
