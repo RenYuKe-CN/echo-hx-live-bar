@@ -168,7 +168,28 @@ router.post('/admin/accounts', (req, res) => {
 });
 router.patch('/admin/accounts/:id', (req, res) => {
   const account = db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(req.params.id);
-  if (!account || account.role === 'super') return res.status(400).json({ message: '不可修改超级管理员账号' });
+  if (!account) return res.status(404).json({ message: '账号不存在' });
+  if (account.role === 'super') {
+    if (req.staff.role !== 'super' || req.staff.id !== account.id) return res.status(403).json({ message: '只能修改自己的超级管理员账号' });
+    const body = req.body || {};
+    if (!Object.keys(body).length || Object.keys(body).some(key => !['username','displayName'].includes(key))) return res.status(400).json({ message: '此处仅支持修改登录账号和显示名称，密码请使用“修改密码”' });
+    const username = body.username === undefined ? account.username : typeof body.username === 'string' ? body.username.trim() : '';
+    const displayName = body.displayName === undefined ? account.display_name : typeof body.displayName === 'string' ? body.displayName.trim() : '';
+    if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) return res.status(400).json({ message: '登录账号须为 3～32 位字母、数字或下划线' });
+    if (!displayName || displayName.length > 50) return res.status(400).json({ message: '显示名称须为 1～50 个字符' });
+    try {
+      const updated = db.transaction(() => {
+        db.prepare('UPDATE staff_accounts SET username=?,display_name=? WHERE id=?').run(username, displayName, account.id);
+        if (username !== account.username) db.prepare('DELETE FROM staff_sessions WHERE account_id=? AND token_hash!=?').run(account.id, tokenHash(req.header('authorization').slice(7)));
+        audit(req, '修改超管账号', `账号 ID ${account.id}；登录账号 ${account.username} → ${username}；显示名称 ${displayName}`);
+        return db.prepare('SELECT * FROM staff_accounts WHERE id=?').get(account.id);
+      })();
+      return res.json({ ok: true, account: publicAccount(updated) });
+    } catch (error) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') return res.status(409).json({ message: '账号名已存在，请更换登录账号' });
+      throw error;
+    }
+  }
   const { role = account.role, status = account.status, permissions = JSON.parse(account.permissions), password, displayName = account.display_name, workspace = account.workspace || 'admin' } = req.body || {};
   if (!['manager','staff'].includes(role) || !['active','disabled'].includes(status) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p) || p === 'reports') || (password && String(password).length < 10)) return res.status(400).json({ message: '账号配置无效（数据报表仅超级管理员可见）' });
   if (!workspaces.includes(workspace) || (workspace === 'waiter' && !permissions.includes('workdesk')) || (workspace === 'cashier' && !permissions.includes('pos'))) return res.status(400).json({ message: '工作台与权限不匹配' });
