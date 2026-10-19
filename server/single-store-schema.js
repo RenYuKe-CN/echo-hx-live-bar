@@ -38,6 +38,10 @@ export function migrateSingleStore(database) {
         operator_id INTEGER REFERENCES staff_accounts(id),note TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE INDEX IF NOT EXISTS shift_ledger_shift ON shift_ledger(shift_id,id);
+      CREATE TABLE IF NOT EXISTS table_close_commands (
+        request_id TEXT PRIMARY KEY,table_id INTEGER NOT NULL,session_id INTEGER NOT NULL,operator_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
       CREATE TABLE IF NOT EXISTS table_switch_commands (
         request_id TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),fingerprint TEXT NOT NULL,
         session_id INTEGER NOT NULL REFERENCES table_sessions(id),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

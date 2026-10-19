@@ -5,7 +5,7 @@ const fail = (message, status = 409) => { throw Object.assign(new Error(message)
 export function registerTableSelection(router, { requireWechatUser, currentUserId, getOrCreateSession }) {
   router.get('/tables', requireWechatUser, (_req, res) => res.json({ tables: db.prepare(`SELECT t.id,t.table_no AS tableNo,
     EXISTS(SELECT 1 FROM table_sessions s WHERE s.table_id=t.id AND s.status='open') AS occupied
-    FROM tables t WHERE t.status!='disabled' ORDER BY t.table_no`).all().map(t => ({...t,occupied:!!t.occupied})) }));
+    FROM tables t WHERE t.status!='disabled' ORDER BY t.table_no`).all().map(t => ({...t,occupied:!!t.occupied})).sort((a,b)=>a.tableNo.localeCompare(b.tableNo,'zh-CN',{numeric:true})) }));
   router.post('/tables/select', requireWechatUser, (req, res) => {
     try {
       const result = db.transaction(() => {

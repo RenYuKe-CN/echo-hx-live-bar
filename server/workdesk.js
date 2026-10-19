@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { workdeskTables, closeWorkdeskTable } from './table-closing.js';
 import { db } from './db.js';
 import { parseRefundItems } from './refund-stock.js';
 import { storeName } from './branding.js';
@@ -117,11 +118,12 @@ export function registerWorkdeskRoutes(router, { currentUserId, audit, completed
     const events = db.prepare('SELECT * FROM work_events WHERE id>? AND id<=? ORDER BY id LIMIT 200').all(after, latest);
     const orders = db.prepare("SELECT * FROM orders WHERE payment_status='paid' AND status='awaiting_delivery' ORDER BY paid_at,id").all().map(workOrderView);
     const requests = db.prepare("SELECT * FROM service_requests WHERE status!='completed' OR completed_at>=datetime('now','-1 day') ORDER BY (status='completed'),created_at,id").all().map(serviceView);
-    return { storeName: storeName(), orders, requests, events, cursor: events.length === 200 ? events.at(-1).id : latest, serverTime: new Date().toISOString(),
+    return { storeName: storeName(), tables:workdeskTables(), orders, requests, events, cursor: events.length === 200 ? events.at(-1).id : latest, serverTime: new Date().toISOString(),
       completedOrders: db.prepare("SELECT * FROM orders WHERE payment_status='paid' AND status='completed' AND delivered_at>=datetime('now','-1 day') ORDER BY delivered_at DESC LIMIT 50").all().map(workOrderView),
       settings: db.prepare('SELECT * FROM operations_settings WHERE id=1').get(),
       operators: manager(req.staff) ? db.prepare("SELECT id,display_name AS name FROM staff_accounts WHERE status='active' AND (role='super' OR EXISTS(SELECT 1 FROM json_each(permissions) WHERE value='workdesk')) ORDER BY id").all() : [] };
   })());
+  route('post','/admin/workdesk/tables/:id/close',req=>closeWorkdeskTable(req,audit));
   route('patch', '/admin/workdesk/settings', req => {
     if (!manager(req.staff)) fail('仅管理员可设置提醒时限', 403);
     const fields = ['service_minutes','preparation_minutes','delivery_minutes'];

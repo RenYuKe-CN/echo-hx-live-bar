@@ -7,10 +7,10 @@ const labels = { waiting:'待接单',preparing:'配货中',ready:'待配送',del
 
 export function mountWorkdesk({ root, account, api, brand, logout, switchWorkspace }) {
   let data = null, cursor = 0, initialized = false, destroyed = false, refreshVersion = 0, connected = false;
-  let tab = 'orders', filter = 'waiting', sound = false, audio = null, lastOverdueReminder = 0;
+  let tab = 'orders', filter = 'waiting', tableSearch = '', tableFilter = 'occupied', sound = false, audio = null, lastOverdueReminder = 0;
   const serviceNotes = new Map();
   const busy = new Set(), drafts = new Map(), commands = new Map(), seenEvents = new Set();
-  root.innerHTML = `<main class="wd-root"><header class="wd-header"><div><span class="wd-brand">${esc(brand)}</span><h1>服务工作台</h1><p>${esc(account.displayName)} · 每批配送、每项服务都有负责人</p></div><div class="wd-header-actions"><button data-wd-sound>开启声音提醒</button>${account.permissions.includes('pos')?'<button data-wd-cashier>收银工作台</button>':''}${account.permissions.some(permission=>!['workdesk','pos'].includes(permission))?`<button data-wd-admin>${account.workspace==='admin'?'管理后台':'其他业务'}</button>`:''}<button data-wd-password>修改密码</button><button data-wd-refresh>刷新</button><button data-wd-logout>退出</button></div></header><div class="wd-connection" role="status">正在同步任务…</div><div class="wd-kpis"></div><nav class="wd-tabs"><button data-wd-tab="orders" class="active">订单任务</button><button data-wd-tab="services">顾客服务</button><button data-wd-tab="mine">我的任务</button>${manager(account)?'<button data-wd-tab="settings">提醒设置</button>':''}</nav><div class="wd-filters"></div><section class="wd-list"></section><div class="wd-toast" role="status" hidden></div><div class="wd-modal-root"></div></main>`;
+  root.innerHTML = `<main class="wd-root"><header class="wd-header"><div><span class="wd-brand">${esc(brand)}</span><h1>服务工作台</h1><p>${esc(account.displayName)} · 每批配送、每项服务都有负责人</p></div><div class="wd-header-actions"><button data-wd-sound>开启声音提醒</button>${account.permissions.includes('pos')?'<button data-wd-cashier>收银工作台</button>':''}${account.permissions.some(permission=>!['workdesk','pos'].includes(permission))?`<button data-wd-admin>${account.workspace==='admin'?'管理后台':'其他业务'}</button>`:''}<button data-wd-password>修改密码</button><button data-wd-refresh>刷新</button><button data-wd-logout>退出</button></div></header><div class="wd-connection" role="status">正在同步任务…</div><div class="wd-kpis"></div><nav class="wd-tabs"><button data-wd-tab="orders" class="active">订单任务</button><button data-wd-tab="services">顾客服务</button><button data-wd-tab="mine">我的任务</button><button data-wd-tab="tables">桌台清台</button>${manager(account)?'<button data-wd-tab="settings">提醒设置</button>':''}</nav><div class="wd-filters"></div><section class="wd-list"></section><div class="wd-toast" role="status" hidden></div><div class="wd-modal-root"></div></main>`;
   const q = selector => root.querySelector(selector);
   let toastTimer;
   const toast = message => { if(destroyed)return;const el=q('.wd-toast'); if(!el)return;el.textContent=message;el.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>{if(el)el.hidden=true;},4500); };
@@ -35,6 +35,9 @@ export function mountWorkdesk({ root, account, api, brand, logout, switchWorkspa
     const late=item.status!=='completed'&&overdue(item.createdAt,data.settings.service_minutes);
     return `<header><div><h2>${esc(item.tableNo)} 桌 · ${esc(item.title)}</h2><span>${esc(item.number)}</span></div><span class="wd-state ${item.status}">${labels[item.status]}</span></header><div class="wd-meta"><span class="${late?'wd-late':''}">${item.status==='completed'?'已处理 · '+new Date(time(item.completedAt)).toLocaleTimeString('zh-CN',{hour12:false}):ago(item.createdAt)}${late?' · 已超时':''}</span><span>${item.assignedStaff?`处理：${esc(item.assignedStaff)}`:'等待服务员领取'}</span></div>${item.callCount>1?`<p class="wd-call-count">顾客已呼叫 ${item.callCount} 次，请核对最新需求</p>`:''}${item.notes.length?`<div class="wd-service-notes">${item.notes.map(note=>`<p>${esc(note.content)}</p>`).join('')}</div>`:'<p class="wd-service-notes">顾客需要服务员到桌边协助。</p>'}${item.completionNote?`<p class="wd-note">处理说明：${esc(item.completionNote)}</p>`:''}${item.status==='claimed'&&item.assignedStaffId===account.id?`<label class="wd-completion">处理说明（可选）<input maxlength="300" data-service-note="${item.id}" value="${esc(serviceNotes.get(item.id)||'')}" placeholder="如：已补充纸巾"></label>`:''}<footer>${item.status==='waiting'?button('claim-service',item.id,'领取需求',busy.has('service-'+item.id)):item.status==='claimed'&&item.assignedStaffId===account.id?button('complete-service',item.id,'处理完成',busy.has('service-'+item.id)):''}${item.status!=='completed'?transfer('service',item.id,item.revision):''}</footer>`;
   }
+  function tableCard(table) {
+    return `<header><div><h2>${esc(table.tableNo)} 桌</h2></div><span class="wd-state ${table.canClose?'completed':''}">${!table.occupied?'空闲':table.canClose?'可清台':'使用中'}</span></header><p class="wd-table-status">${table.blockers.length?esc(table.blockers.join(' · ')):table.occupied?'业务已处理完，请现场确认顾客离店并整理桌面。':'等待下一批顾客扫码或选桌。'}</p>${table.occupied&&table.cartQuantity?`<p class="wd-table-cart">还有 ${table.cartQuantity} 件未下单商品，结束后本次清单无法继续结算。</p>`:''}<footer>${table.occupied?button('close-table',table.id,'清台并结束本桌',!table.canClose||busy.has('table-'+table.id)):''}</footer>`;
+  }
   function reconcile(rows,render) {
     const list=q('.wd-list'),ids=new Set(rows.map(row=>row.cardKey||String(row.id)));
     list.querySelector('.wd-empty')?.remove();
@@ -53,6 +56,16 @@ export function mountWorkdesk({ root, account, api, brand, logout, switchWorkspa
     const mineServices=data.requests.filter(r=>r.status==='claimed'&&r.assignedStaffId===account.id);
     q('.wd-kpis').innerHTML=[['待接订单',data.orders.filter(o=>o.state==='waiting').length,'orders','waiting'],['待取配送',data.orders.flatMap(o=>o.batches).filter(b=>b.status==='ready').length,'orders','delivery'],['服务待接',data.requests.filter(r=>r.status==='waiting').length,'services','waiting'],['我的任务',mineServices.length+mineOrders.length,'mine','waiting']].map(([label,count,target,stage])=>`<button data-quick-tab="${target}" data-quick-filter="${stage}"><span>${label}</span><strong>${count}</strong></button>`).join('');
     q('.wd-tabs').querySelectorAll('button').forEach(el=>el.classList.toggle('active',el.dataset.wdTab===tab));
+    q('.wd-list').classList.toggle('wd-table-list',tab==='tables');
+    if(tab==='tables') {
+      const tables=data.tables || [],count=tables.filter(t=>t.occupied).length,ready=tables.filter(t=>t.canClose).length;
+      if(!q('.wd-table-search'))q('.wd-filters').innerHTML='<input class="wd-table-search" type="search" maxlength="30" aria-label="搜索清台桌号" placeholder="搜索桌号"><div class="wd-table-filters"></div>';
+      const search=q('.wd-table-search');if(document.activeElement!==search)search.value=tableSearch;
+      q('.wd-table-filters').innerHTML=[['occupied',`使用中 ${count}`],['ready',`可清台 ${ready}`],['all',`全部 ${tables.length}`]].map(([key,label])=>`<button data-table-filter="${key}" class="${key===tableFilter?'active':''}">${label}</button>`).join('');
+      const normalize=value=>String(value).replace(/[\s_-]/g,'').toLowerCase();
+      const rows=tables.filter(t=>(tableFilter==='all'||(tableFilter==='ready'?t.canClose:t.occupied))&&normalize(t.tableNo).includes(normalize(tableSearch))).map(t=>({...t,cardKey:'table-'+t.id}));
+      reconcile(rows,tableCard);if(!rows.length)q('.wd-empty').textContent=tableSearch?'没有匹配的桌台，请核对桌号。':'当前没有这类桌台。';return;
+    }
     const filters=tab==='orders'?[['waiting','待接单'],['preparing','配货中'],['delivery','待配送'],['mine','我的任务'],['completed','已完成']]:[['waiting','待响应'],['claimed','处理中'],['mine','我的任务'],['completed','已完成']];
     q('.wd-filters').innerHTML=['settings','mine'].includes(tab)?'':filters.map(([key,label])=>`<button class="${key===filter?'active':''}" data-filter="${key}">${label}</button>`).join('');
     if(tab==='settings') {const list=q('.wd-list');if(!list.querySelector('.wd-settings'))list.innerHTML=`<form class="wd-settings"><h2>超时只提醒，任务不会自动重新派单</h2>${[['service_minutes','服务请求'],['preparation_minutes','配货'],['delivery_minutes','配送']].map(([key,label])=>`<label>${label}超过<input name="${key}" type="number" min="1" max="120" value="${data.settings[key]}" required>分钟提醒</label>`).join('')}<button>保存提醒设置</button></form>`;return;}
@@ -90,8 +103,8 @@ export function mountWorkdesk({ root, account, api, brand, logout, switchWorkspa
     if(destroyed||busy.has(key))return;if(!connected){toast('请先恢复连接并核对任务状态');return;}
     let saved=false;
     busy.add(key);render();
-    try {await request(path,{method:'POST',body:JSON.stringify(body)});saved=true;if(path.endsWith('/claim')||path.endsWith('/batches')&&body.startDelivery){tab='mine';filter='waiting';}toast('操作已保存');}
-    catch(error){toast((error.message||'请求失败')+'；正在核对服务器状态，请勿重复拿货。');}
+    try {await request(path,{method:'POST',body:JSON.stringify(body)});saved=true;if(path.endsWith('/claim')||path.endsWith('/batches')&&body.startDelivery){tab='mine';filter='waiting';}toast(path.includes('/tables/')?'本桌已结束，下批顾客将重新开台':'操作已保存');}
+    catch(error){toast((error.message||'请求失败')+(path.includes('/tables/')?'；请核对桌台状态后再操作。':'；正在核对服务器状态，请勿重复拿货。'));}
     finally {
       busy.delete(key);await refresh();
       const ownOrders=data?.orders.some(order=>order.preparationStaffId===account.id&&order.items.some(item=>item.unpreparedQuantity>0)||order.batches.some(batch=>batch.status==='delivering'&&batch.deliveryStaffId===account.id));
@@ -103,12 +116,13 @@ export function mountWorkdesk({ root, account, api, brand, logout, switchWorkspa
     }
     return saved;
   }
-  const handleInput=event=>{if(destroyed)return;const input=event.target;if(input.dataset.serviceNote)serviceNotes.set(Number(input.dataset.serviceNote),input.value);if(input.dataset.item){const draft=drafts.get(Number(input.dataset.order));if(draft)draft[input.dataset.item]=Number(input.value);}};
+  const handleInput=event=>{if(destroyed)return;const input=event.target;if(input.matches('.wd-table-search')){tableSearch=input.value;render();return;}if(input.dataset.serviceNote)serviceNotes.set(Number(input.dataset.serviceNote),input.value);if(input.dataset.item){const draft=drafts.get(Number(input.dataset.order));if(draft)draft[input.dataset.item]=Number(input.value);}};
   const handleClick=async event=>{
     if(destroyed)return;
     const buttonEl=event.target.closest('button');if(!buttonEl)return;
     if(buttonEl.dataset.quickTab){tab=buttonEl.dataset.quickTab;filter=buttonEl.dataset.quickFilter;q('.wd-list').replaceChildren();render();return;}
     if(buttonEl.dataset.wdTab){tab=buttonEl.dataset.wdTab;filter='waiting';q('.wd-list').replaceChildren();render();return;}
+    if(buttonEl.dataset.tableFilter){tableFilter=buttonEl.dataset.tableFilter;render();return;}
     if(buttonEl.dataset.filter){filter=buttonEl.dataset.filter;render();return;}
     if(buttonEl.hasAttribute('data-wd-refresh'))return refresh();
     if(buttonEl.hasAttribute('data-wd-logout'))return logout();
@@ -122,6 +136,17 @@ export function mountWorkdesk({ root, account, api, brand, logout, switchWorkspa
     }
     if(buttonEl.hasAttribute('data-wd-sound')){try{audio=audio||new(window.AudioContext||window.webkitAudioContext)();await audio.resume();sound=!sound;buttonEl.textContent=sound?'声音提醒已开启':'开启声音提醒';if(sound)play();}catch{toast('当前浏览器无法播放提示声，请查看工作台提醒');}return;}
     const action=buttonEl.dataset.action,id=Number(buttonEl.dataset.id);if(!action)return;
+    if(action==='close-table'){
+      const table=(data.tables || []).find(row=>row.id===id);if(!table?.canClose)return toast('本桌还有未完成业务，请刷新并核对');
+      const commandKey=`close:${id}:${table.sessionId}`;let command=commands.get(commandKey);if(!command){command={requestId:uuid()};commands.set(commandKey,command);}
+      q('.wd-modal-root').innerHTML=`<div class="wd-modal-mask"><form class="wd-transfer wd-close-table" role="dialog" aria-modal="true" aria-label="清台并结束本桌"><h2>${esc(table.tableNo)} 桌 · 清台结束</h2><p>结束后，下一批顾客会建立新的桌台账单，原账单及历史订单继续保留。</p>${table.cartQuantity?`<p>本桌还有 ${table.cartQuantity} 件未下单商品，本次清单将无法继续结算。</p>`:''}<label class="wd-departure"><input type="checkbox" name="departure" required>我已确认顾客离店，并完成桌面清理</label><p class="wd-close-error" role="alert"></p><footer><button type="button" data-wd-close>取消</button><button type="submit">确认结束本桌</button></footer></form></div>`;
+      q('[data-wd-close]').onclick=()=>q('.wd-modal-root').replaceChildren();
+      q('.wd-close-table').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,submit=form.querySelector('[type="submit"]');if(submit.disabled)return;form.querySelectorAll('button').forEach(button=>button.disabled=true);const confirmed=form.elements.departure.checked;
+        const saved=await act('table-'+id,`/tables/${id}/close`,{sessionId:table.sessionId,requestId:command.requestId,confirmedDeparture:confirmed});
+        if(destroyed)return;
+        if(saved){commands.delete(commandKey);q('.wd-modal-root').replaceChildren();}else{form.querySelector('.wd-close-error').textContent='未能结束本桌，请核对提示和最新桌台状态。';form.querySelectorAll('button').forEach(button=>button.disabled=false);}
+      };return;
+    }
     const order=data.orders.find(row=>row.id===id),service=data.requests.find(row=>row.id===id);
     if(action==='claim-order')return act('order-'+id,`/orders/${id}/claim`,{revision:order.revision});
     if(action==='ready'||action==='ready-send'){

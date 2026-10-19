@@ -45,3 +45,11 @@ test('an ended session clears stale cart state and allows choosing a table again
   const fixture=miniappFixture({request:async url=>{if(url==='/tables/A-08/session')throw Object.assign(new Error('请先选择并确认桌台'),{status:409});}});
   const page=fixture.loadPage('menu');await page.onShow();assert.equal(fixture.app.globalData.sessionId,null);assert.equal(fixture.app.globalData.tableNo,'');assert.equal(page.data.totalQty,0);assert.equal(page.data.tableNo,'');
 });
+
+test('forty tables can be searched by normalized table number and filtered by occupancy',async()=>{
+  const fixture=miniappFixture({request:async url=>{if(url==='/tables')return{tables:Array.from({length:40},(_,i)=>({id:i+1,tableNo:'A-'+String(i+1).padStart(2,'0'),occupied:i%2===0}))};}});
+  const page=fixture.loadPage('menu');await page.openTables();assert.equal(page.data.filteredTables.length,40);assert.equal(page.data.tableCounts.idle,20);
+  page.onTableSearch({detail:{value:'a08'}});assert.equal(page.data.filteredTables.length,1);assert.equal(page.data.filteredTables[0].tableNo,'A-08');
+  page.chooseTableFilter({currentTarget:{dataset:{filter:'occupied'}}});assert.equal(page.data.filteredTables.length,0);
+  page.clearTableSearch();assert.equal(page.data.filteredTables.length,20);page.chooseTableFilter({currentTarget:{dataset:{filter:'idle'}}});assert.equal(page.data.filteredTables.length,20);
+});

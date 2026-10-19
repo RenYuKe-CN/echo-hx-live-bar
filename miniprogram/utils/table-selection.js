@@ -1,16 +1,25 @@
 const api = require('./api');
 const key = () => 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const n=Math.floor(Math.random()*16);return(c==='x'?n:(n&3)|8).toString(16);});
 const confirm = options => new Promise(resolve=>wx.showModal({...options,success:r=>resolve(!!r.confirm),fail:()=>resolve(false)}));
-const initialData = { tablePickerVisible:false, tableOptions:[], tableLoading:false, tableSwitching:false, tableError:'' };
+const initialData = { tablePickerVisible:false, tableOptions:[], filteredTables:[], tableSearch:'', tableFilter:'all', tableCounts:{all:0,idle:0,occupied:0}, tableLoading:false, tableSwitching:false, tableError:'' };
 const methods = {
   async openTables() {
     if(getApp().globalData.checkoutInProgress || this.data.cartBusy || this.data.serviceBusy || this.data.tableSwitching) return wx.showToast({title:'当前操作正在提交，请稍等',icon:'none'});
     wx.hideTabBar?.({animation:false});
-    this.setData({tablePickerVisible:true,tableLoading:true,tableError:''});
-    try {await getApp().apiReady;const result=await api.request('/tables');this.setData({tableOptions:result.tables});}
+    this.setData({tablePickerVisible:true,tableLoading:true,tableError:'',tableSearch:'',tableFilter:'all'});
+    try {await getApp().apiReady;const result=await api.request('/tables');this.setData({tableOptions:result.tables});this.filterTables();}
     catch(error){this.setData({tableError:error.message || '桌台未能加载，请重试'});}
     finally{this.setData({tableLoading:false});}
   },
+  filterTables() {
+    const normalize=value=>String(value || '').replace(/[\s_-]/g,'').toLowerCase();
+    const query=normalize(this.data.tableSearch), tables=this.data.tableOptions;
+    this.setData({tableCounts:{all:tables.length,idle:tables.filter(t=>!t.occupied).length,occupied:tables.filter(t=>t.occupied).length},
+      filteredTables:tables.filter(t=>(this.data.tableFilter==='all'||(this.data.tableFilter==='idle'?!t.occupied:t.occupied))&&normalize(t.tableNo).includes(query))});
+  },
+  onTableSearch(event){this.setData({tableSearch:event.detail.value});this.filterTables();},
+  clearTableSearch(){this.setData({tableSearch:''});this.filterTables();},
+  chooseTableFilter(event){if(this.data.tableSwitching)return;const filter=event.currentTarget.dataset.filter;if(!['all','idle','occupied'].includes(filter))return;this.setData({tableFilter:filter});this.filterTables();},
   closeTables(){if(!this.data.tableSwitching){this.setData({tablePickerVisible:false});wx.showTabBar?.({animation:false});}},
   chooseTable(event){const table=this.data.tableOptions.find(row=>row.id===Number(event.currentTarget.dataset.id));if(table)return this.switchTable(table).then(changed=>{if(changed)return this.load().then(()=>this.refreshServices());});},
   async switchTable(table) {

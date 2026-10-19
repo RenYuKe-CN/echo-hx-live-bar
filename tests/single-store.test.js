@@ -30,7 +30,7 @@ before(async()=>{
 });
 beforeEach(()=>{
   delete process.env.BACKUP_MIRROR_DIR;
-  for(const table of ['shift_ledger','cash_shifts','table_switch_commands','bill_snapshots','work_events','fulfillment_batch_items','fulfillment_batches','service_submit_commands','service_request_notes','service_requests','refund_transactions','refund_requests','inventory_logs','wallet_transactions','points_ledger','order_items','orders','cart_items','session_members','table_sessions','staff_sessions','wechat_sessions','login_failures'])db.prepare(`DELETE FROM ${table}`).run();
+  for(const table of ['shift_ledger','cash_shifts','table_switch_commands','table_close_commands','bill_snapshots','work_events','fulfillment_batch_items','fulfillment_batches','service_submit_commands','service_request_notes','service_requests','refund_transactions','refund_requests','group_buy_settlements','redemption_stock','group_buy_redemptions','group_buy_mappings','inventory_logs','wallet_transactions','points_ledger','order_items','orders','cart_items','session_members','table_sessions','staff_sessions','wechat_sessions','login_failures'])db.prepare(`DELETE FROM ${table}`).run();
   db.prepare('UPDATE shift_settings SET enabled=0').run();db.prepare("UPDATE backup_settings SET mirror_error='',mirror_last_at=NULL").run();
   db.prepare("UPDATE commerce_settings SET open_time='00:00',close_time='00:00'").run();
   db.prepare("UPDATE tables SET status='active'").run();db.prepare("UPDATE users SET member_tier_id=NULL,member_level='普通会员',member_discount=1,points=0").run();db.prepare("UPDATE users SET phone='13800138001',nickname='付款原名' WHERE id=1").run();db.prepare("UPDATE member_tiers SET status='inactive'").run();
@@ -159,4 +159,69 @@ test('refunds already pending before upgrade retain their previously authorized 
   await reconcileProcessingRefunds();await reconcileProcessingRefunds();
   assert.equal(stock(),100);assert.deepEqual(db.prepare('SELECT returned_quantity,cancelled_quantity FROM order_items').get(),{returned_quantity:2,cancelled_quantity:2});
   assert.equal(db.prepare('SELECT returned_cost_cents FROM refund_transactions').get().returned_cost_cents,2000);
+});
+
+
+test('waiters close cleaned tables inside the workdesk without gaining financial permissions',async()=>{
+  paidOrder({delivered:2});db.prepare('INSERT INTO cart_items(session_id,product_id,quantity,added_by_user_id) VALUES(1,1,1,1)').run();
+  const table=(await call('/admin/workdesk',{token:tokens.waiter})).body.tables.find(t=>t.id===1);
+  assert.equal(table.canClose,true);assert.equal(table.cartQuantity,1);assert.equal(table.sessionId,1);
+  assert.equal(JSON.stringify(table).includes('13800138001'),false);assert.equal(Object.keys(table).some(key=>/amount|phone|payer|total|paid/i.test(key)),false);
+  const body={sessionId:1,requestId:crypto.randomUUID(),confirmedDeparture:true};
+  assert.equal((await post('/admin/workdesk/tables/1/close',body,tokens.waiter)).status,200);
+  assert.equal(db.prepare('SELECT status FROM table_sessions WHERE id=1').get().status,'closed');
+  const snapshot=JSON.parse(db.prepare('SELECT snapshot_json FROM bill_snapshots WHERE session_id=1').get().snapshot_json);
+  assert.equal(snapshot.totals.paid,6000);assert.equal(snapshot.orders[0].orderNo,'FIXTURE-ORDER');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,1);assert.equal(stock(),98);
+  assert.equal((await call('/admin/tables',{token:tokens.waiter})).status,403);
+  assert.equal((await call('/admin/orders',{token:tokens.waiter})).status,403);
+  assert.equal((await call('/sessions/1/cart',{token:tokens.user})).status,409);
+});
+test('table cleanup requires departure confirmation and never closes a newly reopened session on retries',async()=>{
+  const body={sessionId:1,requestId:crypto.randomUUID(),confirmedDeparture:true};
+  assert.equal((await post('/admin/workdesk/tables/1/close',{...body,confirmedDeparture:false},tokens.waiter)).status,400);
+  assert.equal((await post('/admin/workdesk/tables/1/close',{...body,sessionId:'1'},tokens.waiter)).status,400);
+  assert.equal((await post('/admin/workdesk/tables/1/close',body,tokens.cashier)).status,403);
+  assert.equal((await post('/admin/workdesk/tables/1/close',body,tokens.user)).status,401);
+  assert.equal((await post('/admin/workdesk/tables/1/close',body,tokens.waiter)).status,200);
+  const reopened=await post('/tables/select',{tableId:1,requestId:crypto.randomUUID()},tokens.user);assert.equal(reopened.status,200);
+  assert.notEqual(reopened.body.session.id,1);
+  assert.equal((await post('/admin/workdesk/tables/1/close',body,tokens.waiter)).body.repeated,true);
+  assert.equal((await post('/admin/workdesk/tables/1/close',{...body,requestId:crypto.randomUUID()},tokens.waiter)).status,409);
+  assert.equal((await post('/admin/workdesk/tables/1/close',body)).status,409);
+  assert.equal(db.prepare('SELECT status FROM table_sessions WHERE id=?').get(reopened.body.session.id).status,'open');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM table_close_commands').get().n,1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM bill_snapshots').get().n,1);
+  db.prepare("UPDATE tables SET status='disabled' WHERE id=1").run();
+  assert.equal((await post('/admin/workdesk/tables/1/close',{...body,sessionId:reopened.body.session.id,requestId:crypto.randomUUID()},tokens.waiter)).status,404);
+});
+test('unfinished payment, delivery, service, or refunds block waiter cleanup atomically',async()=>{
+  paidOrder({delivered:2});const body={sessionId:1,requestId:crypto.randomUUID(),confirmedDeparture:true};
+  const blocked=async label=>{
+    const table=(await call('/admin/workdesk',{token:tokens.waiter})).body.tables.find(t=>t.id===1);
+    assert.equal(table.canClose,false,label);assert.ok(table.blockers.some(text=>text.includes(label)));
+    const response=await post('/admin/workdesk/tables/1/close',body,tokens.waiter);assert.equal(response.status,409);assert.ok(response.body.message.includes(label));
+    assert.equal(db.prepare('SELECT status FROM table_sessions WHERE id=1').get().status,'open');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM table_close_commands').get().n,0);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM bill_snapshots').get().n,0);
+  };
+  db.prepare("UPDATE orders SET payment_status='pending'").run();await blocked('待支付');
+  db.prepare("UPDATE orders SET payment_status='paid',status='awaiting_delivery'").run();await blocked('待送达');
+  db.prepare("UPDATE orders SET status='completed'").run();
+  db.prepare("INSERT INTO fulfillment_batches(order_id,preparation_staff_id,status,request_id,request_hash) VALUES(100,3,'ready','cleanup-batch','fixture')").run();await blocked('待取或在途');
+  db.prepare("UPDATE fulfillment_batches SET status='delivering'").run();await blocked('待取或在途');db.prepare("UPDATE fulfillment_batches SET status='delivered'").run();
+  db.prepare("INSERT INTO service_requests(session_id,created_by,type) VALUES(1,1,'help')").run();await blocked('未完成服务');db.prepare("UPDATE service_requests SET status='completed'").run();
+  db.prepare("INSERT INTO refund_requests(order_id,user_id,amount_cents) VALUES(100,1,100)").run();await blocked('退款待处理');db.prepare("UPDATE refund_requests SET status='rejected'").run();
+  db.prepare("INSERT INTO refund_transactions(order_id,user_id,amount_cents,out_refund_no,status) VALUES(100,1,100,'CLEANUP-REFUND','processing')").run();await blocked('退款待处理');
+  db.prepare("UPDATE refund_transactions SET status='failed'").run();
+  assert.equal((await post('/admin/workdesk/tables/1/close',body,tokens.waiter)).status,200);
+});
+test('unresolved platform redemption blocks cleanup until its outcome is known',async()=>{
+  db.prepare("INSERT INTO group_buy_mappings(id,store_id,platform,external_product_id,product_id,name) VALUES(1,1,'meituan','cleanup-product',1,'演示套餐')").run();
+  db.prepare("INSERT INTO group_buy_redemptions(id,store_id,session_id,user_id,platform,certificate_id,voucher_hash,voucher_code,mapping_id,state,source,snapshot_json,amount_cents) VALUES('cleanup-redemption',1,1,1,'meituan','cleanup-cert','cleanup-hash','fixture-only',1,'unknown','api','{}',3000)").run();
+  const body={sessionId:1,requestId:crypto.randomUUID(),confirmedDeparture:true};
+  for(const state of ['verifying','unknown','verified']){
+    db.prepare('UPDATE group_buy_redemptions SET state=?').run(state);
+    const result=await post('/admin/workdesk/tables/1/close',body,tokens.waiter);assert.equal(result.status,409);assert.ok(result.body.message.includes('核销待确认'));
+  }
+  db.prepare("UPDATE group_buy_redemptions SET state='failed'").run();assert.equal((await post('/admin/workdesk/tables/1/close',body,tokens.waiter)).status,200);
 });

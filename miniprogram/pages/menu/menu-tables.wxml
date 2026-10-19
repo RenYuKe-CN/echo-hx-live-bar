@@ -1,13 +1,16 @@
 <view wx:if="{{tablePickerVisible}}" class="service-mask" catchtap="closeTables">
   <view class="service-sheet table-picker-sheet" catchtap="noop">
     <view class="service-head"><view><text class="service-title">选择桌台</text><text class="service-subtitle">{{tableNo ? '当前 ' + tableNo + ' 桌 · 切换后在新桌点单' : '无法扫码时，可以直接选择您所在的桌台'}}</text></view><button bindtap="closeTables" disabled="{{tableSwitching}}" aria-label="关闭选桌">×</button></view>
-    <scroll-view class="table-picker-body" scroll-y="true">
+    <view class="table-picker-controls">
+      <view class="table-picker-search"><input value="{{tableSearch}}" bindinput="onTableSearch" placeholder="搜索桌号，如 A08、12" maxlength="30" disabled="{{tableSwitching}}" aria-label="搜索桌号"/><button wx:if="{{tableSearch}}" bindtap="clearTableSearch" aria-label="清空桌号搜索" disabled="{{tableSwitching}}">×</button></view>
+      <view class="table-picker-filters"><button class="{{tableFilter === 'all' ? 'is-active' : ''}}" data-filter="all" bindtap="chooseTableFilter" disabled="{{tableSwitching}}">全部 {{tableCounts.all}}</button><button class="{{tableFilter === 'idle' ? 'is-active' : ''}}" data-filter="idle" bindtap="chooseTableFilter" disabled="{{tableSwitching}}">空闲 {{tableCounts.idle}}</button><button class="{{tableFilter === 'occupied' ? 'is-active' : ''}}" data-filter="occupied" bindtap="chooseTableFilter" disabled="{{tableSwitching}}">使用中 {{tableCounts.occupied}}</button></view>
+    </view>
+    <scroll-view class="table-picker-body" scroll-y="true" show-scrollbar="true">
       <text wx:if="{{tableLoading}}" class="table-picker-note">正在加载桌台…</text>
       <view wx:elif="{{tableError}}" class="service-error"><text>{{tableError}}</text><button bindtap="openTables" disabled="{{tableSwitching}}">重新加载</button></view>
-      <view class="table-picker-grid"><button wx:for="{{tableOptions}}" wx:key="id" class="table-picker-option {{item.tableNo === tableNo ? 'is-current' : ''}}" data-id="{{item.id}}" bindtap="chooseTable" disabled="{{tableSwitching}}"><text>{{item.tableNo}}</text><text class="table-picker-status">{{item.tableNo === tableNo ? '当前桌台' : item.occupied ? '正在使用 · 就座后可加入' : '空闲'}}</text></button></view>
-      <text wx:if="{{!tableLoading && !tableOptions.length && !tableError}}" class="table-picker-note">暂无可用桌台，请联系服务员。</text>
-      <text class="table-picker-note">请核对桌号。已支付订单、团购兑换和服务需求保留在原桌，需要调整配送位置时请联系服务员。</text>
+      <view wx:if="{{!tableLoading && !tableError}}" class="table-picker-grid"><button wx:for="{{filteredTables}}" wx:key="id" class="table-picker-option {{item.occupied ? 'is-occupied' : ''}} {{item.tableNo === tableNo ? 'is-current' : ''}}" data-id="{{item.id}}" bindtap="chooseTable" disabled="{{tableSwitching}}" aria-label="{{item.tableNo}}，{{item.occupied ? '使用中，就座后可加入' : '空闲'}}"><text class="table-picker-name">{{item.tableNo}}</text><text class="table-picker-status">{{item.tableNo === tableNo ? '当前桌台' : item.occupied ? '使用中' : '空闲'}}</text></button></view>
+      <view wx:if="{{!tableLoading && !filteredTables.length && !tableError}}" class="table-picker-empty"><text>{{tableOptions.length ? '没有匹配的桌台' : '暂无可用桌台，请联系服务员'}}</text><button wx:if="{{tableSearch}}" bindtap="clearTableSearch">清空搜索</button></view>
     </scroll-view>
-    <text wx:if="{{tableSwitching}}" class="table-picker-note">正在处理选桌，请稍等…</text>
+    <text class="table-picker-note table-picker-footer">{{tableSwitching ? '正在处理选桌，请稍等…' : '请确认就座桌号。切换只影响之后点单，原桌已付订单及服务需求保留原归属。'}}</text>
   </view>
 </view>
