@@ -3,6 +3,7 @@ import { workdeskTables, closeWorkdeskTable } from './table-closing.js';
 import { db } from './db.js';
 import { parseRefundItems } from './refund-stock.js';
 import { storeName } from './branding.js';
+import { displayOrderItems } from './order-item-groups.js';
 
 export const serviceTypes = { help: '呼叫服务员', tissue: '需要纸巾', cleanup: '收拾桌面', remind: '催单', other: '其他帮助' };
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
@@ -34,17 +35,18 @@ export function fulfillmentLines(orderId) {
     COALESCE((SELECT SUM(bi.quantity) FROM fulfillment_batch_items bi JOIN fulfillment_batches b ON b.id=bi.batch_id WHERE bi.order_item_id=oi.id AND b.status='ready'),0) AS ready_quantity,
     COALESCE((SELECT SUM(bi.quantity) FROM fulfillment_batch_items bi JOIN fulfillment_batches b ON b.id=bi.batch_id WHERE bi.order_item_id=oi.id AND b.status='delivering'),0) AS delivering_quantity
     FROM order_items oi WHERE oi.order_id=? ORDER BY oi.id`).all(orderId).map(row => ({
-      id: row.id, name: row.product_name, quantity: row.quantity, returnedQuantity: row.returned_quantity + row.returned_delivered_quantity, cancelledQuantity: row.cancelled_quantity,
+      id: row.id, productId:row.product_id, bundleGroupId:row.bundle_group_id, unit:row.unit_snapshot||'件', name: row.product_name, quantity: row.quantity, returnedQuantity: row.returned_quantity + row.returned_delivered_quantity, cancelledQuantity: row.cancelled_quantity,
       deliveredQuantity: row.delivered_quantity, readyQuantity: row.ready_quantity, deliveringQuantity: row.delivering_quantity,
       unpreparedQuantity: Math.max(0, row.quantity - row.cancelled_quantity - row.delivered_quantity - row.ready_quantity - row.delivering_quantity)
     }));
 }
 function batchView(batch) {
+  const rows=db.prepare('SELECT oi.id,oi.product_id,oi.product_name,oi.bundle_group_id,oi.unit_snapshot,bi.quantity FROM fulfillment_batch_items bi JOIN order_items oi ON oi.id=bi.order_item_id WHERE batch_id=? ORDER BY oi.id').all(batch.id);
   return { id: batch.id, orderId: batch.order_id, number: `配送-${String(batch.id).padStart(5, '0')}`, status: batch.status,
     preparationStaffId: batch.preparation_staff_id, preparationStaff: operatorName(batch.preparation_staff_id),
     deliveryStaffId: batch.delivery_staff_id, deliveryStaff: operatorName(batch.delivery_staff_id),
     createdAt: batch.created_at, claimedAt: batch.claimed_at, deliveredAt: batch.delivered_at,
-    items: db.prepare('SELECT bi.order_item_id AS id,oi.product_name AS name,bi.quantity FROM fulfillment_batch_items bi JOIN order_items oi ON oi.id=bi.order_item_id WHERE batch_id=? ORDER BY oi.id').all(batch.id) };
+    items: rows.map(row=>({id:row.id,name:row.product_name,quantity:row.quantity})),displayItems:displayOrderItems(batch.order_id,rows) };
 }
 export function workOrderView(order) {
   const table = db.prepare('SELECT t.table_no FROM table_sessions s JOIN tables t ON t.id=s.table_id WHERE s.id=?').get(order.session_id);
@@ -53,7 +55,7 @@ export function workOrderView(order) {
   const state = order.status === 'completed' ? 'completed' : order.status === 'refunded' ? 'refunded' : !order.preparation_staff_id ? 'waiting' : items.some(item => item.unpreparedQuantity) ? 'preparing' : batches.some(batch => batch.status === 'ready') ? 'ready' : 'delivering';
   return { id: order.id, orderNo: order.order_no, tableNo: table?.table_no || '', sessionId: order.session_id, note: order.note,
     paidAt: order.paid_at, preparationStaffId: order.preparation_staff_id, preparationStaff: operatorName(order.preparation_staff_id),
-    preparationStartedAt: order.preparation_started_at, revision: order.fulfillment_revision, state, paused: !['completed','refunded'].includes(order.status) && (refundHold(order.id) || !!order.fulfillment_pause_reason), pausedReason: order.fulfillment_pause_reason || '退款处理中', items, batches };
+    preparationStartedAt: order.preparation_started_at, revision: order.fulfillment_revision, state, paused: !['completed','refunded'].includes(order.status) && (refundHold(order.id) || !!order.fulfillment_pause_reason), pausedReason: order.fulfillment_pause_reason || '退款处理中', items, displayItems:displayOrderItems(order.id,items), batches };
 }
 function serviceView(request) {
   const table = db.prepare('SELECT t.table_no FROM table_sessions s JOIN tables t ON t.id=s.table_id WHERE s.id=?').get(request.session_id);

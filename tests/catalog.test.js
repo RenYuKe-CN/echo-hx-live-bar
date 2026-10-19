@@ -10,6 +10,9 @@ const {db}=await import('../server/db.js');
 const {createApp}=await import('../server/app.js');
 const {migrateCatalog}=await import('../server/catalog-schema.js');
 const {orderCostSql}=await import('../server/refund-stock.js');
+const {displayOrderItems}=await import('../server/order-item-groups.js');
+const {distributeQuantities}=await import('../src/order-quantities.js');
+const {refundStockSelection}=await import('../src/refund-stock-view.js');
 const nativeFetch=globalThis.fetch,hash=t=>crypto.createHash('sha256').update(t).digest('hex');
 const tokens={admin:'c'.repeat(64),user:'a'.repeat(64),other:'b'.repeat(64),cashier:'d'.repeat(64),waiter:'e'.repeat(64)};
 let server,base,adminHash,bundleId,mappingId;
@@ -250,4 +253,54 @@ test('concurrent Meituan result checks share one request and cannot race an admi
   assert.equal((await admin(`/group-buy/${id}/resolve`,'POST',{outcome:'failed',platformChecked:true,reason:'人工确认平台未核销'})).status,200);
   complete();assert.equal((await first).body.record.state,'failed');assert.equal((await second).body.record.state,'failed');
   assert.equal(calls.filter(c=>c.action==='queryLocalListByDate').length,1);assert.deepEqual(stock(1),{stock:100,reserved_stock:0});assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,0);
+});
+
+test('cent-split bundle goods are grouped across order views without changing historical amounts or names',async()=>{
+  const paid=await payBundle(2),id=paid.body.order.id;
+  db.prepare("UPDATE products SET name='后来修改的名称' WHERE id=1").run();
+  const detail=(await call(`/me/orders/${paid.body.order.order_no}`)).body.order;
+  assert.ok(detail.items.filter(item=>item.productId===1).length>1);
+  const beer=detail.displayItems.filter(item=>item.productId===1);assert.equal(beer.length,1);assert.equal(beer[0].name,'精酿啤酒');assert.equal(beer[0].quantity,12);assert.equal(beer[0].paidPrice,null);
+  assert.equal(detail.displayItems.reduce((sum,item)=>sum+Math.round(item.paidSubtotal*100),0),19998);
+  const adminOrder=(await admin('/orders')).body.orders.find(order=>order.id===id);assert.equal(adminOrder.displayItems.filter(item=>item.productId===1).length,1);assert.equal(adminOrder.items.length,detail.items.length);
+  const summary=(await admin('/summary')).body.pendingOrders.find(order=>order.id===id);assert.equal(summary.displayItems.find(item=>item.productId===1).quantity,12);
+  const desk=(await call('/admin/workdesk',{token:tokens.waiter})).body.orders.find(order=>order.id===id);assert.equal(desk.displayItems.find(item=>item.productId===1).unpreparedQuantity,12);
+  for(const item of desk.displayItems)for(const field of ['paidPrice','paidSubtotal','cost_cents','originalPrice'])assert.equal(Object.hasOwn(item,field),false);
+  assert.equal(db.prepare('SELECT SUM(quantity*paid_price_cents) AS paid FROM order_items WHERE order_id=?').get(id).paid,19998);
+});
+test('a grouped bundle quantity can be delivered across source lines in separate idempotent batches',async()=>{
+  const paid=await payBundle(2),id=paid.body.order.id,stockAfterSale=stock(1);
+  const staffPost=(url,body)=>call('/admin/workdesk'+url,{token:tokens.waiter,method:'POST',body});
+  let order=(await staffPost(`/orders/${id}/claim`,{revision:0})).body.order;
+  const firstQuantities=Object.fromEntries(order.displayItems.map(item=>[item.id,item.productId===1?8:0]));
+  const first=await staffPost(`/orders/${id}/batches`,{revision:order.revision,requestId:crypto.randomUUID(),startDelivery:true,items:distributeQuantities(order.displayItems,firstQuantities,order.items,row=>row.unpreparedQuantity)});assert.equal(first.status,200);
+  assert.ok(first.body.batch.items.length>1);assert.equal(first.body.batch.displayItems.length,1);assert.equal(first.body.batch.displayItems[0].quantity,8);
+  assert.equal((await staffPost(`/batches/${first.body.batch.id}/complete`,{})).status,200);assert.equal((await staffPost(`/batches/${first.body.batch.id}/complete`,{})).status,200);
+  order=(await call('/admin/workdesk',{token:tokens.waiter})).body.orders.find(order=>order.id===id);
+  const beer=order.displayItems.find(item=>item.productId===1);assert.equal(beer.deliveredQuantity,8);assert.equal(beer.unpreparedQuantity,4);
+  const rest=await staffPost(`/orders/${id}/batches`,{revision:order.revision,requestId:crypto.randomUUID(),startDelivery:true,items:distributeQuantities(order.displayItems,Object.fromEntries(order.displayItems.map(item=>[item.id,item.unpreparedQuantity])),order.items,row=>row.unpreparedQuantity)});assert.equal(rest.status,200);
+  assert.equal(rest.body.batch.displayItems.find(item=>item.productId===1).quantity,4);assert.equal((await staffPost(`/batches/${rest.body.batch.id}/complete`,{})).status,200);
+  assert.equal(db.prepare('SELECT status FROM orders WHERE id=?').get(id).status,'completed');assert.deepEqual(stock(1),stockAfterSale);
+  const final=(await call(`/me/orders/${paid.body.order.order_no}`)).body.order;assert.equal(final.displayItems.find(item=>item.productId===1).deliveredQuantity,12);
+});
+test('same-name distinct goods and different historical units never merge into one display quantity',()=>{
+  const groups=displayOrderItems(0,[{id:1,product_id:1,product_name:'同名商品',unit_snapshot:'瓶',quantity:2},{id:2,product_id:2,product_name:'同名商品',unit_snapshot:'瓶',quantity:3},{id:3,product_id:1,product_name:'同名商品',unit_snapshot:'箱',quantity:4}]);
+  assert.equal(groups.length,3);assert.deepEqual(groups.map(item=>item.quantity),[2,3,4]);
+});
+
+test('a grouped partial bundle refund retains exact source prices and returns only the chosen goods',async()=>{
+  const paid=await payBundle(),id=paid.body.order.id,order=(await call(`/me/orders/${paid.body.order.order_no}`)).body.order;
+  const quantities=Object.fromEntries(order.displayItems.map(item=>[item.id,item.productId===1?5:0]));
+  const selected=distributeQuantities(order.displayItems,quantities,order.items,row=>row.refundAvailableQuantity);
+  const expected=selected.reduce((sum,row)=>sum+Math.round(order.items.find(item=>item.id===row.orderItemId).paidPrice*100)*row.quantity,0);
+  const request=await call(`/me/orders/${paid.body.order.order_no}/refund-requests`,{method:'POST',body:{items:selected}});assert.equal(request.status,201);assert.equal(Math.round(request.body.request.amount*100),expected);
+  const adminOrder=(await admin('/orders')).body.orders.find(row=>row.id===id);
+  const stockPlan=refundStockSelection(adminOrder,adminOrder.displayItems,{cancelQuantities:{},returnQuantities:quantities,requested:adminOrder.refundRequest.items,restock:true});
+  assert.deepEqual(stockPlan.cancelItems,selected);
+  const body={...stockPlan,stockMode:'restock',stockConfirmed:true};
+  assert.equal((await admin(`/refunds/${request.body.request.id}/approve`,'POST',body)).status,200);assert.equal((await admin(`/refunds/${request.body.request.id}/approve`,'POST',body)).status,200);
+  assert.equal(stock(1).stock,99);assert.equal(stock(4).stock,99);
+  const desk=(await admin('/workdesk')).body.orders.find(row=>row.id===id),beer=desk.displayItems.find(row=>row.productId===1);
+  assert.equal(beer.cancelledQuantity,5);assert.equal(beer.returnedQuantity,5);assert.equal(beer.unpreparedQuantity,1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM refund_transactions WHERE order_id=?').get(id).n,1);
 });

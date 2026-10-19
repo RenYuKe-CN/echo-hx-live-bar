@@ -9,20 +9,20 @@
 
     <view wx:if="{{order.bundleGroups.length}}" class="section"><view class="section-title"><text>套餐明细</text></view><view wx:for="{{order.bundleGroups}}" wx:key="id" class="info-row"><text>{{item.name}} × {{item.quantity}}</text><text>¥{{item.amount}}</text></view></view>
     <view class="section">
-      <view class="section-title"><text>商品清单</text><text>{{order.items.length}} 项</text></view>
-      <view wx:for="{{order.items}}" wx:key="id" class="item">
+      <view class="section-title"><text>商品清单</text><text>{{order.displayItems.length}} 项</text></view>
+      <view wx:for="{{order.displayItems}}" wx:key="id" class="item">
         <view class="item-image-wrap"><image wx:if="{{item.image}}" class="item-image" src="{{item.image}}" mode="aspectFill"/><view wx:else class="item-placeholder">{{item.initial}}</view></view>
-        <view class="item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">数量 × {{item.quantity}} · 单价 ¥{{item.paidPriceText}}</text><text wx:if="{{order.paymentStatus === 'paid'}}" class="item-meta">已送达 {{item.deliveredQuantity}} 件{{item.refundedQuantity ? ' · 已退款 ' + item.refundedQuantity + ' 件' : ''}}</text><text wx:if="{{item.originalPriceText !== item.paidPriceText}}" class="item-original">原价 ¥{{item.originalPriceText}} / 件</text></view>
+        <view class="item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">数量 × {{item.quantity}}<text wx:if="{{item.hasUnitPrice}}"> · 单价 ¥{{item.paidPriceText}}</text></text><text wx:if="{{order.paymentStatus === 'paid'}}" class="item-meta">已送达 {{item.deliveredQuantity}} 件{{item.refundedQuantity ? ' · 已退款 ' + item.refundedQuantity + ' 件' : ''}}</text><text wx:if="{{item.hasUnitPrice && item.hasOriginalUnitPrice && item.originalPriceText !== item.paidPriceText}}" class="item-original">原价 ¥{{item.originalPriceText}} / 件</text></view>
         <view class="item-price"><text wx:if="{{item.originalSubtotalText !== item.paidSubtotalText}}" class="item-strike">¥{{item.originalSubtotalText}}</text><text class="item-total">¥{{item.paidSubtotalText}}</text></view>
       </view>
-      <view wx:if="{{!order.items.length}}" class="empty-inline">暂无商品明细</view>
+      <view wx:if="{{!order.displayItems.length}}" class="empty-inline">暂无商品明细</view>
     </view>
 
     <view wx:if="{{order.canRefund}}" id="refund-panel" class="section refund-apply-section">
       <view class="section-title"><text>申请退款</text><text>按商品选择数量</text></view>
       <text class="refund-hint">请选择未送达商品和退款数量，系统会按照本单优惠后的实付金额自动计算退款金额。</text>
-      <view wx:for="{{order.items}}" wx:key="id" wx:if="{{item.refundSelectable}}" class="refund-item">
-        <view class="refund-item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">可退款 {{item.refundAvailableQuantity}} 件 · ¥{{item.paidPriceText}} / 件</text></view>
+      <view wx:for="{{order.displayItems}}" wx:key="id" wx:if="{{item.refundSelectable}}" class="refund-item">
+        <view class="refund-item-main"><text class="item-name">{{item.name}}</text><text class="item-meta">可退款 {{item.refundAvailableQuantity}} 件<text wx:if="{{item.hasUnitPrice}}"> · ¥{{item.paidPriceText}} / 件</text></text></view>
         <view class="quantity-stepper"><button class="stepper-button" data-index="{{index}}" data-delta="-1" bindtap="changeRefundQuantity">−</button><text>{{item.refundQuantity}}</text><button class="stepper-button" data-index="{{index}}" data-delta="1" bindtap="changeRefundQuantity">＋</button></view>
       </view>
       <view class="refund-estimate"><text>预计退款</text><text>¥{{refundAmountText}}</text></view>

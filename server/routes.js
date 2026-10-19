@@ -29,6 +29,7 @@ import { reconcilePrintJobs } from './printing.js';
 import { businessReport } from './business-report.js';
 import { reportWindow } from './business-time.js';
 import { registerOperationLogRoutes } from './operation-logs.js';
+import { displayOrderItems } from './order-item-groups.js';
 
 export const router = Router();
 const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
@@ -308,12 +309,13 @@ function orderMessageValues(order, deliveredOnly = false) {
   const row = order || {};
   const items = row.id
     ? db.prepare(deliveredOnly
-      ? 'SELECT product_name, delivered_quantity AS quantity FROM order_items WHERE order_id = ? AND delivered_quantity > 0 ORDER BY id'
-      : 'SELECT product_name, quantity FROM order_items WHERE order_id = ? ORDER BY id').all(row.id)
+      ? 'SELECT id,product_id,product_name,bundle_group_id,unit_snapshot,delivered_quantity AS quantity FROM order_items WHERE order_id = ? AND delivered_quantity > 0 ORDER BY id'
+      : 'SELECT id,product_id,product_name,bundle_group_id,unit_snapshot,quantity FROM order_items WHERE order_id = ? ORDER BY id').all(row.id)
     : [];
-  const productList = items.map(item => `${item.product_name} × ${item.quantity}`).join('、');
-  const summaryItems = items.slice(0, 2).map(item => `${item.product_name}×${item.quantity}`);
-  const productSummary = summaryItems.join('、') + (items.length > summaryItems.length ? ` 等${items.length}项` : '');
+  const grouped=displayOrderItems(row.id,items);
+  const productList = grouped.map(item => `${item.name} × ${item.quantity}`).join('、');
+  const summaryItems = grouped.slice(0, 2).map(item => `${item.name}×${item.quantity}`);
+  const productSummary = summaryItems.join('、') + (grouped.length > summaryItems.length ? ` 等${grouped.length}项` : '');
   const table = row.session_id
     ? db.prepare('SELECT t.table_no FROM table_sessions ts JOIN tables t ON t.id = ts.table_id WHERE ts.id = ?').get(row.session_id)
     : null;
@@ -1655,11 +1657,11 @@ function fulfillmentLabel(order) {
 function userOrderItems(orderId) {
   const used = refundItemQuantities(orderId);
   return db.prepare(`SELECT oi.id, oi.product_id, oi.product_name, oi.quantity,
-    oi.original_price_cents, oi.paid_price_cents, oi.delivered_quantity, p.image_url
+    oi.original_price_cents, oi.paid_price_cents, oi.delivered_quantity, oi.bundle_group_id, oi.unit_snapshot, p.image_url
     FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id
     WHERE oi.order_id = ? ORDER BY oi.id`).all(orderId).map(item => ({
       id: item.id,
-      productId: item.product_id,
+      productId: item.product_id, bundleGroupId:item.bundle_group_id,unit:item.unit_snapshot||'件',
       name: item.product_name,
       quantity: item.quantity,
       imageUrl: item.image_url || '',
@@ -1724,13 +1726,13 @@ function userOrderView(row, includeItems = false) {
   order.bundleGroups=db.prepare('SELECT id,name,quantity,paid_cents FROM order_bundle_groups WHERE order_id=?').all(row.id).map(g=>({...g,amount:g.paid_cents/100}));
   if (row.payment_method!=='group_buy' && available.length && !inTransit) { try { order.refundableAmount = centsToMoney(calculateRefundAmount(row, available)); } catch { order.refundableAmount = 0; } }
   else order.refundableAmount = 0;
-  if (includeItems) order.items = userOrderItems(row.id);
+  if (includeItems) {order.items = userOrderItems(row.id);order.displayItems=displayOrderItems(row.id,order.items,{prices:true});}
   return order;
 }
 function orderItems(orderIds) {
   if (!orderIds.length) return {};
   const grouped = {};
-  const rows = db.prepare(`SELECT oi.id,oi.order_id,oi.product_id,oi.product_name,oi.quantity,oi.delivered_quantity,oi.returned_quantity,oi.returned_delivered_quantity,oi.cancelled_quantity,p.image_url FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id WHERE oi.order_id IN (${orderIds.map(() => '?').join(',')}) ORDER BY oi.id`).all(...orderIds);
+  const rows = db.prepare(`SELECT oi.id,oi.order_id,oi.product_id,oi.product_name,oi.bundle_group_id,oi.unit_snapshot,oi.quantity,oi.delivered_quantity,oi.returned_quantity,oi.returned_delivered_quantity,oi.cancelled_quantity,p.image_url FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id WHERE oi.order_id IN (${orderIds.map(() => '?').join(',')}) ORDER BY oi.id`).all(...orderIds);
   for (const row of rows) (grouped[row.order_id] ||= []).push(row);
   return grouped;
 }
@@ -1755,7 +1757,7 @@ router.get('/admin/summary', (req, res) => {
   issue('printing','打印结果待确认',"SELECT COUNT(*) AS n FROM print_jobs WHERE state IN ('unknown','failed')",'先检查设备出纸，再决定重印');
   issue('group-buy','团购核销待核对',"SELECT COUNT(*) AS n FROM group_buy_redemptions WHERE state IN ('unknown','verified')",'核对原平台核销记录');
   if(req.staff.role==='super'){const b=backupSettings();if(b.mirrorError)issues.push({section:'backups',title:'外部备份复制失败',count:1,detail:b.mirrorError});if(b.enabled&&(!b.lastRunAt||Date.now()-Date.parse(b.lastRunAt)>(b.frequency==='weekly'?8:2)*86400000))issues.push({section:'backups',title:'自动备份需检查',count:1,detail:'尚无近期自动备份成功记录'});}
-  res.json({ issues, todayRevenue: today.revenue, activeOrders, pendingPayment, pendingRefunds, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: today.revenue, recharge: today.rechargeReceived, offline: today.offlineReceived },businessWindow:{startAt:report.window.start,endAt:report.window.end}, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
+  res.json({ issues, todayRevenue: today.revenue, activeOrders, pendingPayment, pendingRefunds, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: today.revenue, recharge: today.rechargeReceived, offline: today.offlineReceived },businessWindow:{startAt:report.window.start,endAt:report.window.end}, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [],displayItems:displayOrderItems(o.id,items[o.id]||[]) })), updatedAt: new Date().toISOString() });
 });
 
 registerCatalogRoutes(router, { audit });
@@ -1841,7 +1843,7 @@ router.get('/admin/orders', (req, res) => {
   const total = db.prepare('SELECT COUNT(*) AS value FROM orders').get().value;
   const rows = db.prepare(`SELECT o.*, t.table_no, CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_name_snapshot ELSE u.nickname END AS nickname, CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_phone_snapshot ELSE u.phone END AS payer_phone, ${orderCostSql('o')} AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset);
   const items = orderItems(rows.map(o => o.id));
-  res.json({ orders: rows.map(row => { const refund = refundView(row); const order = { ...row, ...refund, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
+  res.json({ orders: rows.map(row => { const refund = refundView(row); const order = { ...row, ...refund, items: items[row.id] || [],displayItems:displayOrderItems(row.id,items[row.id]||[]), statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
 });
 
 router.get('/admin/refunds', (req, res) => {

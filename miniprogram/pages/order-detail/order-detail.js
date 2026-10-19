@@ -1,4 +1,5 @@
 const api = require('../../utils/api');
+const groupedItems = require('../../utils/order-items');
 
 Page({
   data: { orderNo: '', order: null, loading: true, refundItems: [], refundAmountText: '0.00', submittingRefund: false, focusRefund: false },
@@ -16,7 +17,7 @@ Page({
 
   loadOrder() {
     this.setData({ loading: true });
-    api.request(`/me/orders/${encodeURIComponent(this.data.orderNo)}`).then(data => {
+    return api.request(`/me/orders/${encodeURIComponent(this.data.orderNo)}`).then(data => {
       const order = data.order;
       const items = (order.items || []).map(item => ({
         ...item,
@@ -29,6 +30,11 @@ Page({
         refundQuantity: 0,
         refundAvailableText: String(item.refundAvailableQuantity || 0)
       }));
+      const displayItems=groupedItems.displayItems(order).map(item=>({...item,
+        initial:item.name?item.name.charAt(0):'酒',image:api.imageUrl(item.imageUrl||''),
+        hasUnitPrice:item.paidPrice!=null,hasOriginalUnitPrice:item.originalPrice!=null,
+        paidPriceText:item.paidPrice==null?'':Number(item.paidPrice).toFixed(2),originalPriceText:item.originalPrice==null?'':Number(item.originalPrice).toFixed(2),
+        paidSubtotalText:Number(item.paidSubtotal).toFixed(2),originalSubtotalText:Number(item.originalSubtotal).toFixed(2),refundQuantity:0}));
       this.setData({
         order: {
           ...order,
@@ -41,7 +47,7 @@ Page({
           bonusText: Number(order.bonusPaid || 0).toFixed(2),
           wechatText: Number(order.wechatPaid || 0).toFixed(2),
           refundedText: Number(order.refundedAmount || 0).toFixed(2),
-          items
+          items,displayItems
         },
         refundItems: [],
         refundAmountText: '0.00',
@@ -59,13 +65,16 @@ Page({
   changeRefundQuantity(event) {
     const index = Number(event.currentTarget.dataset.index);
     const delta = Number(event.currentTarget.dataset.delta);
-    const items = this.data.order?.items ? this.data.order.items.map(item => ({ ...item })) : [];
+    const order=this.data.order;
+    const items = order ? groupedItems.displayItems(order).map(item => ({ ...item })) : [];
     const item = items[index];
     if (!item || !item.refundSelectable) return;
     const quantity = Math.max(0, Math.min(Number(item.refundAvailableQuantity || 0), Number(item.refundQuantity || 0) + delta));
     item.refundQuantity = quantity;
-    const refundItems = items.filter(row => row.refundQuantity > 0).map(row => ({ orderItemId: row.id, quantity: row.refundQuantity }));
-    this.setData({ 'order.items': items, refundItems }, this.calculateRefundEstimate);
+    try {
+      const refundItems=groupedItems.refundSelection(order,items);
+      this.setData({ 'order.displayItems': items, refundItems }, this.calculateRefundEstimate);
+    } catch(error){wx.showToast({title:error.message,icon:'none'});}
   },
 
   calculateRefundEstimate() {
