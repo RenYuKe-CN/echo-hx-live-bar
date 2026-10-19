@@ -6,7 +6,7 @@ function context() { const data = getApp().globalData; return { sessionId: data.
 function current(snapshot) { const data = context(); return snapshot.sessionId === data.sessionId && snapshot.tableVersion === data.tableVersion; }
 const methods = {
   openService() {
-    if (!getApp().globalData.hasScannedTable) return wx.showToast({ title: '请先用微信扫描桌台码', icon: 'none' });
+    if (!getApp().globalData.hasScannedTable) return wx.showToast({ title: '请先扫码或选择桌台', icon: 'none' });
     if (!context().sessionId) return wx.showToast({ title: '桌台尚未连接，请加载完成后重试', icon: 'none' });
     this.setData({ serviceVisible: true, serviceLoadError: '' }); this.refreshServices();
   },
@@ -26,7 +26,7 @@ const methods = {
   async submitService() {
     if (this.data.serviceBusy) return;
     const snapshot = context(), note = String(this.data.serviceNote || '').trim(), type = this.data.serviceType;
-    if (!getApp().globalData.hasScannedTable || !snapshot.sessionId) return wx.showToast({ title: '请先扫描桌台码', icon: 'none' });
+    if (!getApp().globalData.hasScannedTable || !snapshot.sessionId) return wx.showToast({ title: '请先扫码或选择桌台', icon: 'none' });
     if (type === 'other' && !note) return wx.showToast({ title: '请填写具体服务需求', icon: 'none' });
     const fingerprint = JSON.stringify([snapshot.sessionId, type, note]);
     if (this.serviceCommand?.fingerprint !== fingerprint) this.serviceCommand = { fingerprint, requestId: requestId() };

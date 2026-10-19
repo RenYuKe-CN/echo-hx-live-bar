@@ -36,7 +36,7 @@ beforeEach(()=>{
 afterEach(()=>{globalThis.fetch=nativeFetch;});
 after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(work,{recursive:true,force:true});});
 async function call(url,{token=tokens.user,method='GET',body}={}){const r=await nativeFetch(base+url,{method,headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});return {status:r.status,body:await r.json()};}
-const admin=(url,method='GET',body)=>call('/admin'+url,{token:tokens.admin,method,body});
+const admin=(url,method='GET',body)=>call('/admin'+url,{token:tokens.admin,method,body:/^\/orders\/[^/]+\/refund$/.test(url)?{requestId:crypto.randomUUID(),reason:'测试退款',...body}:body});
 const stock=id=>db.prepare('SELECT stock,reserved_stock FROM products WHERE id=?').get(id);
 async function payBundle(quantity=1){assert.equal((await call('/sessions/1/cart/items',{method:'POST',body:{productId:bundleId,quantity}})).status,201);return call('/sessions/1/orders',{method:'POST',body:{paymentMethod:'balance'}});}
 function platformMock({timeout=false,certificates=1}={}){
@@ -76,7 +76,7 @@ test('a paid bundle expands into exact integer money and cost snapshots and ente
 });
 test('bundle refunds return constituent goods once and retain no returned costs',async()=>{
   const paid=await payBundle();assert.equal(paid.status,201);const id=paid.body.order.id;
-  const r=await admin(`/orders/${id}/refund`,'POST',{amount:99.99,reason:'未配送整单退款'});assert.equal(r.status,200);assert.equal(stock(1).stock,100);assert.equal(stock(4).stock,100);
+  const r=await admin(`/orders/${id}/refund`,'POST',{amount:99.99,reason:'未配送整单退款',stockMode:'restock',stockConfirmed:true,returnItems:db.prepare('SELECT id AS orderItemId,quantity FROM order_items WHERE order_id=?').all(id)});assert.equal(r.status,200);assert.equal(stock(1).stock,100);assert.equal(stock(4).stock,100);
   assert.equal(db.prepare(`SELECT ${orderCostSql('o')} AS cost FROM orders o WHERE id=?`).get(id).cost,0);
   assert.equal((await admin(`/orders/${id}/refund`,'POST',{amount:99.99})).status,409);assert.equal(stock(1).stock,100);
 });
@@ -129,7 +129,7 @@ test('cashier manual confirmation is idempotent and a whole unserved external re
   assert.equal((await admin('/group-buy/verify','POST',{...body,platformVerified:false})).status,400);
   const first=await admin('/group-buy/verify','POST',body);assert.equal(first.status,201);const id=first.body.record.id;
   assert.equal((await admin('/group-buy/verify','POST',body)).body.record.orderNo,first.body.record.orderNo);assert.equal(stock(1).stock,94);
-  const reverse={platformChecked:true,verifyId:'platform-refund-1',reason:'未交付，已在平台完成退款'};assert.equal((await admin(`/group-buy/${id}/reverse`,'POST',reverse)).status,200);assert.equal(stock(1).stock,100);
+  const reverse={platformChecked:true,verifyId:'platform-refund-1',reason:'未交付，已在平台完成退款',stockMode:'restock',stockConfirmed:true,returnItems:db.prepare('SELECT id AS orderItemId,quantity FROM order_items WHERE order_id=(SELECT order_id FROM group_buy_redemptions WHERE id=?)').all(id)};assert.equal((await admin(`/group-buy/${id}/reverse`,'POST',reverse)).status,200);assert.equal(stock(1).stock,100);
   assert.equal((await admin(`/group-buy/${id}/reverse`,'POST',reverse)).status,200);assert.equal(stock(1).stock,100);assert.equal((await admin('/reports')).body.totals.revenue,0);
 });
 test('super admin directly changes own and managed passwords; other sessions are invalidated and ordinary accounts still need their old password',async()=>{

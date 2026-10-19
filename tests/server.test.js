@@ -44,7 +44,7 @@ beforeEach(() => {
     db.prepare('DELETE FROM mini_page_settings').run();
     db.prepare("UPDATE stores SET name='Test Store' WHERE id=1").run();
     db.prepare('INSERT OR REPLACE INTO staff_sessions(token_hash,account_id,expires_at) VALUES(?,1,?)').run(hash(tokens.admin), new Date(Date.now() + 3600000).toISOString());
-    for (const table of ['work_events','fulfillment_batch_items','fulfillment_batches','service_submit_commands','service_request_notes','service_requests','user_coupons', 'refund_transactions', 'refund_requests', 'inventory_logs', 'wallet_transactions', 'points_ledger', 'order_items', 'orders', 'cart_items', 'session_members', 'table_sessions', 'wechat_sessions', 'user_messages']) db.prepare(`DELETE FROM ${table}`).run();
+    for (const table of ['table_switch_commands','work_events','fulfillment_batch_items','fulfillment_batches','service_submit_commands','service_request_notes','service_requests','user_coupons', 'refund_transactions', 'refund_requests', 'inventory_logs', 'wallet_transactions', 'points_ledger', 'order_items', 'orders', 'cart_items', 'session_members', 'table_sessions', 'wechat_sessions', 'user_messages']) db.prepare(`DELETE FROM ${table}`).run();
     db.prepare("UPDATE users SET member_tier_id=NULL,member_level='普通会员',member_discount=1,member_expires_at=NULL,points=0").run();
     db.prepare("UPDATE users SET phone='13800138001',wechat_openid='openid-1' WHERE id=1").run();
     db.prepare("UPDATE member_tiers SET status='inactive'").run();
@@ -62,6 +62,7 @@ after(async () => {
 });
 
 async function call(url, { token = tokens.user, method = 'GET', body, headers = {}, raw = false } = {}) {
+  if (/^\/admin\/orders\/[^/]+\/refund$/.test(url)) body={requestId:crypto.randomUUID(),reason:'测试退款',...body};
   const response = await nativeFetch(base + url, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers }, ...(body !== undefined ? { body: typeof body === 'string' ? body : JSON.stringify(body) } : {}) });
   return { status: response.status, body: raw ? await response.text() : await response.json() };
 }
@@ -164,7 +165,8 @@ test('demo authentication is enabled only in explicit development mode', async (
 
 test('joined guests can share a cart; a closed session cannot be modified', async () => {
   addCart();
-  assert.equal((await call('/tables/A-08/session', { token: tokens.outsider })).status, 200);
+  assert.equal((await call('/tables/A-08/session', { token: tokens.outsider })).status, 409);
+  assert.equal((await call('/tables/select',{token:tokens.outsider,method:'POST',body:{tableId:1,confirmed:true,requestId:crypto.randomUUID()}})).status,200);
   assert.equal((await call('/sessions/1/cart', { token: tokens.outsider })).body.items.length, 1);
   assert.equal((await call('/sessions/1/cart/items/1', { token: tokens.outsider, method: 'PATCH', body: { quantity: 2 } })).status, 200);
   db.prepare("UPDATE table_sessions SET status='closed' WHERE id=1").run();
@@ -201,8 +203,8 @@ test('partial item refund then amount-only full refund returns each unit once', 
   const requested = await call('/me/orders/TEST-ORDER/refund-requests', { method: 'POST', body: { items: [{ orderItemId: 100, quantity: 1 }] } });
   assert.equal(requested.status, 201);
   const review = `/admin/refunds/${requested.body.request.id}/approve`;
+  assert.equal((await call(review, { token: tokens.admin, method: 'POST', body: {stockMode:'restock',stockConfirmed:true,returnItems:[{orderItemId:100,quantity:1}]} })).status, 200);
   assert.equal((await call(review, { token: tokens.admin, method: 'POST', body: {} })).status, 200);
-  assert.equal((await call(review, { token: tokens.admin, method: 'POST', body: {} })).status, 404);
   assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 99);
   const report = (await call('/admin/reports', { token: tokens.admin })).body;
   assert.equal(report.today.orderCost, 10); assert.equal(report.today.profit, 20);
@@ -210,7 +212,7 @@ test('partial item refund then amount-only full refund returns each unit once', 
   assert.equal(adminOrder.cost, 10); assert.equal(adminOrder.profit, 20);
   const csv = (await call('/admin/reports/export?format=csv', { token: tokens.admin, raw: true })).body;
   assert.match(csv, /,30\.00,0\.00,0\.00,10\.00,0\.00,20\.00/);
-  assert.equal((await call('/admin/orders/100/refund', { token: tokens.admin, method: 'POST', body: { amount: 30 } })).status, 200);
+  assert.equal((await call('/admin/orders/100/refund', { token: tokens.admin, method: 'POST', body: { amount: 30,stockMode:'restock',stockConfirmed:true,returnItems:[{orderItemId:100,quantity:1}] } })).status, 200);
   assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 100);
   assert.equal(db.prepare('SELECT returned_quantity FROM order_items WHERE id=100').get().returned_quantity, 2);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM inventory_logs').get().n, 2);
@@ -299,9 +301,9 @@ test('refund recovery queries an interrupted refund and duplicate callback is id
   globalThis.fetch = async () => Response.json(refundPayload(refund));
   await reconcileProcessingRefunds();
   assert.equal(db.prepare('SELECT status FROM refund_transactions').get().status, 'success');
-  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 100);
+  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 99);
   assert.equal((await notify(refundPayload(refund), '/payments/wechat/refund/notify')).status, 200);
-  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 100);
+  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 99);
 });
 
 test('refund creation derives the refund callback URL rather than the payment callback', async () => {
@@ -329,7 +331,7 @@ test('a missing interrupted refund is retried with the original refund number', 
   await reconcileProcessingRefunds();
   assert.deepEqual(retried, [refund.out_refund_no]);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM refund_transactions').get().n, 1);
-  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 100);
+  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 99);
 });
 
 test('an explicit merchant rejection fails the refund and a mismatched callback cannot complete it', async () => {
@@ -373,13 +375,13 @@ test('legacy return tracking migration is idempotent and does not alter physical
 test('restoring a pre-migration backup backfills return quantities without restocking', async () => {
   makeOrder();
   const requested = await call('/me/orders/TEST-ORDER/refund-requests', { method: 'POST', body: { items: [{ orderItemId: 100, quantity: 1 }] } });
-  await call(`/admin/refunds/${requested.body.request.id}/approve`, { token: tokens.admin, method: 'POST', body: {} });
+  await call(`/admin/refunds/${requested.body.request.id}/approve`, { token: tokens.admin, method: 'POST', body: {stockMode:'restock',stockConfirmed:true,returnItems:[{orderItemId:100,quantity:1}]} });
   const backup = await createBackup();
   const incoming = path.join(work, 'legacy-backup'); fs.mkdirSync(incoming);
   await tar.x({ file: path.join(work, 'backups', backup.name), cwd: incoming });
   const legacyPath = path.join(incoming, 'database.sqlite');
   const legacy = new Database(legacyPath);
-  legacy.exec('ALTER TABLE order_items DROP COLUMN delivered_quantity; ALTER TABLE order_items DROP COLUMN returned_quantity');
+  legacy.exec('ALTER TABLE order_items DROP COLUMN returned_delivered_quantity; ALTER TABLE order_items DROP COLUMN delivered_quantity; ALTER TABLE order_items DROP COLUMN returned_quantity');
   legacy.close();
   const manifestPath = path.join(incoming, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));

@@ -29,7 +29,7 @@ export function registerCatalogRoutes(router, { audit }) {
     const clauses=['l.product_id=?'],params=[product.id];
     if(start){clauses.push("date(l.created_at,'localtime')>=?");params.push(start);} if(end){clauses.push("date(l.created_at,'localtime')<=?");params.push(end);}
     const logs=db.prepare(`SELECT l.*,o.order_no,t.table_no FROM inventory_logs l LEFT JOIN orders o ON o.id=l.order_id LEFT JOIN table_sessions s ON s.id=o.session_id LEFT JOIN tables t ON t.id=s.table_id WHERE ${clauses.join(' AND ')} ORDER BY l.id DESC LIMIT 500`).all(...params);
-    const consumption=db.prepare(`SELECT o.source_channel AS channel,SUM(oi.quantity-oi.returned_quantity) AS quantity FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.product_id=? AND o.payment_status='paid' AND date(o.paid_at,'localtime')>=date('now','localtime','-29 days') GROUP BY o.source_channel`).all(product.id);
+    const consumption=db.prepare(`SELECT o.source_channel AS channel,SUM(oi.quantity-oi.returned_quantity-oi.returned_delivered_quantity) AS quantity FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.product_id=? AND o.payment_status='paid' AND date(o.paid_at,'localtime')>=date('now','localtime','-29 days') GROUP BY o.source_channel`).all(product.id);
     res.json({product,affectedBundles:impacts(product.id),logs,consumption});
   }));
   router.get('/admin/products/export', handled((req,res) => {

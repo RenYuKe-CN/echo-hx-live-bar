@@ -24,7 +24,7 @@
   <view class="menu-header">
     <text class="heading-title">{{homeTitle}}</text>
     <view class="heading-context">
-      <view class="table-context"><view class="table-chip"><image src="/assets/icons/table-green.png" mode="aspectFit"/><text>{{tableNo ? tableNo + ' 桌' : '请先扫码'}}</text></view><view class="context-divider"/><text class="heading-hint">{{tableNo ? '同桌一起点单' : '扫码后可点单'}}</text></view>
+      <view class="table-context"><button class="table-chip" bindtap="openTables" disabled="{{tableSwitching}}" aria-label="选择或切换桌台"><image src="/assets/icons/table-green.png" mode="aspectFit"/><text>{{tableNo ? tableNo + ' 桌 · 切换' : '选择桌台'}}</text></button><view class="context-divider"/><text class="heading-hint">{{tableNo ? '同桌一起点单' : '扫码或选桌点单'}}</text></view>
       <button class="call-service" bindtap="openService" aria-label="呼叫服务员"><image src="/assets/icons/bell-green.png" mode="aspectFit"/><text>呼叫服务员</text><text wx:if="{{servicePendingCount}}" class="call-service-count">{{servicePendingCount > 99 ? '99+' : servicePendingCount}}</text></button>
     </view>
     <view class="menu-tools">
@@ -59,3 +59,5 @@
 <include src="menu-overlays.wxml"/>
 
 <include src="menu-service.wxml"/>
+
+<include src="menu-tables.wxml"/>

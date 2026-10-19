@@ -10,10 +10,13 @@ import { getUnlimitedMiniProgramCode, miniProgramCodeContentType } from './wecha
 import { wechatLogin, getWechatPhoneNumber, createJsapiPayment, verifyNotification, queryPayment, closePayment, sendSubscribeMessage, createRefund, queryRefund } from './integrations/wechat.js';
 import { localImageDir, saveUpload, readUpload, isAllowedImageUrl } from './storage.js';
 import { getBirthdayMatchInfo, normalizeBirthday } from './birthday.js';
-import { backupSettings, listBackups, createBackup, restoreBackup, backupFile } from './backup.js';
+import { loginGuard, loginFailed, loginSucceeded } from './login-guard.js';
+import { registerTableSelection } from './table-selection.js';
+import { registerShiftRoutes, assertCashPosting, recordOrderFlow, recordRefundFlow, recordShiftFlow } from './shifts.js';
+import { backupSettings, listBackups, createBackup, restoreBackup, backupFile, mirrorBackup } from './backup.js';
 import { beginRestore, endRestore, withBackgroundTask } from './maintenance.js';
 import { walletBalance, debitAvailableWallet, debitReservedWallet } from './wallet.js';
-import { parseRefundItems, returnOrderStock, orderCostSql } from './refund-stock.js';
+import { parseRefundItems, returnOrderStock, orderCostSql, refundStockPlan, applyRefundStockPlan } from './refund-stock.js';
 import { validateWechatPayment, validateWechatRefund } from './payment-validation.js';
 import { storeName } from './branding.js';
 import { registerWorkdeskRoutes, workEvent, workOrderView, fulfillmentLines, refundHold, hasDeliveryInProgress, cancelReadyBatchesForRefund } from './workdesk.js';
@@ -111,9 +114,10 @@ const requireWechatUser = (req, res, next) => {
 };
 router.get('/auth/me', (req, res) => req.user ? res.json({ user: publicUser(req.user) }) : res.status(401).json({ message: '请先完成微信登录' }));
 
-router.post('/admin/login', (req, res) => {
+router.post('/admin/login', loginGuard, (req, res) => {
   const account = db.prepare("SELECT * FROM staff_accounts WHERE username = ? AND status = 'active'").get(String(req.body?.username || '').trim());
-  if (!account || !verifyPassword(String(req.body?.password || ''), account.password_hash)) return res.status(401).json({ message: '账号或密码错误' });
+  if (!account || !verifyPassword(String(req.body?.password || ''), account.password_hash)) { loginFailed(req); return res.status(401).json({ message: '账号或密码错误' }); }
+  loginSucceeded(req);
   const token = crypto.randomBytes(32).toString('hex');
   db.prepare('INSERT INTO staff_sessions (token_hash, account_id, expires_at) VALUES (?, ?, ?)').run(crypto.createHash('sha256').update(token).digest('hex'), account.id, new Date(Date.now() + 12 * 3600000).toISOString());
   db.prepare('INSERT INTO operation_logs (operator, action, detail) VALUES (?, ?, ?)').run(account.username, '登录后台', '');
@@ -125,7 +129,7 @@ router.use('/admin', (req, res, next) => {
   if (!row) return res.status(401).json({ message: '请先登录管理后台' });
   req.staff = row;
   const segment = req.path.split('/')[1];
-  const section = ({ summary: 'dashboard', refunds: 'orders', printing:'orders',bills:'orders',inventory: 'products', 'wallet-packages': 'wallet', 'member-rules': 'members', 'member-tiers': 'members', categories: 'products', 'session': null, 'logout': null, 'change-password': null })[segment] ?? segment;
+  const section = ({ summary: 'dashboard', shifts: 'pos', refunds: 'orders', printing:'orders',bills:'orders',inventory: 'products', 'wallet-packages': 'wallet', 'member-rules': 'members', 'member-tiers': 'members', categories: 'products', 'session': null, 'logout': null, 'change-password': null })[segment] ?? segment;
   if (['session','logout','change-password'].includes(segment)) return next();
   if ((segment === 'refunds' || /^\/orders\/[^/]+\/refund(?:$|\/)/.test(req.path)) && !['super', 'manager'].includes(row.role)) return res.status(403).json({ message: '仅超级管理员或管理员可处理退款' });
   const allowed = row.role === 'super' || JSON.parse(row.permissions).includes(section);
@@ -137,6 +141,7 @@ router.use('/admin', (req, res, next) => {
   }
   next();
 });
+registerShiftRoutes(router, audit);
 router.get('/admin/session', (req, res) => res.json({ account: publicAccount(req.staff) }));
 router.post('/admin/logout', (req, res) => { db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(req.staff.id); res.json({ ok: true }); });
 router.post('/admin/change-password', (req, res) => {
@@ -209,6 +214,7 @@ router.get('/admin/backups/:name/download', (req, res) => {
   if (!file) return res.status(404).json({ message: '备份文件不存在' });
   res.download(file, req.params.name, error => { if (error && !res.headersSent) res.status(500).json({ message: '备份下载失败' }); });
 });
+router.post('/admin/backups/:name/mirror', async (req,res) => { try { await mirrorBackup(req.params.name); audit(req,'复制外部备份',req.params.name);res.json({ok:true}); } catch { res.status(409).json({message:'复制失败，请检查外部备份目录配置及挂载状态'}); } });
 router.post('/admin/backups/restore', (req, res) => {
   backupUpload.single('backup')(req, res, async error => {
     if (error) return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ message: error.message || '备份文件上传失败' });
@@ -335,8 +341,8 @@ const refundTotals = orderId => db.prepare(`SELECT
 
 function refundItemQuantities(orderId) {
   const used = new Map();
-  const rows = db.prepare("SELECT items_json FROM refund_transactions WHERE order_id = ? AND status IN ('pending','processing','success')").all(orderId);
-  rows.forEach(row => parseRefundItems(row.items_json).forEach(item => used.set(item.orderItemId, (used.get(item.orderItemId) || 0) + item.quantity)));
+  const rows = db.prepare("SELECT items_json,stock_plan_json FROM refund_transactions WHERE order_id = ? AND status IN ('pending','processing','success')").all(orderId);
+  rows.forEach(row => (row.stock_plan_json ? JSON.parse(row.stock_plan_json).cancelItems : parseRefundItems(row.items_json)).forEach(item => used.set(item.orderItemId, (used.get(item.orderItemId) || 0) + item.quantity)));
   return used;
 }
 
@@ -403,7 +409,7 @@ function refundView(order) {
   const totals = refundTotals(order.id);
   const request = db.prepare('SELECT * FROM refund_requests WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(order.id);
   const transaction = db.prepare('SELECT * FROM refund_transactions WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(order.id);
-  return { refundedAmount: centsToMoney(totals.refunded), refundedRevenueAmount: centsToMoney(totals.refundedRevenue), refundedBonusAmount: centsToMoney(totals.refundedBonus), refundedCents: Number(totals.refunded), refundedRevenueCents: Number(totals.refundedRevenue), refundedBonusCents: Number(totals.refundedBonus), processingCents: Number(totals.processing), refundableAmount: order.payment_method==='group_buy'?0:centsToMoney(Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing)), refundRequest: request && { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason, items: refundItemsView(request.items_json), rejectReason: request.reject_reason, createdAt: request.created_at, reviewedAt: request.reviewed_at }, refundTransaction: transaction && { id: transaction.id, status: transaction.status, amount: centsToMoney(transaction.amount_cents), items: refundItemsView(transaction.items_json), wechatCents: Number(transaction.wechat_cents || 0), createdAt: transaction.created_at, completedAt: transaction.completed_at } };
+  return { refundedAmount: centsToMoney(totals.refunded), refundedRevenueAmount: centsToMoney(totals.refundedRevenue), refundedBonusAmount: centsToMoney(totals.refundedBonus), refundedCents: Number(totals.refunded), refundedRevenueCents: Number(totals.refundedRevenue), refundedBonusCents: Number(totals.refundedBonus), processingCents: Number(totals.processing), refundableAmount: order.payment_method==='group_buy'?0:centsToMoney(Math.max(0, order.payable_amount_cents - totals.refunded - totals.processing)), refundRequest: request && { id: request.id, status: request.status, amount: centsToMoney(request.amount_cents), reason: request.reason, items: refundItemsView(request.items_json), rejectReason: request.reject_reason, createdAt: request.created_at, reviewedAt: request.reviewed_at }, refundTransaction: transaction && { stockPlan: transaction.stock_plan_json ? JSON.parse(transaction.stock_plan_json) : null, id: transaction.id, status: transaction.status, amount: centsToMoney(transaction.amount_cents), items: refundItemsView(transaction.items_json), wechatCents: Number(transaction.wechat_cents || 0), createdAt: transaction.created_at, completedAt: transaction.completed_at } };
 }
 
 const REFUND_FAILURE_PAUSE = '退款失败，请管理员核实后再恢复配货';
@@ -429,14 +435,18 @@ function completeRefund(refundId, wechatResult = null) {
     }
     const refunded = refundTotals(order.id).refunded;
     const fullyRefunded = refunded >= order.payable_amount_cents;
-    cancelReadyBatchesForRefund(order.id, refund.items_json, fullyRefunded);
+    cancelReadyBatchesForRefund(order.id, refund.stock_plan_json == null ? refund.items_json : JSON.parse(refund.stock_plan_json).cancelItems, fullyRefunded);
     const beforeReturn=db.prepare(`SELECT ${orderCostSql('o')} AS value FROM orders o WHERE id=?`).get(order.id).value;
-    returnOrderStock(db, order, parseRefundItems(refund.items_json), fullyRefunded);
+    if (refund.stock_plan_json == null) {
+      returnOrderStock(db, order, parseRefundItems(refund.items_json), fullyRefunded);
+      db.prepare('UPDATE order_items SET cancelled_quantity=MIN(quantity-delivered_quantity,returned_quantity) WHERE order_id=?').run(order.id);
+    } else applyRefundStockPlan(db, order, JSON.parse(refund.stock_plan_json));
+    recordRefundFlow(refund, order);
     const afterReturn=db.prepare(`SELECT ${orderCostSql('o')} AS value FROM orders o WHERE id=?`).get(order.id).value;
     db.prepare('UPDATE refund_transactions SET returned_cost_cents=? WHERE id=?').run(beforeReturn-afterReturn,refund.id);
     db.prepare("UPDATE orders SET fulfillment_pause_reason='' WHERE id=? AND fulfillment_pause_reason=?").run(order.id,REFUND_FAILURE_PAUSE);
     if (fullyRefunded) db.prepare("UPDATE orders SET status = 'refunded' WHERE id = ?").run(order.id);
-    else if (order.status === 'awaiting_delivery' && !db.prepare('SELECT COALESCE(SUM(quantity-returned_quantity-delivered_quantity),0) AS remaining FROM order_items WHERE order_id=?').get(order.id).remaining) {
+    else if (order.status === 'awaiting_delivery' && !db.prepare('SELECT COALESCE(SUM(quantity-cancelled_quantity-delivered_quantity),0) AS remaining FROM order_items WHERE order_id=?').get(order.id).remaining) {
       db.prepare("UPDATE orders SET status='completed', delivered_at=COALESCE((SELECT MAX(delivered_at) FROM fulfillment_batches WHERE order_id=? AND status='delivered'),CURRENT_TIMESTAMP) WHERE id=?").run(order.id, order.id);
     }
     // Reverse earned points proportionately, without taking the balance below zero.
@@ -455,9 +465,15 @@ function completeRefund(refundId, wechatResult = null) {
   return result;
 }
 
-function beginRefund(order, amount, reason, requestId = null, refundItems = []) {
+function beginRefund(order, amount, reason, requestId = null, refundItems = [], options = {}) {
   if(order.payment_method==='group_buy')throw new Error('团购订单请联系收银台按原平台办理退款或撤销');
   return db.transaction(() => {
+    const commandId = requestId ? null : options.commandId;
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify([order.id,amount,reason,refundItems,options.stockMode || 'no_restock',options.cancelItems || [],options.returnItems || [],options.stockConfirmed === true,options.operatorId])).digest('hex');
+    if (commandId) {
+      const prior = db.prepare('SELECT * FROM refund_transactions WHERE command_id=?').get(commandId);
+      if (prior) { if (prior.command_hash !== fingerprint) throw new Error('请求标识已用于另一笔退款，请重新核对'); return { ...prior, repeated: true }; }
+    }
     if (hasDeliveryInProgress(order.id)) throw new Error('订单有商品正在配送，请核实送达或转交后再处理退款');
     const fresh = db.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
     const totals = refundTotals(order.id);
@@ -470,14 +486,19 @@ function beginRefund(order, amount, reason, requestId = null, refundItems = []) 
     const wechat = Math.min(left, fresh.wechat_paid_cents - used.wechat); left -= wechat;
     const offline = Math.min(left, fresh.offline_paid_cents - used.offline); left -= offline;
     if (left) throw new Error('订单支付渠道金额不一致，无法退款');
+    if (offline && options.cashConfirmed !== true) throw new Error('线下退款须确认已按原收款方式实际退付');
+    if (offline && fresh.offline_channel === 'cash') assertCashPosting(options.staff);
+    const plan = refundStockPlan(db, fresh, options, refundItems, amount + totals.refunded === fresh.payable_amount_cents);
     const refundNo = `RF${Date.now()}${crypto.randomBytes(5).toString('hex')}`;
     const id = db.prepare('INSERT INTO refund_transactions (order_id, request_id, user_id, amount_cents, stored_cents, bonus_cents, wechat_cents, offline_cents, out_refund_no, reason, items_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(order.id, requestId, order.payer_user_id, amount, stored, bonus, wechat, offline, refundNo, reason, JSON.stringify(refundItems)).lastInsertRowid;
+    db.prepare('UPDATE refund_transactions SET command_id=?,command_hash=?,stock_plan_json=?,operator_id=? WHERE id=?').run(commandId || null,fingerprint,JSON.stringify(plan),options.operatorId || null,id);
     if (requestId) db.prepare("UPDATE refund_requests SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP WHERE id = ?").run(requestId);
     return db.prepare('SELECT * FROM refund_transactions WHERE id = ?').get(id);
   })();
 }
 
 async function dispatchRefund(refund, order) {
+  if (refund.repeated || !['pending','processing'].includes(refund.status)) return refund.status;
   if (!refund.wechat_cents) { completeRefund(refund.id); return 'success'; }
   try {
     const data = await createRefund({ outTradeNo: order.order_no, outRefundNo: refund.out_refund_no, reason: refund.reason || '订单退款', refundCents: refund.wechat_cents, totalCents: order.wechat_paid_cents });
@@ -793,8 +814,8 @@ router.use('/sessions', requireWechatUser);
 router.use('/sessions/:sessionId', (req, res, next) => {
   const session = db.prepare("SELECT ts.* FROM table_sessions ts JOIN tables t ON t.id = ts.table_id WHERE ts.id = ? AND t.status != 'disabled'").get(req.params.sessionId);
   if (!session) return res.status(404).json({ message: '桌台会话不存在' });
-  if (!db.prepare('SELECT 1 FROM session_members WHERE session_id = ? AND user_id = ?').get(session.id, currentUserId(req))) return res.status(403).json({ message: '请先扫描并加入当前桌台' });
-  if (session.status !== 'open') return res.status(409).json({ message: '桌台已结束，请重新扫描桌台码' });
+  if (!db.prepare('SELECT 1 FROM session_members WHERE session_id = ? AND user_id = ?').get(session.id, currentUserId(req))) return res.status(403).json({ message: '请先扫码或选择当前桌台' });
+  if (session.status !== 'open') return res.status(409).json({ message: '桌台已结束，请重新扫码或选桌' });
   next();
 });
 router.use('/me', requireWechatUser);
@@ -806,7 +827,7 @@ registerWorkdeskRoutes(router, {
 function getOrCreateSession(storeId, tableId, userId) {
   let session = db.prepare("SELECT * FROM table_sessions WHERE store_id = ? AND table_id = ? AND status = 'open' ORDER BY id DESC LIMIT 1").get(storeId, tableId);
   if (!session) {
-    const sessionNo = `S${Date.now().toString(36).toUpperCase()}`;
+    const sessionNo = `S${Date.now().toString(36).toUpperCase()}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
     const result = db.prepare('INSERT INTO table_sessions (store_id, table_id, session_no) VALUES (?, ?, ?)').run(storeId, tableId, sessionNo);
     session = db.prepare('SELECT * FROM table_sessions WHERE id = ?').get(result.lastInsertRowid);
   }
@@ -1061,10 +1082,13 @@ router.get('/tables/resolve', (req, res) => {
   res.json({ table: { id: table.id, tableNo: table.table_no } });
 });
 
+registerTableSelection(router, { requireWechatUser, currentUserId, getOrCreateSession });
 router.get('/tables/:tableNo/session', requireWechatUser, (req, res) => {
   const userId = currentUserId(req);
   const table = db.prepare('SELECT * FROM tables WHERE table_no = ? AND status != ?').get(req.params.tableNo, 'disabled');
   if (!table) return res.status(404).json({ message: '桌台不存在' });
+  const joined = db.prepare("SELECT s.id FROM table_sessions s JOIN session_members m ON m.session_id=s.id WHERE s.table_id=? AND s.status='open' AND m.user_id=?").get(table.id,userId);
+  if (!joined && process.env.NODE_ENV !== 'development') return res.status(409).json({ message: '请先选择并确认桌台' });
   const session = getOrCreateSession(table.store_id, table.id, userId);
   const user = publicUser(db.prepare('SELECT id, nickname, phone, avatar_url, member_level, points, member_expires_at FROM users WHERE id = ?').get(userId));
   res.json({ table: { id: table.id, tableNo: table.table_no }, session, user, membership: memberPricing(userId) });
@@ -1157,6 +1181,9 @@ router.patch('/sessions/:sessionId/cart/items/:itemId', (req, res) => {
 });
 
 function settleOrder(order, method, req, reserved = true) {
+  const saved = db.prepare('SELECT o.*,u.phone,u.nickname FROM orders o JOIN users u ON u.id=o.payer_user_id WHERE o.id=?').get(order.id);
+  if (saved.offline_paid_cents && saved.offline_channel === 'cash') assertCashPosting(req.staff);
+  db.prepare("UPDATE orders SET payer_phone_snapshot=?,payer_name_snapshot=?,payer_identity_captured_at=CURRENT_TIMESTAMP WHERE id=?").run(saved.phone || '',saved.nickname || '',order.id);
   const items = db.prepare('SELECT product_id, quantity, cart_item_id FROM order_items WHERE order_id = ?').all(order.id);
   const quantities = new Map();
   for (const item of items) quantities.set(Number(item.product_id), (quantities.get(Number(item.product_id)) || 0) + Number(item.quantity));
@@ -1174,6 +1201,7 @@ function settleOrder(order, method, req, reserved = true) {
   const settleCartItem = db.prepare("UPDATE cart_items SET status = 'settled' WHERE id = ?");
   items.forEach(item => { if (item.cart_item_id) settleCartItem.run(item.cart_item_id); });
   db.prepare("UPDATE orders SET status = 'awaiting_delivery', payment_status = 'paid', payment_method = ?, paid_at = CURRENT_TIMESTAMP WHERE id = ?").run(method, order.id);
+  recordOrderFlow(db.prepare('SELECT * FROM orders WHERE id=?').get(order.id),req.staff);
   workEvent('order_new', Number(order.id));
   consumeCoupon(order);
   const points = Math.floor(order.payable_amount_cents / 100 * memberPricing(order.payer_user_id).pointsRate);
@@ -1490,10 +1518,12 @@ router.post('/admin/pos/recharges', (req, res) => {
     const transaction = db.transaction(() => {
       const prior = db.prepare('SELECT * FROM wallet_transactions WHERE pos_request_id = ?').get(requestId);
       if (prior) return prior;
+      if (paymentMethod === 'cash') assertCashPosting(req.staff);
       db.prepare('INSERT OR IGNORE INTO wallet_accounts (user_id) VALUES (?)').run(member.id);
       db.prepare('UPDATE wallet_accounts SET stored_cents = stored_cents + ?, bonus_cents = bonus_cents + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?').run(offer.stored_cents, offer.bonus_cents, member.id);
       const id = db.prepare('INSERT INTO wallet_transactions (user_id,type,pay_cents,stored_cents,bonus_cents,remark,pos_request_id) VALUES (?,\'recharge\',?,?,?,?,?)').run(member.id, offer.pay_cents, offer.stored_cents, offer.bonus_cents, `${offer.name} · ${paymentMethod} · ${req.staff.username}`, requestId).lastInsertRowid;
       db.prepare('UPDATE wallet_transactions SET payment_channel=? WHERE id=?').run(paymentMethod,id);
+      recordShiftFlow(`recharge:${id}`,'recharge',paymentMethod,offer.pay_cents,`充值-${id}`,req.staff.id);
       const before = db.prepare('SELECT member_tier_id, member_level FROM users WHERE id = ?').get(member.id);
       const after = syncMembership(member.id);
       if (before?.member_tier_id !== after?.member_tier_id) audit(req, '会员等级自动调整', `ID ${member.id}: ${before?.member_level || '普通会员'} -> ${after?.member_level || '普通会员'}`);
@@ -1618,6 +1648,7 @@ const adminRows = query => db.prepare(query).all();
 const adminMoney = row => ({ ...row, price: row.price_cents == null ? undefined : centsToMoney(row.price_cents), memberPrice: row.member_price_cents == null ? undefined : centsToMoney(row.member_price_cents) });
 
 function fulfillmentLabel(order) {
+  if(order.status==='completed' && db.prepare('SELECT 1 FROM order_items WHERE order_id=? AND cancelled_quantity>0').get(order.id))return '已结束（含停止配送）';
   return order.status === 'refunded' ? '已退款' : order.status === 'completed' ? '已送达' : order.payment_status === 'paid' ? '待送达' : order.payment_status === 'pending' ? '待支付' : '已取消';
 }
 function userOrderItems(orderId) {
@@ -1698,7 +1729,7 @@ function userOrderView(row, includeItems = false) {
 function orderItems(orderIds) {
   if (!orderIds.length) return {};
   const grouped = {};
-  const rows = db.prepare(`SELECT oi.order_id, oi.product_id, oi.product_name, oi.quantity, p.image_url FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id WHERE oi.order_id IN (${orderIds.map(() => '?').join(',')}) ORDER BY oi.id`).all(...orderIds);
+  const rows = db.prepare(`SELECT oi.id,oi.order_id,oi.product_id,oi.product_name,oi.quantity,oi.delivered_quantity,oi.returned_quantity,oi.returned_delivered_quantity,oi.cancelled_quantity,p.image_url FROM order_items oi LEFT JOIN products p ON p.id = oi.product_id WHERE oi.order_id IN (${orderIds.map(() => '?').join(',')}) ORDER BY oi.id`).all(...orderIds);
   for (const row of rows) (grouped[row.order_id] ||= []).push(row);
   return grouped;
 }
@@ -1716,7 +1747,14 @@ router.get('/admin/summary', (req, res) => {
   const pendingRefunds = canViewOrders && ['super', 'manager'].includes(req.staff.role) ? db.prepare("SELECT COUNT(*) AS value FROM refund_requests WHERE status = 'pending'").get().value : 0;
   const items = orderItems(pendingOrders.map(o => o.id));
   const report=businessReport(reportWindow({})),today=report.totals;
-  res.json({ todayRevenue: today.revenue, activeOrders, pendingPayment, pendingRefunds, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: today.revenue, recharge: today.rechargeReceived, offline: today.offlineReceived },businessWindow:{startAt:report.window.start,endAt:report.window.end}, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
+  const issues=[];
+  const issue=(section,title,sql,detail)=>{const allowed=req.staff.role==='super'||JSON.parse(req.staff.permissions).includes(section==='printing'?'orders':section);if(allowed){const count=db.prepare(sql).get().n;if(count)issues.push({section,title,count,detail});}};
+  issue('orders','退款结果待确认',"SELECT COUNT(*) AS n FROM refund_transactions WHERE status IN ('pending','processing')",'核对原退款单，避免重新发起退款');
+  issue('orders','配送暂停待核实',"SELECT COUNT(*) AS n FROM orders WHERE status='awaiting_delivery' AND fulfillment_pause_reason!=''",'核实货品实际交付后恢复或退款');
+  issue('printing','打印结果待确认',"SELECT COUNT(*) AS n FROM print_jobs WHERE state IN ('unknown','failed')",'先检查设备出纸，再决定重印');
+  issue('group-buy','团购核销待核对',"SELECT COUNT(*) AS n FROM group_buy_redemptions WHERE state IN ('unknown','verified')",'核对原平台核销记录');
+  if(req.staff.role==='super'){const b=backupSettings();if(b.mirrorError)issues.push({section:'backups',title:'外部备份复制失败',count:1,detail:b.mirrorError});if(b.enabled&&(!b.lastRunAt||Date.now()-Date.parse(b.lastRunAt)>(b.frequency==='weekly'?8:2)*86400000))issues.push({section:'backups',title:'自动备份需检查',count:1,detail:'尚无近期自动备份成功记录'});}
+  res.json({ issues, todayRevenue: today.revenue, activeOrders, pendingPayment, pendingRefunds, activeTables, idleTables, totalTables, members, lowStock, outOfStock, todayMetrics: { revenue: today.revenue, recharge: today.rechargeReceived, offline: today.offlineReceived },businessWindow:{startAt:report.window.start,endAt:report.window.end}, pendingOrders: pendingOrders.map(o => ({ ...o, items: items[o.id] || [] })), updatedAt: new Date().toISOString() });
 });
 
 registerCatalogRoutes(router, { audit });
@@ -1800,7 +1838,7 @@ router.get('/admin/orders/notifications', (req, res) => {
 router.get('/admin/orders', (req, res) => {
   const { page, pageSize, offset } = parsePagination(req);
   const total = db.prepare('SELECT COUNT(*) AS value FROM orders').get().value;
-  const rows = db.prepare(`SELECT o.*, t.table_no, u.nickname, ${orderCostSql('o')} AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset);
+  const rows = db.prepare(`SELECT o.*, t.table_no, CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_name_snapshot ELSE u.nickname END AS nickname, CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_phone_snapshot ELSE u.phone END AS payer_phone, ${orderCostSql('o')} AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset);
   const items = orderItems(rows.map(o => o.id));
   res.json({ orders: rows.map(row => { const refund = refundView(row); const order = { ...row, ...refund, items: items[row.id] || [], statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
 });
@@ -1811,11 +1849,13 @@ router.get('/admin/refunds', (req, res) => {
   res.json({ refunds: rows.map(row => ({ ...row, amount: centsToMoney(row.amount_cents), orderAmount: centsToMoney(row.payable_amount_cents), items: refundItemsView(row.items_json) })) });
 });
 router.post('/admin/refunds/:id/approve', async (req, res) => {
+  const prior=db.prepare("SELECT r.* FROM refund_transactions r JOIN refund_requests q ON q.id=r.request_id WHERE q.id=? AND q.status='approved' ORDER BY r.id DESC LIMIT 1").get(req.params.id);
+  if(prior)return res.json({ok:true,status:prior.status,refund:{id:prior.id,status:prior.status},repeated:true});
   const request = db.prepare("SELECT * FROM refund_requests WHERE id = ? AND status = 'pending'").get(req.params.id);
   if (!request) return res.status(404).json({ message: '退款申请不存在或已处理' });
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(request.order_id);
   try {
-    const refund = beginRefund(order, request.amount_cents, request.reason || '用户按商品申请退款', request.id, parseRefundItems(request.items_json));
+    const refund = beginRefund(order, request.amount_cents, request.reason || '用户按商品申请退款', request.id, parseRefundItems(request.items_json), { ...req.body, operatorId: req.staff.id, staff: req.staff });
     db.prepare('UPDATE refund_requests SET reviewed_by = ? WHERE id = ?').run(req.staff.id, request.id);
     queueUserMessage(request.user_id, 'refund_approved', refundValues(order, refund.amount_cents), 'refund', refund.id);
     const status = await dispatchRefund(refund, order);
@@ -1838,10 +1878,15 @@ router.post('/admin/orders/:id/refund', async (req, res) => {
   const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id);
   if (!order) return res.status(404).json({ message: '订单不存在' });
   const totals = refundTotals(order.id);
-  const amount = req.body?.amount == null || req.body.amount === '' ? order.payable_amount_cents - totals.refunded - totals.processing : Math.round(Number(req.body.amount) * 100);
+  const priorCommand = req.body?.requestId ? db.prepare('SELECT amount_cents FROM refund_transactions WHERE command_id=?').get(String(req.body.requestId)) : null;
+  const amount = req.body?.amount == null || req.body.amount === '' ? (priorCommand?.amount_cents ?? order.payable_amount_cents - totals.refunded - totals.processing) : Math.round(Number(req.body.amount) * 100);
   if (!Number.isInteger(amount) || amount <= 0) return res.status(400).json({ message: '退款金额无效' });
   try {
-    const refund = beginRefund(order, amount, String(req.body?.reason || '后台退款').trim());
+    const commandId = String(req.body?.requestId || '');
+    if (!/^[a-f0-9-]{36}$/i.test(commandId)) return res.status(400).json({ message: '退款请求标识无效，请刷新后重试' });
+    const reason = String(req.body?.reason || '').trim();
+    if (!reason || reason.length > 200) return res.status(400).json({ message: '请填写退款原因，最多200字' });
+    const refund = beginRefund(order, amount, reason, null, [], { ...req.body, commandId, operatorId: req.staff.id, staff: req.staff });
     const status = await dispatchRefund(refund, order);
     audit(req, '后台退款', `${order.order_no} ¥${centsToMoney(amount)}`);
     res.json({ ok: true, status, refund: { id: refund.id, status: db.prepare('SELECT status FROM refund_transactions WHERE id = ?').get(refund.id).status } });
@@ -1867,8 +1912,9 @@ router.post('/admin/orders/:id/mark-paid', (req, res) => {
   if (['wechat', 'mixed'].includes(order.payment_method)) return res.status(409).json({ message: '微信支付订单不能直接确认线下收款；请完成微信支付，或取消订单后通过收银台重新下单' });
   if (order.payment_method === 'balance') return res.status(409).json({ message: '余额订单不能确认线下收款' });
   try { db.transaction(() => {
+    if (!['cash','merchant_qr'].includes(req.body?.paymentMethod) || req.body?.receivedConfirmed !== true) throw new Error('请选择实际收款方式并确认已收到款项');
+    db.prepare('UPDATE orders SET offline_paid_cents=payable_amount_cents,offline_channel=? WHERE id=?').run(req.body.paymentMethod,order.id);
     settleOrder(order, 'offline', req);
-    db.prepare('UPDATE orders SET offline_paid_cents = payable_amount_cents WHERE id = ?').run(order.id);
     audit(req, '确认线下收款', order.order_no);
   })(); res.json({ ok: true }); } catch (error) { res.status(409).json({ message: error.message }); }
 });

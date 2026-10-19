@@ -29,7 +29,7 @@ Page({
     if (!sessionId) {
       return wx.showModal({
         title: '请先进入桌台',
-        content: coupon.isProductVoucher ? '商品兑换券需要绑定桌台后才能加入购物车，请先扫描桌台二维码。' : '请先扫描桌台二维码进入点单页，再使用这张优惠券。',
+        content: coupon.isProductVoucher ? '商品兑换券需要绑定桌台后才能加入购物车，请先扫码或在点单页选择桌台。' : '请先扫码或在点单页选择桌台进入点单页，再使用这张优惠券。',
         confirmText: '去点单',
         success: result => {
           if (!result.confirm) return;

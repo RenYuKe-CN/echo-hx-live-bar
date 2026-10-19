@@ -34,7 +34,7 @@ function request(path, options = {}, retried = false) {
     success(res) {
       if (res.statusCode >= 200 && res.statusCode < 300) return resolve(res.data);
       if (res.statusCode === 401 && !retried) return renewLogin(previousToken).then(() => request(path, options, true)).then(resolve, reject);
-      reject(new Error(res.data?.message || '请求失败'));
+      reject(Object.assign(new Error(res.data?.message || '请求失败'),{status:res.statusCode}));
     },
     fail(error) { reject(new Error(error.errMsg || '网络请求失败，请稍后重试')); }
   }));

@@ -33,9 +33,9 @@ export function fulfillmentLines(orderId) {
     COALESCE((SELECT SUM(bi.quantity) FROM fulfillment_batch_items bi JOIN fulfillment_batches b ON b.id=bi.batch_id WHERE bi.order_item_id=oi.id AND b.status='ready'),0) AS ready_quantity,
     COALESCE((SELECT SUM(bi.quantity) FROM fulfillment_batch_items bi JOIN fulfillment_batches b ON b.id=bi.batch_id WHERE bi.order_item_id=oi.id AND b.status='delivering'),0) AS delivering_quantity
     FROM order_items oi WHERE oi.order_id=? ORDER BY oi.id`).all(orderId).map(row => ({
-      id: row.id, name: row.product_name, quantity: row.quantity, returnedQuantity: row.returned_quantity,
+      id: row.id, name: row.product_name, quantity: row.quantity, returnedQuantity: row.returned_quantity + row.returned_delivered_quantity, cancelledQuantity: row.cancelled_quantity,
       deliveredQuantity: row.delivered_quantity, readyQuantity: row.ready_quantity, deliveringQuantity: row.delivering_quantity,
-      unpreparedQuantity: Math.max(0, row.quantity - row.returned_quantity - row.delivered_quantity - row.ready_quantity - row.delivering_quantity)
+      unpreparedQuantity: Math.max(0, row.quantity - row.cancelled_quantity - row.delivered_quantity - row.ready_quantity - row.delivering_quantity)
     }));
 }
 function batchView(batch) {
@@ -177,11 +177,11 @@ export function registerWorkdeskRoutes(router, { currentUserId, audit, completed
       const order = activeOrder(batch.order_id, true);
       const items = db.prepare('SELECT * FROM fulfillment_batch_items WHERE batch_id=?').all(batch.id);
       for (const item of items) {
-        if (!db.prepare('UPDATE order_items SET delivered_quantity=delivered_quantity+? WHERE id=? AND quantity-returned_quantity-delivered_quantity>=?').run(item.quantity,item.order_item_id,item.quantity).changes) fail('商品数量发生变化，请管理员核对');
+        if (!db.prepare('UPDATE order_items SET delivered_quantity=delivered_quantity+? WHERE id=? AND quantity-cancelled_quantity-delivered_quantity>=?').run(item.quantity,item.order_item_id,item.quantity).changes) fail('商品数量发生变化，请管理员核对');
       }
       db.prepare("UPDATE fulfillment_batches SET status='delivered',delivered_at=CURRENT_TIMESTAMP WHERE id=?").run(batch.id);
       db.prepare('UPDATE orders SET fulfillment_revision=fulfillment_revision+1 WHERE id=?').run(order.id);
-      const remaining = db.prepare('SELECT COALESCE(SUM(quantity-returned_quantity-delivered_quantity),0) AS quantity FROM order_items WHERE order_id=?').get(order.id).quantity;
+      const remaining = db.prepare('SELECT COALESCE(SUM(quantity-cancelled_quantity-delivered_quantity),0) AS quantity FROM order_items WHERE order_id=?').get(order.id).quantity;
       if (!remaining) db.prepare("UPDATE orders SET status='completed',delivered_at=CURRENT_TIMESTAMP WHERE id=?").run(order.id);
       audit(req,'确认配送送达',`配送-${batch.id} ${order.order_no}`); workEvent('order_changed',order.id);
       return { batch: batchView(db.prepare('SELECT * FROM fulfillment_batches WHERE id=?').get(batch.id)), completed: !remaining, orderId: order.id };

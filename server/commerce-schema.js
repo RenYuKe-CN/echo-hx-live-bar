@@ -39,9 +39,9 @@ export function migrateCommerce(database) {
     if(refunds.length===1) {
       const name=database.prepare('SELECT order_no FROM orders WHERE id=?').get(order.id).order_no;
       const logged=database.prepare("SELECT product_id,SUM(change_quantity) AS quantity FROM inventory_logs WHERE change_quantity>0 AND (order_id=? AND channel='refund' OR order_id IS NULL AND reason=?) GROUP BY product_id").all(order.id,'订单退款 '+name);
-      const returned=new Map();for(const item of items)returned.set(item.product_id,(returned.get(item.product_id)||0)+item.returned_quantity);
-      if(items.every(i=>i.returned_quantity===0)||[...returned].every(([id,qty])=>(logged.find(l=>l.product_id===id)?.quantity||0)===qty))database.prepare('UPDATE refund_transactions SET returned_cost_cents=? WHERE id=? AND returned_cost_cents IS NULL').run(items.reduce((n,i)=>n+i.returned_quantity*i.cost_price_cents,0),refunds[0].id);
+      const returned=new Map();for(const item of items)returned.set(item.product_id,(returned.get(item.product_id)||0)+item.returned_quantity+(item.returned_delivered_quantity||0));
+      if(items.every(i=>i.returned_quantity+(i.returned_delivered_quantity||0)===0)||[...returned].every(([id,qty])=>(logged.find(l=>l.product_id===id)?.quantity||0)===qty))database.prepare('UPDATE refund_transactions SET returned_cost_cents=? WHERE id=? AND returned_cost_cents IS NULL').run(items.reduce((n,i)=>n+(i.returned_quantity+(i.returned_delivered_quantity||0))*i.cost_price_cents,0),refunds[0].id);
     }
-    else if(items.every(i=>i.returned_quantity===0))database.prepare("UPDATE refund_transactions SET returned_cost_cents=0 WHERE order_id=? AND status='success' AND returned_cost_cents IS NULL").run(order.id);
+    else if(items.every(i=>i.returned_quantity+(i.returned_delivered_quantity||0)===0))database.prepare("UPDATE refund_transactions SET returned_cost_cents=0 WHERE order_id=? AND status='success' AND returned_cost_cents IS NULL").run(order.id);
   }
 }

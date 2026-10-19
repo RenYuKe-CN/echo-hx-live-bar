@@ -53,7 +53,7 @@ async function createDatabaseSnapshot(destination) {
 }
 
 export function backupSettings() {
-  return db.prepare('SELECT enabled, frequency, run_time AS runTime, retention_days AS retentionDays, last_run_at AS lastRunAt FROM backup_settings WHERE id = 1').get();
+  return { mirrorConfigured: !!process.env.BACKUP_MIRROR_DIR, ...db.prepare('SELECT enabled, frequency, run_time AS runTime, retention_days AS retentionDays, last_run_at AS lastRunAt,mirror_last_at AS mirrorLastAt,mirror_error AS mirrorError FROM backup_settings WHERE id = 1').get() };
 }
 
 export function listBackups() {
@@ -92,9 +92,15 @@ export async function createBackup({ automated = false } = {}) {
     files['database.sqlite'] = digest(fs.readFileSync(path.join(work, 'database.sqlite')));
     fs.writeFileSync(path.join(work, 'manifest.json'), JSON.stringify({ format: 'echo-hx-backup', version: 1, createdAt: new Date().toISOString(), files }));
     await tar.c({ gzip: true, cwd: work, file: destination, portable: true }, ['manifest.json', 'database.sqlite', 'uploads']);
+    fs.chmodSync(destination,0o600);
     if (automated) db.prepare('UPDATE backup_settings SET last_run_at = ? WHERE id = 1').run(new Date().toISOString());
     pruneBackups(backupSettings().retentionDays);
-    return { name, size: fs.statSync(destination).size };
+    let mirrorWarning = '';
+    if (process.env.BACKUP_MIRROR_DIR) {
+      try { await mirrorBackup(name); }
+      catch { mirrorWarning = '本地备份已成功，外部目录复制失败，请检查备份页面'; }
+    }
+    return { name, size: fs.statSync(destination).size, mirrorWarning };
   } catch (error) {
     fs.rmSync(destination, { force: true });
     throw error;
@@ -214,3 +220,26 @@ export function startBackupScheduler() {
   setTimeout(tick, 1000).unref();
   setInterval(tick, 60000).unref();
 }
+
+export async function mirrorBackup(name) {
+  const source=backupFile(name), configured=process.env.BACKUP_MIRROR_DIR;
+  if(!source || !configured)throw new Error('备份文件不存在或未配置外部备份目录');
+  let temporary;
+  try {
+    // Require a pre-existing mount; never create a missing remote mountpoint on the local disk.
+    const mirror=fs.realpathSync(configured),local=fs.realpathSync(backupDir);
+    if(mirror===local || mirror.startsWith(local+path.sep))throw new Error('外部目录不能位于本地备份目录中');
+    if(fs.readFileSync(path.join(mirror,'.echo-backup-target'),'utf8').trim()!=='echo-hx-private-backups-v1')throw new Error('外部备份目录标识不正确');
+    temporary=path.join(mirror,'.'+name+'.'+crypto.randomBytes(4).toString('hex')+'.tmp');
+    await fs.promises.copyFile(source,temporary);
+    if(await digestFile(temporary)!==await digestFile(source))throw new Error('外部备份校验失败');
+    await fs.promises.rename(temporary,path.join(mirror,name));
+    db.prepare("UPDATE backup_settings SET mirror_last_at=?,mirror_error='' WHERE id=1").run(new Date().toISOString());
+    return {ok:true};
+  } catch(error) {
+    db.prepare('UPDATE backup_settings SET mirror_error=? WHERE id=1').run('外部目录复制失败，请检查挂载、权限和磁盘空间');
+    throw error;
+  } finally {if(temporary)await fs.promises.rm(temporary,{force:true}).catch(()=>{});}
+}
+
+async function digestFile(filename) { const hash=crypto.createHash('sha256');for await(const chunk of fs.createReadStream(filename))hash.update(chunk);return hash.digest('hex'); }

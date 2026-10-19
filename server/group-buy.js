@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { db } from './db.js';
 import { catalogError, recipeSnapshot, assertStock, reserveStock, insertSaleItems, getCatalogProduct } from './catalog.js';
 import { groupBuyProvider, groupBuyCapabilities } from './integrations/group-buy.js';
-import { returnOrderStock } from './refund-stock.js';
+import { refundStockPlan, applyRefundStockPlan } from './refund-stock.js';
+import { recordRefundFlow, recordShiftFlow } from './shifts.js';
 import { hasDeliveryInProgress, cancelReadyBatchesForRefund, workEvent } from './workdesk.js';
 import { withBackgroundTask } from './maintenance.js';
 import { parseLocal,commerceSettings } from './business-time.js';
@@ -264,10 +265,12 @@ export function registerGroupBuyRoutes(router,{currentUserId,audit,settleOrder})
       const requestId=req.body?.requestId || crypto.randomUUID(),previous=db.prepare('SELECT * FROM group_buy_settlements WHERE request_id=?').get(requestId);
       if(previous){if(previous.redemption_id!==row.id||previous.target_total_cents!==amount||req.body?.settledAt&&previous.settled_at!==settledAt)throw catalogError('结算请求内容不一致');return;}
       const recorded=db.prepare('SELECT COALESCE(SUM(amount_cents),0) AS n FROM group_buy_settlements WHERE redemption_id=?').get(row.id).n;
-      db.prepare('INSERT INTO group_buy_settlements(redemption_id,request_id,amount_cents,settled_at,operator_id,target_total_cents) VALUES(?,?,?,?,?,?)').run(row.id,requestId,amount-recorded,settledAt,req.staff.id,amount);
+      const inserted=db.prepare('INSERT INTO group_buy_settlements(redemption_id,request_id,amount_cents,settled_at,operator_id,target_total_cents) VALUES(?,?,?,?,?,?)').run(row.id,requestId,amount-recorded,settledAt,req.staff.id,amount);
+      recordShiftFlow(`settlement:${inserted.lastInsertRowid}`,'settlement',`${row.platform}_settlement`,amount-recorded,row.id,req.staff.id,'按系统录入确认时间归班；实际到账日见营业报表');
       db.prepare('UPDATE group_buy_redemptions SET actual_settlement_cents=?,actual_settlement_at=? WHERE id=?').run(amount,settledAt,row.id);
     })();audit(req,'录入团购实际结算',`${req.params.id} ${amount/100}`);res.json({ok:true});
   }));
+  router.get('/admin/group-buy/:id/refund-items',handled((req,res)=>{manager(req);const row=db.prepare('SELECT order_id FROM group_buy_redemptions WHERE id=?').get(req.params.id);if(!row)throw catalogError('团购记录不存在',404);res.json({items:db.prepare('SELECT id,product_name,quantity,returned_quantity,returned_delivered_quantity FROM order_items WHERE order_id=? ORDER BY id').all(row.order_id)});}));
   router.post('/admin/group-buy/:id/reverse',handled((req,res)=>{
     manager(req);const b=req.body||{},reason=String(b.reason||'').trim();
     if(b.platformChecked!==true || !reason || reason.length>300 || !String(b.verifyId||'').trim())throw catalogError('请核实平台撤销 / 退款凭证并填写原因',400);
@@ -276,12 +279,14 @@ export function registerGroupBuyRoutes(router,{currentUserId,audit,settleOrder})
       if(row?.state==='cancelled')return;
       if(row?.state!=='success')throw catalogError('此记录不能撤销');
       const order=db.prepare('SELECT * FROM orders WHERE id=?').get(row.order_id);
-      if(order.status!=='awaiting_delivery' || hasDeliveryInProgress(order.id) || db.prepare('SELECT 1 FROM order_items WHERE order_id=? AND delivered_quantity>0').get(order.id))throw catalogError('有货品已送达或正在配送，请先核对实际交付，不能整券退库');
+      if(!['awaiting_delivery','completed'].includes(order.status) || hasDeliveryInProgress(order.id))throw catalogError('有货品正在配送或订单已结束，请先核实实际交付');
+      const plan=refundStockPlan(db,order,b,[],true);
       cancelReadyBatchesForRefund(order.id,[],true);
       const beforeReturn=db.prepare(`SELECT ${orderCostSql('o')} AS value FROM orders o WHERE id=?`).get(order.id).value;
-      returnOrderStock(db,order,[],true);
+      applyRefundStockPlan(db,order,plan);
       const afterReturn=db.prepare(`SELECT ${orderCostSql('o')} AS value FROM orders o WHERE id=?`).get(order.id).value;
-      db.prepare("INSERT INTO refund_transactions(order_id,user_id,amount_cents,external_cents,out_refund_no,reason,status,completed_at,returned_cost_cents) VALUES(?,?,?,?,?,?,'success',CURRENT_TIMESTAMP,?)").run(order.id,row.user_id,row.amount_cents,row.amount_cents,`GBRF-${row.id}`,`平台凭证 ${b.verifyId}：${reason}`,beforeReturn-afterReturn);
+      const refundId=db.prepare("INSERT INTO refund_transactions(order_id,user_id,amount_cents,external_cents,out_refund_no,reason,status,completed_at,returned_cost_cents,stock_plan_json,operator_id) VALUES(?,?,?,?,?,?,'success',CURRENT_TIMESTAMP,?,?,?)").run(order.id,row.user_id,row.amount_cents,row.amount_cents,`GBRF-${row.id}`,`平台凭证 ${b.verifyId}：${reason}`,beforeReturn-afterReturn,JSON.stringify(plan),req.staff.id).lastInsertRowid;
+      recordRefundFlow(db.prepare('SELECT * FROM refund_transactions WHERE id=?').get(refundId),order);
       db.prepare("UPDATE orders SET status='refunded',fulfillment_revision=fulfillment_revision+1 WHERE id=?").run(order.id);
       db.prepare("UPDATE group_buy_redemptions SET state='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(row.id);
       const earned=db.prepare("SELECT COALESCE(SUM(points),0) AS value FROM points_ledger WHERE order_id=? AND reason='订单消费'").get(order.id).value;

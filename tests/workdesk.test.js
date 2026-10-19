@@ -13,7 +13,7 @@ const tokens={admin:'a'.repeat(64),workerA:'b'.repeat(64),workerB:'c'.repeat(64)
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
 const ids={};
 async function call(url,{token=tokens.admin,method='GET',body}={}){const res=await fetch(base+url,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})},...(body!==undefined?{body:JSON.stringify(body)}:{})});return{status:res.status,body:await res.json()};}
-const post=(url,body,token=tokens.admin)=>call(url,{method:'POST',body,token});
+const post=(url,body,token=tokens.admin)=>call(url,{method:'POST',body:/^\/admin\/orders\/[^/]+\/refund$/.test(url)?{requestId:crypto.randomUUID(),reason:'测试退款',...body}:body,token});
 before(async()=>{
  server=await new Promise(resolve=>{const s=createApp().listen(0,'127.0.0.1',()=>resolve(s));});base=`http://127.0.0.1:${server.address().port}/api`;
  db.prepare('INSERT INTO staff_sessions(token_hash,account_id,expires_at) VALUES(?,1,?)').run(hash(tokens.admin),new Date(Date.now()+3600000).toISOString());
@@ -146,7 +146,7 @@ test('refunds cannot refund a delivery in transit or already delivered items',as
  assert.equal(order.items[0].refundAvailableQuantity,1);assert.equal(order.refundableAmount,30);
  assert.equal((await post('/me/orders/WORK-ORDER/refund-requests',{items:[{orderItemId:100,quantity:2}]},tokens.user)).status,409);
  const requested=await post('/me/orders/WORK-ORDER/refund-requests',{items:[{orderItemId:100,quantity:1}]},tokens.user);assert.equal(requested.body.request.amount,30);
- await post(`/admin/refunds/${requested.body.request.id}/approve`,{});
+ await post(`/admin/refunds/${requested.body.request.id}/approve`,{stockMode:'restock',stockConfirmed:true,returnItems:[{orderItemId:100,quantity:1}]});
  assert.deepEqual(db.prepare('SELECT delivered_quantity,returned_quantity FROM order_items WHERE id=100').get(),{delivered_quantity:1,returned_quantity:1});
  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock,99);
  assert.equal(db.prepare('SELECT status FROM orders WHERE id=100').get().status,'completed');
@@ -156,7 +156,7 @@ test('successful item refunds cancel ready reservations without returning delive
  paidOrder();const ready=await prepare(2);
  const requested=(await post('/me/orders/WORK-ORDER/refund-requests',{items:[{orderItemId:100,quantity:1}]},tokens.user)).body.request;
  assert.equal((await post(`/admin/workdesk/batches/${ready.id}/claim`,{},tokens.workerB)).status,409);
- assert.equal((await post(`/admin/refunds/${requested.id}/approve`,{})).status,200);
+ assert.equal((await post(`/admin/refunds/${requested.id}/approve`,{stockMode:'restock',stockConfirmed:true,returnItems:[{orderItemId:100,quantity:1}]})).status,200);
  assert.equal(db.prepare('SELECT status FROM fulfillment_batches').get().status,'cancelled');
  const view=(await call('/admin/workdesk',{token:tokens.workerA})).body.orders[0];assert.equal(view.items[0].unpreparedQuantity,1);assert.equal(view.items[0].returnedQuantity,1);
  const delivery=await prepare(1,true);await post(`/admin/workdesk/batches/${delivery.id}/complete`,{},tokens.workerA);
@@ -201,7 +201,7 @@ test('a recalled delivery stays paused until checked and cannot be completed by 
  assert.equal((await post(`/admin/workdesk/batches/${batch.id}/complete`,{},tokens.workerA)).status,409);
  const view=(await call('/admin/workdesk',{token:tokens.workerA})).body.orders[0];assert.equal(view.paused,true);assert.equal(view.items[0].unpreparedQuantity,2);
  assert.equal((await post('/admin/workdesk/orders/100/batches',{revision:view.revision,requestId:crypto.randomUUID(),items:[{orderItemId:100,quantity:2}]},tokens.workerA)).status,409);
- assert.equal((await post('/admin/orders/100/refund',{})).status,200);assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock,100);
+ assert.equal((await post('/admin/orders/100/refund',{})).status,200);assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock,98);
 });
 
 test('a preparer can continue valid remaining quantities after an unrelated delivery update',async()=>{

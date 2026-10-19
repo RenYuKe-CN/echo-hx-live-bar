@@ -7,10 +7,11 @@ Page({
   },
   onShow() { this.refresh(); },
   refresh() {
-    const id = getApp().globalData.sessionId;
+    const app=getApp(),id=app.globalData.sessionId,version=app.globalData.tableVersion;
     if (!id) return;
     const couponQuery = this.data.selectedCouponId ? `?userCouponId=${encodeURIComponent(this.data.selectedCouponId)}` : '';
     Promise.all([api.request('/sessions/' + id + '/cart'), api.request('/me/coupons'), api.request('/sessions/' + id + '/checkout' + couponQuery)]).then(([cart, couponData, checkout]) => {
+      if(id!==app.globalData.sessionId || version!==app.globalData.tableVersion)return;
       const normalizedCheckout = (() => { const bonusUsable = Number(checkout.bonusUsable ?? Math.min(Number(checkout.bonus || 0), Number(checkout.bonusEligible || 0), Number(checkout.payable || 0))); const storedUsable = Number(checkout.storedUsable ?? Math.min(Number(checkout.stored || 0), Math.max(Number(checkout.payable || 0) - bonusUsable, 0))); const balanceDeduction = Number(checkout.balanceDeduction ?? bonusUsable + storedUsable); const wechatDue = Number(checkout.wechatDue ?? Math.max(Number(checkout.payable || 0) - balanceDeduction, 0)); return { ...checkout, bonusUsable, storedUsable, balanceDeduction, wechatDue, balanceAvailable: checkout.balanceAvailable ?? wechatDue === 0, mixedPaymentAvailable: checkout.mixedPaymentAvailable ?? (balanceDeduction > 0 && wechatDue > 0), storedText: Number(checkout.stored || 0).toFixed(2), bonusText: Number(checkout.bonus || 0).toFixed(2), usableBonusText: bonusUsable.toFixed(2), storedUsableText: storedUsable.toFixed(2), balanceDeductionText: balanceDeduction.toFixed(2), wechatDueText: wechatDue.toFixed(2) }; })();
       const usingCoupon = Boolean(normalizedCheckout.usingCoupon);
       let remainingGiftQuantity = normalizedCheckout.productVoucher ? 1 : 0;
@@ -32,7 +33,7 @@ Page({
         checkout: normalizedCheckout,
         method: normalizedCheckout.balanceAvailable ? 'balance' : normalizedCheckout.mixedPaymentAvailable ? 'mixed' : 'wechat'
       });
-    }).catch(error => wx.showToast({ title: error.message, icon: 'none' }));
+    }).catch(error => {if(id===app.globalData.sessionId && version===app.globalData.tableVersion)wx.showToast({ title: error.message, icon: 'none' });});
   },
   chooseMethod(e) {
     const method = e.currentTarget.dataset.method;
@@ -49,6 +50,7 @@ Page({
   pay() {
     if (!this.data.items.length || this.data.submitting) return;
     const id = getApp().globalData.sessionId;
+    getApp().globalData.checkoutInProgress=true;
     this.setData({ submitting: true });
     api.request('/sessions/' + id + '/orders', { method: 'POST', data: { paymentMethod: this.data.method, userCouponId: this.data.selectedCouponId || undefined, note: this.data.note } }).then(async data => {
       if (data.payment.status === 'paid') {
@@ -61,7 +63,7 @@ Page({
         wx.showToast({ title: confirmed ? '支付成功' : '支付状态核对中', icon: confirmed ? 'success' : 'none' });
         wx.navigateTo({ url: '/pages/order/order' });
       }
-    }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ submitting: false }));
+    }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => {getApp().globalData.checkoutInProgress=false;this.setData({ submitting: false });});
   },
   onNoteInput(e) { this.setData({ note: e.detail.value }); }
 });
