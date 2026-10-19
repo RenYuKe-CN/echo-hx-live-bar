@@ -28,6 +28,7 @@ import { ensureBillIdentity,captureFinalBill } from './bills.js';
 import { reconcilePrintJobs } from './printing.js';
 import { businessReport } from './business-report.js';
 import { reportWindow } from './business-time.js';
+import { registerOperationLogRoutes } from './operation-logs.js';
 
 export const router = Router();
 const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
@@ -187,7 +188,7 @@ router.post('/admin/accounts/:id/reset-password', (req, res) => {
   })();
   res.json({ ok: true });
 });
-router.get('/admin/logs', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM operation_logs').get().value; return res.json({ logs: db.prepare('SELECT * FROM operation_logs ORDER BY id DESC LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });
+registerOperationLogRoutes(router,audit);
 router.get('/admin/backups', (_req, res) => res.json({ settings: backupSettings(), backups: listBackups() }));
 router.post('/admin/backups', async (req, res) => {
   try {

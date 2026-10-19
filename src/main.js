@@ -2,6 +2,7 @@ import { catalogContent, bindCatalog } from './catalog-admin.js';
 import { groupBuyContent, bindGroupBuy } from './group-buy-admin.js';
 import { billsContent,printingContent,reportsContent,bindCommerce } from './commerce-admin.js';
 import { shiftsContent, bindShifts } from './shifts-admin.js';
+import { logsContent, bindLogs } from './logs-admin.js';
 import { mountWorkdesk } from './workdesk.js';
 import './style.css';
 import './price-overrides.css';
@@ -231,7 +232,7 @@ async function createOrder() {
   } catch (error) { renderCustomer(); showToast(error.message); }
 }
 
-const adminState = { section: 'dashboard', productFilter: {}, data: null, toast: '', dialog: null, account: null, memberPhone: '', storagePhone: '', reportRange: {}, pages: { bills: 1, accounts: 1, logs: 1, products: 1, tables: 1, orders: 1, members: 1, storage: 1, storageMovements: 1, groupBuy: 1, wallet: 1, rewards: 1, coupons: 1, messages: 1, redemptions: 1, losses: 1, reportDaily: 1 }, pageSizes: { bills: 20, accounts: 20, logs: 20, products: 20, tables: 20, orders: 20, members: 20, storage: 20, storageMovements: 20, groupBuy: 20, wallet: 20, rewards: 20, coupons: 20, messages: 20, redemptions: 20, losses: 20, reportDaily: 20 }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
+const adminState = { section: 'dashboard', productFilter: {}, logFilter: {}, logExport: null, data: null, toast: '', dialog: null, account: null, memberPhone: '', storagePhone: '', reportRange: {}, pages: { bills: 1, accounts: 1, logs: 1, products: 1, tables: 1, orders: 1, members: 1, storage: 1, storageMovements: 1, groupBuy: 1, wallet: 1, rewards: 1, coupons: 1, messages: 1, redemptions: 1, losses: 1, reportDaily: 1 }, pageSizes: { bills: 20, accounts: 20, logs: 20, products: 20, tables: 20, orders: 20, members: 20, storage: 20, storageMovements: 20, groupBuy: 20, wallet: 20, rewards: 20, coupons: 20, messages: 20, redemptions: 20, losses: 20, reportDaily: 20 }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
 const isManagementSurface = /^\/(admin|staff|cashier)(\/|$)/.test(location.pathname);
 let activeWorkdesk = null;
 let adminRenderVersion = 0;
@@ -375,7 +376,7 @@ function adminPagination(key, pagination) {
 function adminListPath(section) {
   const query = key => adminPageQuery(key);
   if (section === 'accounts') return `/accounts?${query('accounts')}`;
-  if (section === 'logs') return `/logs?${query('logs')}`;
+  if (section === 'logs') return `/logs?${query('logs')}&${new URLSearchParams(adminState.logFilter)}`;
   if (section === 'products') return `/products?${query('products')}&${new URLSearchParams(adminState.productFilter)}`;
   if (section === 'group-buy') return `/group-buy?${query('groupBuy')}`;
   if (section === 'wallet') return `/wallet-packages?${query('wallet')}`;
@@ -457,6 +458,7 @@ async function renderAdmin() {
   if(adminState.section==='products' && adminState.data?.products)bindCatalog({...catalogContext,filter:adminState.productFilter,onFilter:filter=>{adminState.productFilter=filter;adminState.pages.products=1;renderAdmin();}});
   if(adminState.section==='group-buy' && adminState.data?.mappings)bindGroupBuy(catalogContext);
   if(adminState.section==='shifts' && adminState.data?.history)bindShifts(catalogContext);
+  if(adminState.section==='logs' && adminState.data?.logs)bindLogs({...catalogContext,filters:adminState.data.filters,lastExport:adminState.logExport,onFilter:async filters=>{adminState.logFilter=filters;adminState.pages.logs=1;await renderAdmin();},onExport:batch=>{adminState.logExport=batch;},onCleaned:batch=>{adminState.logExport=batch;}});
   bindCommerce({...catalogContext,onReportRange:range=>{adminState.reportRange=range;renderAdmin();}});
 }
 async function renderAdminLogin() {
@@ -464,7 +466,7 @@ async function renderAdminLogin() {
   await refreshStoreBrand();
   if (version !== adminRenderVersion || adminState.account) return;
   document.querySelector('#app').innerHTML = `<main class="admin-login"><form id="admin-login-form"><span class="eyebrow">${escapeHtml(storeBrand)}</span><h1>${['/staff','/admin/staff'].includes(location.pathname) ? '服务员工作台' : ['/cashier','/admin/cashier'].includes(location.pathname) ? '收银工作台' : '运营管理台'}</h1><label>账号<input name="username" autocomplete="username" required></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label><p class="dialog-error" aria-live="polite"></p><button class="primary-small">登录</button></form></main>`;
-  document.querySelector('#admin-login-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; try { const data = await adminApi('/login', { method:'POST', body:JSON.stringify(Object.fromEntries(new FormData(form))) }); sessionStorage.setItem('adminToken', data.token); adminState.account = data.account; lastOrderEventCursor = null; lastPendingRefundCount = null; selectWorkspaceHome(); renderAdmin(); } catch (error) { form.querySelector('.dialog-error').textContent = error.message; } };
+  document.querySelector('#admin-login-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget; try { const data = await adminApi('/login', { method:'POST', body:JSON.stringify(Object.fromEntries(new FormData(form))) }); sessionStorage.setItem('adminToken', data.token); adminState.account = data.account; adminState.logExport=null; adminState.logFilter={}; lastOrderEventCursor = null; lastPendingRefundCount = null; selectWorkspaceHome(); renderAdmin(); } catch (error) { form.querySelector('.dialog-error').textContent = error.message; } };
 }
 async function initAdmin() { if (sessionStorage.getItem('adminToken')) { try { adminState.account = (await adminApi('/session')).account; } catch { sessionStorage.removeItem('adminToken'); } } if (adminState.account) selectWorkspaceHome(); renderAdmin(); }
 function adminContent(section, data) {
@@ -496,7 +498,7 @@ function adminContent(section, data) {
   if (section === 'bills') return billsContent(data)+adminPagination('bills',data.pagination);
   if (section === 'losses') return `<div class="toolbar"><button class="primary-small" data-action="new-loss">上报赠酒 / 报损</button></div>${adminTable(['时间','类型','商品','数量','成本','原因','操作人'], data.records.map(r => `<tr><td>${r.created_at}</td><td>${r.type === 'gift' ? '赠酒' : '报损'}</td><td>${escapeHtml(r.product_name)}</td><td>${r.quantity}</td><td>${adminState.account.role === 'super' ? adminMoney(r.cost) : '-'}</td><td>${escapeHtml(r.reason)}</td><td>${escapeHtml(r.operator)}</td></tr>`).join(''))}${adminPagination('losses', data.pagination)}`;
   if (section === 'accounts') return `<div class="toolbar"><button class="primary-small" data-action="new-account">新增账号</button><span>管理员和店员可单独重置密码；重置后其已登录设备需要重新登录。</span></div>${adminTable(['账号','名称','角色','默认工作台','状态','授权模块','操作'], data.accounts.map(a => `<tr><td>${escapeHtml(a.username)}</td><td>${escapeHtml(a.displayName)}</td><td>${{super:'超级管理员',manager:'管理员',staff:'店员'}[a.role]}</td><td>${{admin:'管理后台',cashier:'收银工作台',waiter:'服务工作台'}[a.workspace || 'admin']}</td><td>${a.status === 'active' ? '启用' : '停用'}</td><td>${a.role === 'super' ? '全部' : a.permissions.map(p => adminTitles[p]).join('、')}</td><td>${a.role === 'super' ? '-' : `<button class="table-action" data-edit-account="${a.id}">编辑权限</button> <button class="table-action" data-reset-account="${a.id}">修改密码</button>`}</td></tr>`).join(''))}${adminPagination('accounts', data.pagination)}`;
-  if (section === 'logs') return `${adminTable(['时间','账号','操作','详情'], data.logs.map(l => `<tr><td>${l.created_at}</td><td>${escapeHtml(l.operator)}</td><td>${escapeHtml(l.action)}</td><td>${escapeHtml(l.detail)}</td></tr>`).join(''))}${adminPagination('logs', data.pagination)}`;
+  if (section === 'logs') return logsContent(data,{table:adminTable,pagination:adminPagination,lastExport:adminState.logExport,account:adminState.account});
   if (section === 'settings') return `<section class="panel"><div class="panel-heading"><div><h2>第三方接口配置</h2><span>保存后会被服务端运行时读取；密钥建议通过服务器环境变量注入</span></div><button class="outline-button" id="check-integrations">检查配置</button></div><div class="integration-status">${Object.entries(data.groups || {}).map(([key, value]) => `<span class="status-chip ${value.configured ? 'ready' : 'warning'}">${key}: ${value.configured ? '配置完整' : `缺少 ${value.missing.length} 项`}</span>`).join('')}</div><form id="settings-form" class="settings-grid">${data.settings.map(s => `<label class="admin-field"><span>${escapeHtml(s.label || configLabels[s.key] || s.key)} ${s.configured ? `· 已配置（${s.source === 'environment' ? '环境变量' : '后台'}）` : ''}</span>${s.key === 'wechat_miniprogram_env_version' ? `<select name="${s.key}"><option value="release" ${s.value === 'release' || !s.value ? 'selected' : ''}>release · 正式版</option><option value="trial" ${s.value === 'trial' ? 'selected' : ''}>trial · 体验版</option><option value="develop" ${s.value === 'develop' ? 'selected' : ''}>develop · 开发版</option></select>` : `<input name="${s.key}" type="${s.secret ? 'password' : 'text'}" value="${escapeHtml(s.value)}" placeholder="${s.secret && s.configured ? '留空保持原值' : ''}">`}</label>`).join('')}<button class="primary-small">保存配置</button><p class="dialog-error"></p></form><p class="muted">完整性检查通过后，还需在微信、美团、抖音后台完成商户授权，并用真实回调地址做支付和核销联调。</p></section>`;
   if (section === 'backups') {
     const settings = data.settings || {};
