@@ -70,7 +70,7 @@ const workspaces = ['admin','cashier','waiter'];
 const workspaceDefaults = workspace => workspace === 'waiter' ? ['workdesk'] : workspace === 'cashier' ? ['pos','orders','group-buy'] : ['dashboard','orders','workdesk'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
 const verifyPassword = (password, stored) => { const [salt, hash] = stored.split(':'); const supplied = crypto.scryptSync(password, salt, 64); return hash?.length === 128 && crypto.timingSafeEqual(supplied, Buffer.from(hash, 'hex')); };
-const normalizePermissions = permissions => [...new Set(permissions.map(permission => permission === 'inventory' ? 'products' : permission).filter(permission => modules.includes(permission) && permission !== 'reports'))];
+const normalizePermissions = permissions => [...new Set(permissions.map(permission => permission === 'inventory' ? 'products' : permission).filter(permission => modules.includes(permission)))];
 const publicAccount = row => ({ id: row.id, username: row.username, displayName: row.display_name, role: row.role, workspace: row.role === 'super' ? 'admin' : row.workspace || 'admin', permissions: row.role === 'super' ? [...modules, 'accounts', 'settings', 'logs', 'mini-page'] : normalizePermissions(JSON.parse(row.permissions)), status: row.status });
 const audit = (req, action, detail = '') => db.prepare('INSERT INTO operation_logs (operator, action, detail) VALUES (?, ?, ?)').run(req.staff.username, action, String(detail));
 const syncProductAvailability = () => {
@@ -136,7 +136,7 @@ router.use('/admin', (req, res, next) => {
   if ((segment === 'refunds' || /^\/orders\/[^/]+\/refund(?:$|\/)/.test(req.path)) && !['super', 'manager'].includes(row.role)) return res.status(403).json({ message: '仅超级管理员或管理员可处理退款' });
   const allowed = row.role === 'super' || JSON.parse(row.permissions).includes(section);
   if (!allowed) return res.status(403).json({ message: '当前账号没有此模块权限' });
-  if (['backups', 'reports'].includes(section) && row.role !== 'super') return res.status(403).json({ message: '仅超级管理员可访问此模块' });
+  if (section === 'backups' && row.role !== 'super') return res.status(403).json({ message: '仅超级管理员可访问此模块' });
   if (req.method !== 'GET' && row.role !== 'super') {
     const managerOnly = ['accounts','settings','logs'];
     if (managerOnly.includes(section)) return res.status(403).json({ message: '仅超级管理员可修改此模块' });
@@ -158,10 +158,10 @@ router.post('/admin/change-password', (req, res) => {
   })();
   res.json({ ok: true });
 });
-router.get('/admin/accounts', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM staff_accounts').get().value; return res.json({ accounts: db.prepare('SELECT * FROM staff_accounts ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset).map(publicAccount), modules: modules.filter(module => module !== 'reports'), pagination: paginationView(page, pageSize, total) }); });
+router.get('/admin/accounts', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM staff_accounts').get().value; return res.json({ accounts: db.prepare('SELECT * FROM staff_accounts ORDER BY id LIMIT ? OFFSET ?').all(pageSize, offset).map(publicAccount), modules, pagination: paginationView(page, pageSize, total) }); });
 router.post('/admin/accounts', (req, res) => {
   const { username, displayName, password, role, workspace = 'admin', permissions = workspaceDefaults(workspace) } = req.body || {};
-  if (!/^[a-zA-Z0-9_]{3,32}$/.test(username || '') || String(password || '').length < 10 || !['manager','staff'].includes(role) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p) || p === 'reports')) return res.status(400).json({ message: '账号、密码或权限无效（数据报表仅超管可见，密码至少 10 位）' });
+  if (!/^[a-zA-Z0-9_]{3,32}$/.test(username || '') || String(password || '').length < 10 || !['manager','staff'].includes(role) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p))) return res.status(400).json({ message: '账号、密码或权限无效（密码至少 10 位）' });
   if (!workspaces.includes(workspace) || (workspace === 'waiter' && !permissions.includes('workdesk')) || (workspace === 'cashier' && !permissions.includes('pos'))) return res.status(400).json({ message: '工作台配置无效，服务员需要服务工作台权限，收银需要收银点单权限' });
   try { const r = db.prepare('INSERT INTO staff_accounts (username, display_name, password_hash, role, permissions, workspace) VALUES (?, ?, ?, ?, ?, ?)').run(username, String(displayName || username), hashPassword(password), role, JSON.stringify(permissions), workspace); audit(req, '创建账号', username); res.status(201).json({ account: publicAccount(db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(r.lastInsertRowid)) }); }
   catch (error) { res.status(409).json({ message: '账号名已存在' }); }
@@ -191,9 +191,9 @@ router.patch('/admin/accounts/:id', (req, res) => {
     }
   }
   const { role = account.role, status = account.status, permissions = JSON.parse(account.permissions), password, displayName = account.display_name, workspace = account.workspace || 'admin' } = req.body || {};
-  if (!['manager','staff'].includes(role) || !['active','disabled'].includes(status) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p) || p === 'reports') || (password && String(password).length < 10)) return res.status(400).json({ message: '账号配置无效（数据报表仅超级管理员可见）' });
+  if (!['manager','staff'].includes(role) || !['active','disabled'].includes(status) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p)) || (password && String(password).length < 10)) return res.status(400).json({ message: '账号配置无效' });
   if (!workspaces.includes(workspace) || (workspace === 'waiter' && !permissions.includes('workdesk')) || (workspace === 'cashier' && !permissions.includes('pos'))) return res.status(400).json({ message: '工作台与权限不匹配' });
-  db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ?, workspace = ? WHERE id = ?').run(role, status, JSON.stringify(permissions.filter(p => p !== 'reports')), displayName, password ? hashPassword(password) : account.password_hash, workspace, account.id);
+  db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ?, workspace = ? WHERE id = ?').run(role, status, JSON.stringify(normalizePermissions(permissions)), displayName, password ? hashPassword(password) : account.password_hash, workspace, account.id);
   if (status === 'disabled' || password) db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(account.id);
   audit(req, '修改账号', account.username); res.json({ ok: true });
 });

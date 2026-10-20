@@ -83,7 +83,7 @@ export function registerCommerceRoutes(router,{audit}) {
   router.put('/admin/reports/settings',safe((req,res)=>{superOnly(req);res.json({settings:saveCommerceSettings(req.body)});audit(req,'更新营业日和报表文件名规则');}));
   router.get('/admin/reports',safe((req,res)=>{
     const report=businessReport(reportWindow(req.query)),t=report.totals;
-    res.json({settings:commerceSettings(),daily:report.daily,dateRange:{startAt:report.window.start,endAt:report.window.end,timezone:report.window.timezone,filename:report.window.filename},totals:t,channels:report.channels,byProduct:report.byProduct.slice(0,50),flows:report.flows.slice(-50).reverse().map(f=>({...f,time:formatTime(f.time,report.window.timezone),amount:f.amount==null?null:f.amount/100})),today:{day:report.window.start.slice(0,10),revenue:t.revenue,profit:t.profit,orders:t.orders,orderCost:t.orderCost,lossCost:t.lossCost,recharge:t.rechargeReceived,offline:t.offlineReceived},generatedAt:report.generatedAt});
+    res.json({canConfigure:req.staff.role==='super',settings:commerceSettings(),daily:report.daily,dateRange:{startAt:report.window.start,endAt:report.window.end,timezone:report.window.timezone,filename:report.window.filename},totals:t,channels:report.channels,byProduct:report.byProduct.slice(0,50),flows:report.flows.slice(-50).reverse().map(f=>({...f,time:formatTime(f.time,report.window.timezone),amount:f.amount==null?null:f.amount/100})),today:{day:report.window.start.slice(0,10),revenue:t.revenue,profit:t.profit,orders:t.orders,orderCost:t.orderCost,lossCost:t.lossCost,recharge:t.rechargeReceived,offline:t.offlineReceived},generatedAt:report.generatedAt});
   }));
   router.get('/admin/reports/export',safe(async(req,res)=>{
     const report=businessReport(reportWindow(req.query));
