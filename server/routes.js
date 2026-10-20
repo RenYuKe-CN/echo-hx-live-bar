@@ -30,6 +30,7 @@ import { businessReport } from './business-report.js';
 import { reportWindow } from './business-time.js';
 import { registerOperationLogRoutes } from './operation-logs.js';
 import { displayOrderItems } from './order-item-groups.js';
+import { canProcessRefunds } from '../shared/refund-permission.js';
 
 export const router = Router();
 const backupUploadDir = path.resolve(process.env.DATA_DIR || 'data', '.backup-uploads');
@@ -65,7 +66,7 @@ const paginationView = (page, pageSize, total) => {
   const safePage = Math.min(page, totalPages);
   return { page: safePage, pageSize, total, totalPages, hasNext: safePage < totalPages, hasPrevious: safePage > 1 };
 };
-const modules = ['workdesk','dashboard','pos','orders','tables','members','storage','group-buy','products','wallet','rewards','coupons','messages','reports','losses','backups'];
+const modules = ['workdesk','dashboard','pos','orders','refunds','tables','members','storage','group-buy','products','wallet','rewards','coupons','messages','reports','losses','backups'];
 const workspaces = ['admin','cashier','waiter'];
 const workspaceDefaults = workspace => workspace === 'waiter' ? ['workdesk'] : workspace === 'cashier' ? ['pos','orders','group-buy'] : ['dashboard','orders','workdesk'];
 const hashPassword = password => { const salt = crypto.randomBytes(16).toString('hex'); return `${salt}:${crypto.scryptSync(password, salt, 64).toString('hex')}`; };
@@ -133,7 +134,7 @@ router.use('/admin', (req, res, next) => {
   const segment = req.path.split('/')[1];
   const section = ({ summary: 'dashboard', shifts: 'pos', refunds: 'orders', printing:'orders',bills:'orders',inventory: 'products', 'wallet-packages': 'wallet', 'member-rules': 'members', 'member-tiers': 'members', categories: 'products', 'session': null, 'logout': null, 'change-password': null })[segment] ?? segment;
   if (['session','logout','change-password'].includes(segment)) return next();
-  if ((segment === 'refunds' || /^\/orders\/[^/]+\/refund(?:$|\/)/.test(req.path)) && !['super', 'manager'].includes(row.role)) return res.status(403).json({ message: '仅超级管理员或管理员可处理退款' });
+  if ((segment === 'refunds' || /^\/orders\/[^/]+\/refund(?:$|\/)/.test(req.path)) && !canProcessRefunds(row)) return res.status(403).json({ message: '需要订单管理和退款处理权限' });
   const allowed = row.role === 'super' || JSON.parse(row.permissions).includes(section);
   if (!allowed) return res.status(403).json({ message: '当前账号没有此模块权限' });
   if (section === 'backups' && row.role !== 'super') return res.status(403).json({ message: '仅超级管理员可访问此模块' });
@@ -162,6 +163,7 @@ router.get('/admin/accounts', (req, res) => { const { page, pageSize, offset } =
 router.post('/admin/accounts', (req, res) => {
   const { username, displayName, password, role, workspace = 'admin', permissions = workspaceDefaults(workspace) } = req.body || {};
   if (!/^[a-zA-Z0-9_]{3,32}$/.test(username || '') || String(password || '').length < 10 || !['manager','staff'].includes(role) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p))) return res.status(400).json({ message: '账号、密码或权限无效（密码至少 10 位）' });
+  if (permissions.includes('refunds') && !permissions.includes('orders')) return res.status(400).json({ message: '退款处理需同时授权订单管理' });
   if (!workspaces.includes(workspace) || (workspace === 'waiter' && !permissions.includes('workdesk')) || (workspace === 'cashier' && !permissions.includes('pos'))) return res.status(400).json({ message: '工作台配置无效，服务员需要服务工作台权限，收银需要收银点单权限' });
   try { const r = db.prepare('INSERT INTO staff_accounts (username, display_name, password_hash, role, permissions, workspace) VALUES (?, ?, ?, ?, ?, ?)').run(username, String(displayName || username), hashPassword(password), role, JSON.stringify(permissions), workspace); audit(req, '创建账号', username); res.status(201).json({ account: publicAccount(db.prepare('SELECT * FROM staff_accounts WHERE id = ?').get(r.lastInsertRowid)) }); }
   catch (error) { res.status(409).json({ message: '账号名已存在' }); }
@@ -192,6 +194,7 @@ router.patch('/admin/accounts/:id', (req, res) => {
   }
   const { role = account.role, status = account.status, permissions = JSON.parse(account.permissions), password, displayName = account.display_name, workspace = account.workspace || 'admin' } = req.body || {};
   if (!['manager','staff'].includes(role) || !['active','disabled'].includes(status) || !Array.isArray(permissions) || permissions.some(p => !modules.includes(p)) || (password && String(password).length < 10)) return res.status(400).json({ message: '账号配置无效' });
+  if (permissions.includes('refunds') && !permissions.includes('orders')) return res.status(400).json({ message: '退款处理需同时授权订单管理' });
   if (!workspaces.includes(workspace) || (workspace === 'waiter' && !permissions.includes('workdesk')) || (workspace === 'cashier' && !permissions.includes('pos'))) return res.status(400).json({ message: '工作台与权限不匹配' });
   db.prepare('UPDATE staff_accounts SET role = ?, status = ?, permissions = ?, display_name = ?, password_hash = ?, workspace = ? WHERE id = ?').run(role, status, JSON.stringify(normalizePermissions(permissions)), displayName, password ? hashPassword(password) : account.password_hash, workspace, account.id);
   if (status === 'disabled' || password) db.prepare('DELETE FROM staff_sessions WHERE account_id = ?').run(account.id);
@@ -1768,12 +1771,12 @@ router.get('/admin/summary', (req, res) => {
   const outOfStock = db.prepare("SELECT COUNT(*) AS value FROM products WHERE kind='basic' AND stock-reserved_stock<=0").get().value;
   const canViewOrders = req.staff.role === 'super' || JSON.parse(req.staff.permissions).includes('orders');
   const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, o.note, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
-  const pendingRefunds = canViewOrders && ['super', 'manager'].includes(req.staff.role) ? db.prepare("SELECT COUNT(*) AS value FROM refund_requests WHERE status = 'pending'").get().value : 0;
+  const pendingRefunds = canProcessRefunds(req.staff) ? db.prepare("SELECT COUNT(*) AS value FROM refund_requests WHERE status = 'pending'").get().value : 0;
   const items = orderItems(pendingOrders.map(o => o.id));
   const report=businessReport(reportWindow({})),today=report.totals;
   const issues=[];
   const issue=(section,title,sql,detail)=>{const allowed=req.staff.role==='super'||JSON.parse(req.staff.permissions).includes(section==='printing'?'orders':section);if(allowed){const count=db.prepare(sql).get().n;if(count)issues.push({section,title,count,detail});}};
-  issue('orders','退款结果待确认',"SELECT COUNT(*) AS n FROM refund_transactions WHERE status IN ('pending','processing')",'核对原退款单，避免重新发起退款');
+  if (canProcessRefunds(req.staff)) issue('orders','退款结果待确认',"SELECT COUNT(*) AS n FROM refund_transactions WHERE status IN ('pending','processing')",'核对原退款单，避免重新发起退款');
   issue('orders','配送暂停待核实',"SELECT COUNT(*) AS n FROM orders WHERE status='awaiting_delivery' AND fulfillment_pause_reason!=''",'核实货品实际交付后恢复或退款');
   issue('printing','打印结果待确认',"SELECT COUNT(*) AS n FROM print_jobs WHERE state IN ('unknown','failed')",'先检查设备出纸，再决定重印');
   issue('group-buy','团购核销待核对',"SELECT COUNT(*) AS n FROM group_buy_redemptions WHERE state IN ('unknown','verified')",'核对原平台核销记录');
@@ -1860,11 +1863,18 @@ router.get('/admin/orders/notifications', (req, res) => {
   res.json({ events, cursor: events.length===200 ? events.at(-1).id : latest });
 });
 router.get('/admin/orders', (req, res) => {
-  const { page, pageSize, offset } = parsePagination(req);
-  const total = db.prepare('SELECT COUNT(*) AS value FROM orders').get().value;
-  const rows = db.prepare(`SELECT o.*, t.table_no, CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_name_snapshot ELSE u.nickname END AS nickname, CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_phone_snapshot ELSE u.phone END AS payer_phone, ${orderCostSql('o')} AS cost_cents FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?`).all(pageSize, offset);
+  const { page, pageSize } = parsePagination(req);
+  const phone = String(req.query.phone || '').trim();
+  if (phone && !/^[0-9]{1,11}$/.test(phone)) return res.status(400).json({ message: '请输入 1～11 位手机号数字，可使用完整号码或部分数字查询' });
+  const payerPhone = 'CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_phone_snapshot ELSE u.phone END';
+  const source = 'FROM orders o JOIN table_sessions ts ON ts.id=o.session_id JOIN tables t ON t.id=ts.table_id JOIN users u ON u.id=o.payer_user_id';
+  const where = phone ? `WHERE instr(COALESCE(${payerPhone},''),?)>0` : '';
+  const values = phone ? [phone] : [];
+  const total = db.prepare(`SELECT COUNT(*) AS value ${source} ${where}`).get(...values).value;
+  const pagination = paginationView(page, pageSize, total);
+  const rows = db.prepare(`SELECT o.*, t.table_no, CASE WHEN o.payer_identity_captured_at IS NOT NULL THEN o.payer_name_snapshot ELSE u.nickname END AS nickname, ${payerPhone} AS payer_phone, ${orderCostSql('o')} AS cost_cents ${source} ${where} ORDER BY (o.status = 'awaiting_delivery') DESC, o.id DESC LIMIT ? OFFSET ?`).all(...values,pageSize,(pagination.page-1)*pageSize);
   const items = orderItems(rows.map(o => o.id));
-  res.json({ orders: rows.map(row => { const refund = refundView(row); const order = { ...row, ...refund, items: items[row.id] || [],displayItems:displayOrderItems(row.id,items[row.id]||[]), statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents - row.cost_cents) : null; } return order; }), pagination: paginationView(page, pageSize, total) });
+  res.json({ orders: rows.map(row => { const refund = refundView(row); const order = { ...row, ...refund, items: items[row.id] || [],displayItems:displayOrderItems(row.id,items[row.id]||[]), statusLabel: fulfillmentLabel(row), originalAmount: centsToMoney(row.original_amount_cents), discountAmount: centsToMoney(row.discount_amount_cents), memberDiscount: centsToMoney(Math.max(0, row.discount_amount_cents - row.coupon_discount_cents)), couponDiscount: centsToMoney(row.coupon_discount_cents), payableAmount: centsToMoney(row.payable_amount_cents), storedPaid: centsToMoney(row.stored_paid_cents), bonusPaid: centsToMoney(row.bonus_paid_cents), wechatPaid: centsToMoney(row.wechat_paid_cents), netSales: centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents) }; delete order.cost_cents; if (req.staff.role === 'super') { order.cost = centsToMoney(row.cost_cents); order.profit = row.payment_status === 'paid' ? centsToMoney(row.payable_amount_cents - row.bonus_paid_cents - refund.refundedRevenueCents - row.cost_cents) : null; } return order; }), pagination, filters: { phone } });
 });
 
 router.get('/admin/refunds', (req, res) => {

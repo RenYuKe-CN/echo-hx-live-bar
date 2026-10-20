@@ -9,6 +9,7 @@ import { migrateCatalog } from './catalog-schema.js';
 import { migrateCommerce } from './commerce-schema.js';
 import { migrateSingleStore } from './single-store-schema.js';
 import { migrateAuditLogs } from './logs-schema.js';
+import { migrateRefundPermissions } from './refund-permissions-schema.js';
 
 export const dataDir = path.resolve(process.env.DATA_DIR || 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -391,6 +392,7 @@ seed();
 migrateCommerce(db);
 migrateSingleStore(db);
 migrateAuditLogs(db);
+migrateRefundPermissions(db);
 db.prepare("UPDATE member_tiers SET threshold_cents = COALESCE((SELECT spend_target_cents FROM member_rules WHERE store_id = member_tiers.store_id), 100000) WHERE threshold_cents = 0 AND upgrade_type = 'spend'").run();
 db.prepare("UPDATE member_tiers SET spend_threshold_cents = threshold_cents WHERE spend_threshold_cents = 0 AND upgrade_type IN ('spend', 'monthly') AND threshold_cents > 0").run();
 db.prepare("UPDATE member_tiers SET stored_threshold_cents = threshold_cents WHERE stored_threshold_cents = 0 AND upgrade_type = 'recharge' AND threshold_cents > 0").run();
@@ -408,6 +410,7 @@ export function reopenDatabase() {
   migrateCommerce(db);
   migrateSingleStore(db);
   migrateAuditLogs(db);
+  migrateRefundPermissions(db);
 }
 
 export function centsToMoney(cents) { return Number((cents / 100).toFixed(2)); }

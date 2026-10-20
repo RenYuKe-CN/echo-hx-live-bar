@@ -4,6 +4,8 @@ import { billsContent,printingContent,reportsContent,bindCommerce } from './comm
 import { shiftsContent, bindShifts } from './shifts-admin.js';
 import { logsContent, bindLogs } from './logs-admin.js';
 import { refundGroups, refundStockSelection } from './refund-stock-view.js';
+import { canProcessRefunds } from '../shared/refund-permission.js';
+import { ordersContent } from './orders-admin.js';
 import { mountWorkdesk } from './workdesk.js';
 import './style.css';
 import './price-overrides.css';
@@ -233,7 +235,7 @@ async function createOrder() {
   } catch (error) { renderCustomer(); showToast(error.message); }
 }
 
-const adminState = { section: 'dashboard', productFilter: {}, logFilter: {}, logExport: null, data: null, toast: '', dialog: null, account: null, memberPhone: '', storagePhone: '', reportRange: {}, pages: { bills: 1, accounts: 1, logs: 1, products: 1, tables: 1, orders: 1, members: 1, storage: 1, storageMovements: 1, groupBuy: 1, wallet: 1, rewards: 1, coupons: 1, messages: 1, redemptions: 1, losses: 1, reportDaily: 1 }, pageSizes: { bills: 20, accounts: 20, logs: 20, products: 20, tables: 20, orders: 20, members: 20, storage: 20, storageMovements: 20, groupBuy: 20, wallet: 20, rewards: 20, coupons: 20, messages: 20, redemptions: 20, losses: 20, reportDaily: 20 }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
+const adminState = { section: 'dashboard', productFilter: {}, logFilter: {}, logExport: null, data: null, toast: '', dialog: null, account: null, orderPhone: '', orderPhoneDraft: '', memberPhone: '', storagePhone: '', reportRange: {}, pages: { bills: 1, accounts: 1, logs: 1, products: 1, tables: 1, orders: 1, members: 1, storage: 1, storageMovements: 1, groupBuy: 1, wallet: 1, rewards: 1, coupons: 1, messages: 1, redemptions: 1, losses: 1, reportDaily: 1 }, pageSizes: { bills: 20, accounts: 20, logs: 20, products: 20, tables: 20, orders: 20, members: 20, storage: 20, storageMovements: 20, groupBuy: 20, wallet: 20, rewards: 20, coupons: 20, messages: 20, redemptions: 20, losses: 20, reportDaily: 20 }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
 const isManagementSurface = /^\/(admin|staff|cashier)(\/|$)/.test(location.pathname);
 let activeWorkdesk = null;
 let adminRenderVersion = 0;
@@ -242,7 +244,7 @@ let lastPendingRefundCount = null;
 let adminPolling = false;
 const adminModules = [['workdesk','服务工作台'],['dashboard','经营中心'],['mini-page','小程序页面'],['pos','收银点单'],['shifts','收银交接班'],['orders','订单管理'],['bills','桌台账单'],['printing','小票打印'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['coupons','优惠券管理'],['messages','消息中心'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['settings','接口配置'],['backups','备份与恢复']];
 const adminApi = (path, options = {}) => api(`/admin${path}`, options);
-const adminTitles = Object.fromEntries(adminModules);
+const adminTitles = { ...Object.fromEntries(adminModules), refunds: '退款处理' };
 const canAdminSection=id=>adminState.account?.permissions.includes(['bills','printing'].includes(id)?'orders':id==='shifts'?'pos':id);
 const adminGroups = [
   { title: '经营中心', sections: ['dashboard'] },
@@ -302,7 +304,7 @@ function adminRefundCell(order) {
   return parts.length ? `<div class="admin-refund-cell">${parts.join('')}</div>` : '<span class="muted-cell">无</span>';
 }
 function adminRefundActions(order) {
-  if (!['super', 'manager'].includes(adminState.account.role)) return '';
+  if (!canProcessRefunds(adminState.account)) return '';
   const request = order.refundRequest;
   const transaction = order.refundTransaction;
   const buttons = [];
@@ -383,7 +385,7 @@ function adminListPath(section) {
   if (section === 'products') return `/products?${query('products')}&${new URLSearchParams(adminState.productFilter)}`;
   if (section === 'group-buy') return `/group-buy?${query('groupBuy')}`;
   if (section === 'wallet') return `/wallet-packages?${query('wallet')}`;
-  if (section === 'orders') return `/orders?${query('orders')}`;
+  if (section === 'orders') return `/orders?${query('orders')}&${new URLSearchParams({phone:adminState.orderPhone})}`;
   if (section === 'bills') return `/bills?${query('bills')}`;
   if (section === 'tables') return `/tables?${query('tables')}`;
   if (section === 'members') return `/members?phone=${encodeURIComponent(adminState.memberPhone)}&${query('members')}`;
@@ -414,21 +416,21 @@ function selectWorkspaceHome() {
   else if (['/cashier','/admin/cashier'].includes(location.pathname) && account.permissions.includes('pos')) adminState.section = 'pos';
   else if (account.workspace === 'waiter') adminState.section = 'workdesk';
   else if (account.workspace === 'cashier') adminState.section = 'pos';
-  else adminState.section = account.permissions.includes('dashboard') ? 'dashboard' : account.permissions[0];
+  else adminState.section = account.permissions.includes('dashboard') ? 'dashboard' : account.permissions.find(permission => permission !== 'refunds');
   history.replaceState(null, '', adminState.section === 'workdesk' ? '/admin/staff' : account.workspace === 'cashier' ? '/admin/cashier' : '/admin');
 }
 async function renderAdmin() {
   activeWorkdesk?.destroy(); activeWorkdesk = null;
   if (!adminState.account) return renderAdminLogin();
   const renderVersion = ++adminRenderVersion;
-  if (!canAdminSection(adminState.section)) adminState.section = adminState.account.permissions[0] || 'dashboard';
+  if (!canAdminSection(adminState.section)) adminState.section = adminState.account.permissions.find(permission => permission !== 'refunds') || 'dashboard';
   const renderingSection = adminState.section;
   if (renderingSection === 'workdesk') {
     await refreshStoreBrand();
     if (renderVersion !== adminRenderVersion || !adminState.account) return;
     activeWorkdesk = mountWorkdesk({ root: document.querySelector('#app'), account: adminState.account, api: adminApi, brand: storeBrand,
       logout: async () => { try { await adminApi('/logout', { method: 'POST' }); } finally { sessionStorage.removeItem('adminToken'); adminState.account = null; renderAdmin(); } },
-      switchWorkspace: mode => { adminState.section = mode === 'cashier' ? 'pos' : adminState.account.permissions.find(permission => permission !== 'workdesk'); history.replaceState(null,'',mode === 'cashier' ? '/admin/cashier' : '/admin'); renderAdmin(); }
+      switchWorkspace: mode => { adminState.section = mode === 'cashier' ? 'pos' : adminState.account.permissions.find(permission => !['workdesk','refunds'].includes(permission)); history.replaceState(null,'',mode === 'cashier' ? '/admin/cashier' : '/admin'); renderAdmin(); }
     });
     return;
   }
@@ -473,11 +475,11 @@ async function renderAdminLogin() {
 }
 async function initAdmin() { if (sessionStorage.getItem('adminToken')) { try { adminState.account = (await adminApi('/session')).account; } catch { sessionStorage.removeItem('adminToken'); } } if (adminState.account) selectWorkspaceHome(); renderAdmin(); }
 function adminContent(section, data) {
-  if (section === 'dashboard') { const canOrders = adminState.account.permissions.includes('orders'); const canProducts = adminState.account.permissions.includes('products'); const canReviewRefunds = canOrders && ['super', 'manager'].includes(adminState.account.role); const m = data.todayMetrics || {}; const quickActions = [['pos','收银点单'],['storage','登记存酒'],['group-buy','核销团购'],['wallet','配置储值']].filter(([id]) => adminState.account.permissions.includes(id)); return `<section class="kpi-grid">${[['本营业日净销售额',adminMoney(m.revenue ?? data.todayRevenue),data.businessWindow?.startAt?.slice(0,10)||'本营业日'],['本营业日充值收款',adminMoney(m.recharge),data.businessWindow?.startAt?.slice(0,10)||'本营业日'],['营业桌台',`${data.activeTables} 桌`,'进行中'],['空闲桌台',`${data.idleTables} 桌`,'可安排']].map((k, i) => `<article class="kpi-card"><span>${k[0]}</span><strong data-kpi="${i}">${k[1]}</strong><small class="green">${k[2]}</small></article>`).join('')}</section><section class="panel daily-metrics"><div class="panel-heading"><div><h2>本营业日收款</h2><span>${escapeHtml(data.businessWindow?.startAt?.replace('T',' ')||'')} 至 ${escapeHtml(data.businessWindow?.endAt?.replace('T',' ')||'')}，赠金不计入净销售额</span></div></div><div class="metric-list"><div><span>线下收款</span><strong>${adminMoney(m.offline)}</strong></div></div></section><section class="admin-grid"><article class="panel"><div class="panel-heading"><div><h2>运营提醒</h2><span>点击提醒可直接进入处理页面</span></div></div><div class="task-list">${(data.issues || []).map(issue=>`<button class="task-link" data-admin-section="${issue.section}"><b class="status-dot red-dot"></b><div><strong>${escapeHtml(issue.title)} ${issue.count} 项</strong><span>${escapeHtml(issue.detail)}</span></div></button>`).join('')}${canProducts ? `<button class="task-link" data-admin-section="products"><b class="status-dot red-dot"></b><div><strong>库存预警 ${data.lowStock} 项</strong><span>${data.outOfStock ? `其中 ${data.outOfStock} 项已自动下架，请及时补货` : '请到商品与库存调整安全库存'}</span></div></button>` : ''}${canOrders ? `<button class="task-link" data-admin-section="orders"><b class="status-dot orange"></b><div><strong>待送达订单 ${data.activeOrders} 笔</strong><span>查看商品清单并确认送达${data.pendingPayment ? ` · 另有 ${data.pendingPayment} 笔待支付` : ''}</span></div></button>` : ''}${canReviewRefunds && Number(data.pendingRefunds || 0) > 0 ? `<button class="task-link" data-admin-section="orders"><b class="status-dot red-dot"></b><div><strong>待审核退款 ${Number(data.pendingRefunds)} 笔</strong><span>请及时审核用户退款申请</span></div></button>` : ''}</div></article><article class="panel"><div class="panel-heading"><div><h2>快速入口</h2><span>常用运营动作</span></div></div><div class="quick-actions">${quickActions.map(([id, label]) => `<button data-admin-section="${id}">${label}</button>`).join('')}</div></article></section><section class="panel dashboard-orders"><div class="panel-heading"><div><h2>新订单待处理</h2><span>支付成功后，店员送达才会完成</span></div>${canOrders ? '<button class="outline-button" data-admin-section="orders">查看全部</button>' : ''}</div>${data.pendingOrders?.length ? data.pendingOrders.map(o => `<article class="pending-order"><div><strong>${escapeHtml(o.order_no)} · ${escapeHtml(o.table_no)}桌</strong><span>${escapeHtml(o.nickname)} · ${o.paid_at}</span></div><div class="pending-items">${adminOrderItems(o).map(item => `<span>${escapeHtml(item.name)} × ${item.quantity}</span>`).join('')}</div></article>`).join('') : '<p class="empty-cell">暂无待送达订单</p>'}</section>`; }
+  if (section === 'dashboard') { const canOrders = adminState.account.permissions.includes('orders'); const canProducts = adminState.account.permissions.includes('products'); const canReviewRefunds = canProcessRefunds(adminState.account); const m = data.todayMetrics || {}; const quickActions = [['pos','收银点单'],['storage','登记存酒'],['group-buy','核销团购'],['wallet','配置储值']].filter(([id]) => adminState.account.permissions.includes(id)); return `<section class="kpi-grid">${[['本营业日净销售额',adminMoney(m.revenue ?? data.todayRevenue),data.businessWindow?.startAt?.slice(0,10)||'本营业日'],['本营业日充值收款',adminMoney(m.recharge),data.businessWindow?.startAt?.slice(0,10)||'本营业日'],['营业桌台',`${data.activeTables} 桌`,'进行中'],['空闲桌台',`${data.idleTables} 桌`,'可安排']].map((k, i) => `<article class="kpi-card"><span>${k[0]}</span><strong data-kpi="${i}">${k[1]}</strong><small class="green">${k[2]}</small></article>`).join('')}</section><section class="panel daily-metrics"><div class="panel-heading"><div><h2>本营业日收款</h2><span>${escapeHtml(data.businessWindow?.startAt?.replace('T',' ')||'')} 至 ${escapeHtml(data.businessWindow?.endAt?.replace('T',' ')||'')}，赠金不计入净销售额</span></div></div><div class="metric-list"><div><span>线下收款</span><strong>${adminMoney(m.offline)}</strong></div></div></section><section class="admin-grid"><article class="panel"><div class="panel-heading"><div><h2>运营提醒</h2><span>点击提醒可直接进入处理页面</span></div></div><div class="task-list">${(data.issues || []).map(issue=>`<button class="task-link" data-admin-section="${issue.section}"><b class="status-dot red-dot"></b><div><strong>${escapeHtml(issue.title)} ${issue.count} 项</strong><span>${escapeHtml(issue.detail)}</span></div></button>`).join('')}${canProducts ? `<button class="task-link" data-admin-section="products"><b class="status-dot red-dot"></b><div><strong>库存预警 ${data.lowStock} 项</strong><span>${data.outOfStock ? `其中 ${data.outOfStock} 项已自动下架，请及时补货` : '请到商品与库存调整安全库存'}</span></div></button>` : ''}${canOrders ? `<button class="task-link" data-admin-section="orders"><b class="status-dot orange"></b><div><strong>待送达订单 ${data.activeOrders} 笔</strong><span>查看商品清单并确认送达${data.pendingPayment ? ` · 另有 ${data.pendingPayment} 笔待支付` : ''}</span></div></button>` : ''}${canReviewRefunds && Number(data.pendingRefunds || 0) > 0 ? `<button class="task-link" data-admin-section="orders"><b class="status-dot red-dot"></b><div><strong>待审核退款 ${Number(data.pendingRefunds)} 笔</strong><span>请及时审核用户退款申请</span></div></button>` : ''}</div></article><article class="panel"><div class="panel-heading"><div><h2>快速入口</h2><span>常用运营动作</span></div></div><div class="quick-actions">${quickActions.map(([id, label]) => `<button data-admin-section="${id}">${label}</button>`).join('')}</div></article></section><section class="panel dashboard-orders"><div class="panel-heading"><div><h2>新订单待处理</h2><span>支付成功后，店员送达才会完成</span></div>${canOrders ? '<button class="outline-button" data-admin-section="orders">查看全部</button>' : ''}</div>${data.pendingOrders?.length ? data.pendingOrders.map(o => `<article class="pending-order"><div><strong>${escapeHtml(o.order_no)} · ${escapeHtml(o.table_no)}桌</strong><span>${escapeHtml(o.nickname)} · ${o.paid_at}</span></div><div class="pending-items">${adminOrderItems(o).map(item => `<span>${escapeHtml(item.name)} × ${item.quantity}</span>`).join('')}</div></article>`).join('') : '<p class="empty-cell">暂无待送达订单</p>'}</section>`; }
   if (section === 'shifts') return shiftsContent(data,adminState.account);
   if (section === 'pos') return posContent(data);
   if (section === 'products') return catalogContent(data,adminState.productFilter)+adminPagination('products',data.pagination);
-  if (section === 'orders') return `${adminTable(['订单号','桌台','付款人','商品清单','订单备注','原价','会员优惠','优惠券优惠','实付','支付构成','净销售额','利润','退款信息','状态','操作'], data.orders.map(o => `<tr><td>${escapeHtml(o.order_no)}</td><td>${escapeHtml(o.table_no)}</td><td>${escapeHtml(o.nickname)}<br><small>${escapeHtml(o.payer_phone || '未绑定手机号')}</small></td><td class="order-items-cell">${adminOrderItems(o).map(item => `<span>${escapeHtml(item.name)} × ${item.quantity}</span>`).join('')}</td><td class="order-note-cell">${o.note ? escapeHtml(o.note) : '<span class="muted-cell">无</span>'}</td><td>${adminMoney(o.originalAmount)}</td><td class="green-text">-${adminMoney(o.memberDiscount)}</td><td class="green-text">-${adminMoney(o.couponDiscount)}</td><td><strong>${adminMoney(o.payableAmount)}</strong></td><td>${orderPaymentSummary(o)}</td><td>${o.payment_status === 'paid' ? adminMoney(o.netSales) : '-'}</td><td>${adminState.account.role === 'super' && o.profit != null ? adminMoney(o.profit) : '-'}</td><td>${adminRefundCell(o)}</td><td>${escapeHtml(o.statusLabel)}</td><td>${o.payment_status === 'pending' ? (['wechat', 'mixed'].includes(o.payment_method) ? '等待微信支付' : `<button class="table-action" data-mark-paid="${o.id}">确认线下收款</button>`) : o.status === 'awaiting_delivery' ? `<button class="table-action" data-admin-section="workdesk" ${adminState.account.permissions.includes('workdesk') ? '' : 'disabled'}>查看配送任务</button>` : '已完成'} ${adminRefundActions(o)} <button class="table-action" data-receipt-order="${o.id}">小票</button></td></tr>`).join(''))}${adminPagination('orders', data.pagination)}`;
+  if (section === 'orders') return ordersContent(data,{account:adminState.account,refundCell:adminRefundCell,refundActions:adminRefundActions,paymentSummary:orderPaymentSummary,phone:adminState.orderPhone,phoneDraft:adminState.orderPhoneDraft})+adminPagination('orders', data.pagination);
   if (section === 'tables') return `<div class="toolbar"><button class="primary-small" data-action="new-table">新增桌台</button><span>每桌独立小程序码；扫码后自动进入对应桌台。删除后不再显示，已有历史订单仍会保留。</span></div>${adminTable(['桌号','小程序码','会话','已收金额','操作'], data.tables.map(t => `<tr><td><strong>${escapeHtml(t.table_no)}</strong></td><td><button class="table-action" data-table-code="${t.id}">预览 / 下载</button></td><td>${t.session_status === 'open' ? '进行中' : '空闲'}</td><td>${adminMoney(t.orderTotal)}</td><td><button class="table-action" data-edit-table="${t.id}">编辑</button> ${t.session_status === 'open' ? `<button class="table-action" data-close-table="${t.id}">结束本桌</button> ${canAdminSection('orders')?`<button class="table-action" data-receipt-bill="${t.session_id}">本桌账单</button>`:''}` : `<button class="table-action danger-action" data-delete-table="${t.id}">删除</button>`}</td></tr>`).join(''))}${adminPagination('tables', data.pagination)}`;
   if (section === 'members') {
     const tierRows = data.tiers.map(t => {
@@ -551,6 +553,23 @@ function bindAdminActions() {
     const order = adminState.data.orders.find(item => Number(item.id) === Number(button.dataset.adminRefund));
     if (order) openAdminDialog('admin-refund', order);
   });
+  document.querySelectorAll('[data-copy-order]').forEach(button => button.onclick = async () => {
+    try { await navigator.clipboard.writeText(button.dataset.copyOrder); adminNotice('完整订单号已复制'); }
+    catch { adminNotice('复制失败，请选中订单号复制'); }
+  });
+  const orderSearch = document.querySelector('#order-phone-search');
+  if (orderSearch) {
+    orderSearch.elements.phone.oninput = event => { adminState.orderPhoneDraft = event.target.value; };
+    orderSearch.onsubmit = event => {
+      event.preventDefault();
+      const phone = orderSearch.elements.phone.value.trim();
+      if (phone && !/^[0-9]{1,11}$/.test(phone)) return adminNotice('请输入 1～11 位手机号数字');
+      adminState.orderPhone = phone; adminState.orderPhoneDraft = phone; adminState.pages.orders = 1; renderAdmin();
+    };
+    orderSearch.querySelector('[data-order-clear]').onclick = () => {
+      adminState.orderPhone = ''; adminState.orderPhoneDraft = ''; adminState.pages.orders = 1; renderAdmin();
+    };
+  }
   document.querySelectorAll('[data-query-refund]').forEach(button => button.onclick = async () => {
     button.disabled = true;
     try {
@@ -844,7 +863,7 @@ async function openAdminDialog(type, item) {
       fields = '<p class="dialog-hint">修改登录账号后，请使用新账号和原密码登录。当前登录保留，其他设备需重新登录；只修改显示名称不会注销设备。</p>' + field('登录账号（3～32 位字母、数字或下划线）', 'username', `<input name="username" value="${escapeHtml(item.username)}" minlength="3" maxlength="32" pattern="[a-zA-Z0-9_]+" autocomplete="username" required>`) + field('显示名称', 'displayName', `<input name="displayName" value="${escapeHtml(item.displayName)}" maxlength="50" required>`);
     } else if (type === 'new-account' || type === 'edit-account') {
       const data = await adminApi('/accounts'); title = item ? `编辑账号 · ${item.username}` : '新增账号'; path = item ? `/accounts/${item.id}` : '/accounts'; method = item ? 'PATCH' : 'POST';
-      fields = (item ? `<p class="dialog-hint">账号：${escapeHtml(item.username)}</p>` : field('登录账号', 'username', '<input name="username" minlength="3" pattern="[a-zA-Z0-9_]+" required>')) + field('显示名称', 'displayName', `<input name="displayName" value="${escapeHtml(item?.displayName || '')}" required>`) + field(item ? '重设密码（留空不修改）' : '初始密码（至少 10 位）', 'password', `<input name="password" type="password" minlength="10" ${item ? '' : 'required'} autocomplete="new-password">`) + field('账号级别', 'role', `<select name="role"><option value="staff">店员</option><option value="manager" ${item?.role === 'manager' ? 'selected' : ''}>管理员</option></select>`) + field('默认工作台', 'workspace', `<select name="workspace"><option value="waiter" ${(item?.workspace || 'waiter') === 'waiter' ? 'selected' : ''}>服务员工作台</option><option value="cashier" ${item?.workspace === 'cashier' ? 'selected' : ''}>收银工作台</option><option value="admin" ${item?.workspace === 'admin' ? 'selected' : ''}>管理后台</option></select>`) + (item ? field('状态', 'status', `<select name="status"><option value="active">启用</option><option value="disabled" ${item.status === 'disabled' ? 'selected' : ''}>停用</option></select>`) : '') + `<fieldset class="permission-fields"><legend>授权模块</legend>${data.modules.map(m => `<label><input type="checkbox" name="permissions" value="${m}" ${(item ? item.permissions.includes(m) : m === 'workdesk') ? 'checked' : ''}>${adminTitles[m]}</label>`).join('')}<p class="dialog-hint">经营中心与数据报表分别授权；数据报表包含成本、毛利及报表明细中的付款人手机号查询与导出。营业日规则仅超管可修改。</p></fieldset>`;
+      fields = (item ? `<p class="dialog-hint">账号：${escapeHtml(item.username)}</p>` : field('登录账号', 'username', '<input name="username" minlength="3" pattern="[a-zA-Z0-9_]+" required>')) + field('显示名称', 'displayName', `<input name="displayName" value="${escapeHtml(item?.displayName || '')}" required>`) + field(item ? '重设密码（留空不修改）' : '初始密码（至少 10 位）', 'password', `<input name="password" type="password" minlength="10" ${item ? '' : 'required'} autocomplete="new-password">`) + field('账号级别', 'role', `<select name="role"><option value="staff">店员</option><option value="manager" ${item?.role === 'manager' ? 'selected' : ''}>管理员</option></select>`) + field('默认工作台', 'workspace', `<select name="workspace"><option value="waiter" ${(item?.workspace || 'waiter') === 'waiter' ? 'selected' : ''}>服务员工作台</option><option value="cashier" ${item?.workspace === 'cashier' ? 'selected' : ''}>收银工作台</option><option value="admin" ${item?.workspace === 'admin' ? 'selected' : ''}>管理后台</option></select>`) + (item ? field('状态', 'status', `<select name="status"><option value="active">启用</option><option value="disabled" ${item.status === 'disabled' ? 'selected' : ''}>停用</option></select>`) : '') + `<fieldset class="permission-fields"><legend>授权模块</legend>${data.modules.map(m => `<label><input type="checkbox" name="permissions" value="${m}" ${(item ? item.permissions.includes(m) : m === 'workdesk') ? 'checked' : ''}>${adminTitles[m]}</label>`).join('')}<p class="dialog-hint">经营中心与数据报表分别授权；数据报表包含成本、毛利及报表明细中的付款人手机号查询与导出。营业日规则仅超管可修改。退款处理需同时勾选订单管理，退款入口保持原位置。</p></fieldset>`;
     } else if (type === 'password') {
       title = '修改密码'; path = '/change-password'; fields = (adminState.account.role === 'super' ? '<p class="dialog-hint">已登录的超级管理员可直接设置新密码。</p>' : field('当前密码', 'oldPassword', '<input name="oldPassword" type="password" autocomplete="current-password" required>')) + field('新密码（10～128 位）', 'newPassword', '<input name="newPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required>') + field('确认新密码', 'confirmPassword', '<input name="confirmPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required>');
     } else if (type === 'new-table' || type === 'edit-table') {
@@ -868,7 +887,16 @@ async function openAdminDialog(type, item) {
   root.querySelector('[name="workspace"]')?.addEventListener('change', event => {
     const defaults = event.target.value === 'waiter' ? ['workdesk'] : event.target.value === 'cashier' ? ['pos','orders','group-buy'] : ['dashboard','orders','workdesk'];
     root.querySelectorAll('[name="permissions"]').forEach(input => { input.checked = defaults.includes(input.value); });
+    syncRefundPermission();
   });
+  const syncRefundPermission = () => {
+    const orders = root.querySelector('[name="permissions"][value="orders"]'), refunds = root.querySelector('[name="permissions"][value="refunds"]');
+    if (!orders || !refunds) return;
+    refunds.disabled = !orders.checked;
+    if (!orders.checked) refunds.checked = false;
+  };
+  root.querySelector('[name="permissions"][value="orders"]')?.addEventListener('change', syncRefundPermission);
+  syncRefundPermission();
   root.querySelectorAll('[data-close-dialog]').forEach(button => button.onclick = close);
   root.querySelector('.admin-dialog-backdrop').onclick = event => { if (event.target.classList.contains('admin-dialog-backdrop')) close(); };
   if (type === 'review-refund') {
@@ -1011,7 +1039,7 @@ async function openAdminDialog(type, item) {
 
 if (isManagementSurface) {
   setInterval(async () => {
-    if (document.hidden || !adminState.account || adminState.dialog || adminPolling) return;
+    if (document.hidden || !adminState.account || adminState.dialog || adminPolling || document.activeElement?.matches('#order-phone-search input')) return;
     adminPolling = true;
     try {
       if (adminState.section === 'dashboard' || adminState.section === 'orders') {
@@ -1030,7 +1058,7 @@ if (isManagementSurface) {
           await renderAdmin();
         }
         if (newOrderCount) adminNotice(`收到 ${newOrderCount} 笔新订单，请及时处理`);
-        if (newRefundCount && ['super', 'manager'].includes(adminState.account.role)) adminNotice(`收到 ${newRefundCount} 笔新的退款申请，请及时审核`);
+        if (newRefundCount && canProcessRefunds(adminState.account)) adminNotice(`收到 ${newRefundCount} 笔新的退款申请，请及时审核`);
       } else if (adminState.section === 'products' || adminState.section === 'tables' || adminState.section === 'storage' || adminState.section === 'members') {
         await renderAdmin();
       }
