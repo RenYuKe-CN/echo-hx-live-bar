@@ -36,7 +36,7 @@ export function receiptLines(data,{paperWidth=58,template=receiptTemplate(),repr
   const add=(text,options={})=>{for(const piece of wrap(text,options.size==='large'?Math.floor(width/2):width))lines.push({text:piece,align:options.align||'left',size:options.size||'normal'});};
   const separator=()=>add('-'.repeat(width));
   const pair=(label,value)=>{const text=receiptText(label),right=receiptText(value);if(cells(text)+cells(right)+1>width){add(text);add(right,{align:'right'});}else add(text+' '.repeat(width-cells(text)-cells(right))+right);};
-  add(template.storeNameOverride?.trim()||data.storeName,{align:'center',size:'large'});
+  add(template.storeNameOverride?.trim()||data.receiptStoreName||data.storeName,{align:'center',size:'large'});
   if(template.logoEnabled)lines.push({type:'logo',url:template.logoUrl});
   for(const line of template.headerLines)add(line.text,line);
   add(data.scope==='order'?'订单小票':data.sessionStatus==='closed'?'整桌消费账单':'消费清单（进行中）',{align:'center',size:'bold'});

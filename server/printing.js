@@ -18,7 +18,11 @@ export function receiptPreview(scope,targetId,printerId,operator='') {
   if(!['order','bill'].includes(scope))throw commerceError('请选择订单或桌台账单');
   const data=scope==='order'?orderReceipt(targetId):billData(targetId),template=receiptTemplate();
   const printer=db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(printerId);
-  const paperWidth=printer?.paper_width||58,revision=hash([data.revision,template.revision,paperWidth]);
+  // A new receipt follows today's heading settings, even for a closed bill.
+  // Keep the bill's historical name and financial revision intact; freeze the
+  // resolved heading separately so later reprints retain the printed name.
+  data.receiptStoreName=template.storeNameOverride?.trim()||storeName();
+  const paperWidth=printer?.paper_width||58,revision=hash([data.revision,template.revision,paperWidth,data.receiptStoreName]);
   const original=db.prepare('SELECT revision FROM bill_snapshots WHERE session_id=?').get(data.sessionId);
   if(data.sessionStatus==='closed'&&original&&original.revision!==data.revision)data.adjustedAfterClose=true;
   return {data,template,paperWidth,revision,lines:receiptLines(data,{paperWidth,template,operator})};

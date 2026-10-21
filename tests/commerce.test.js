@@ -164,6 +164,43 @@ test('receipt names follow branding in previews, allow a separate saved name and
   assert.equal((await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:first.revision,reprintOf:first.id,paperChecked:true,reason:'需要原版小票'})).status,201);
   const copy=calls.filter(c=>c.action==='printMsg').at(-1).payload.content;assert.match(copy,/<CB>小票专用店名<\/CB>/);assert.equal(copy.includes('联动门店'),false);
 });
+test('new receipts for closed bills use the current configured heading without changing historical bills or printed originals',async()=>{
+  const oldName='Echo HX Live Bar',newName='Echo 回响 Live Bar';
+  const heading=p=>p.lines.slice(0,p.lines.findIndex(line=>line.size!=='large')).map(line=>line.text).join('');
+  db.prepare('UPDATE stores SET name=? WHERE id=1').run(oldName);addOrder(100,'2026-10-13 10:00:00',3800);
+  assert.equal((await call('/admin/tables/1/close',{method:'POST',body:{}})).status,200);
+  const closed=db.prepare('SELECT snapshot_json FROM bill_snapshots WHERE session_id=1').get().snapshot_json;
+  const before=(await preview()).body,calls=feieMock({printed:true});assert.equal(heading(before),oldName);
+  const original=(await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:before.revision})).body.job;
+  await call(`/admin/printing/jobs/${original.id}/check`,{method:'POST',body:{}});
+  const legacy=JSON.parse(db.prepare('SELECT snapshot_json FROM print_jobs WHERE id=?').get(original.id).snapshot_json);
+  delete legacy.data.receiptStoreName;db.prepare('UPDATE print_jobs SET snapshot_json=? WHERE id=?').run(JSON.stringify(legacy),original.id);
+  const entries=(await call('/admin/mini-page')).body.entries.map(e=>({...e,title:e.key==='app_name'?newName:e.title}));
+  assert.equal((await call('/admin/mini-page',{method:'PUT',body:{entries}})).status,200);
+  const sample=(await call('/admin/printing/template/preview',{method:'POST',body:{template:{},paperWidth:58}})).body;
+  const current=(await preview()).body,order=(await call(`/admin/printing/preview?scope=order&targetId=100&printerId=${printerId}`)).body;
+  assert.equal(heading(sample),newName);assert.equal(heading(current),newName);assert.equal(heading(order),newName);
+  assert.equal(current.data.storeName,oldName);assert.equal(current.data.revision,before.data.revision);assert.equal(current.data.adjustedAfterClose,undefined);
+  assert.notEqual(current.revision,before.revision);
+  assert.equal((await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:before.revision})).status,409);
+  const fresh=(await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:current.revision})).body.job;
+  assert.notEqual(fresh.id,original.id);assert.equal(heading(fresh),newName);
+  assert.equal(db.prepare('SELECT snapshot_json FROM bill_snapshots WHERE session_id=1').get().snapshot_json,closed);
+  assert.equal(heading((await call(`/admin/printing/jobs/${original.id}`)).body.job),oldName);
+  assert.equal((await call('/admin/printing/template',{method:'PUT',body:{storeNameOverride:'小票独立店名'}})).status,200);
+  assert.equal(heading((await preview()).body),'小票独立店名');
+  assert.equal(heading((await call(`/admin/printing/preview?scope=order&targetId=100&printerId=${printerId}`)).body),'小票独立店名');
+  // Both legacy snapshots and new snapshots retain the name actually printed.
+  for(const job of [original,fresh]) {
+    await call(`/admin/printing/jobs/${job.id}/check`,{method:'POST',body:{}});
+    const copy=await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:job.revision,reprintOf:job.id,paperChecked:true,reason:'核对原版店名'});
+    assert.equal(copy.status,201);assert.equal(heading(copy.body.job),job.id===original.id?oldName:newName);
+    assert.equal(heading((await call(`/admin/printing/jobs/${job.id}`)).body.job),job.id===original.id?oldName:newName);
+  }
+  const copies=calls.filter(c=>c.action==='printMsg').slice(-2).map(c=>c.payload.content);
+  assert.match(copies[0],/<CB>Echo HX Live Bar<\/CB>/);assert.equal(copies[0].includes('小票独立店名'),false);
+  assert.equal(copies[1].includes('<CB>Echo 回响 Live '),true);assert.equal(copies[1].includes('小票独立店名'),false);
+});
 test('disabled Feie cannot enqueue or fake a successful print',async()=>{
   addOrder(100,'2026-10-13 10:00:00',3800);const p=(await preview()).body;
   assert.equal((await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:p.revision})).status,503);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM print_jobs').get().n,0);

@@ -7,6 +7,7 @@ import { refundGroups, refundStockSelection } from './refund-stock-view.js';
 import { canProcessRefunds } from '../shared/refund-permission.js';
 import { ordersContent } from './orders-admin.js';
 import { mountWorkdesk } from './workdesk.js';
+import { canAccessAdminSection, createAdminNavigation, defaultAdminSection, workspaceHome } from './admin-navigation.js';
 import './style.css';
 import './price-overrides.css';
 import './membership-rules.css';
@@ -245,22 +246,13 @@ let adminPolling = false;
 const adminModules = [['workdesk','服务工作台'],['dashboard','经营中心'],['mini-page','小程序页面'],['pos','收银点单'],['shifts','收银交接班'],['orders','订单管理'],['bills','桌台账单'],['printing','小票打印'],['tables','桌台管理'],['members','会员管理'],['storage','存酒管理'],['group-buy','团购核销'],['products','商品与库存'],['wallet','储值活动'],['rewards','积分兑换'],['coupons','优惠券管理'],['messages','消息中心'],['reports','数据报表'],['losses','赠酒报损'],['accounts','账号管理'],['logs','操作日志'],['settings','接口配置'],['backups','备份与恢复']];
 const adminApi = (path, options = {}) => api(`/admin${path}`, options);
 const adminTitles = { ...Object.fromEntries(adminModules), refunds: '退款处理' };
-const canAdminSection=id=>adminState.account?.permissions.includes(['bills','printing'].includes(id)?'orders':id==='shifts'?'pos':id);
-const adminGroups = [
-  { title: '经营中心', sections: ['dashboard'] },
-  { title: '数据报表', sections: ['reports'] },
-  { title: '收银与订单', sections: ['workdesk', 'pos', 'shifts', 'orders', 'bills', 'group-buy', 'printing'] },
-  { title: '桌台管理', sections: ['tables'] },
-  { title: '会员中心', sections: ['members', 'storage', 'wallet', 'rewards', 'coupons', 'messages'] },
-  { title: '商品与库存', sections: ['products', 'losses'] },
-  { title: '系统设置', sections: ['mini-page', 'accounts', 'logs', 'settings', 'backups'] }
-];
+const canAdminSection=id=>canAccessAdminSection(adminState.account,id);
+const adminNavigation = createAdminNavigation();
 
 function organizeAdminNavigation() {
-  const permissions = adminState.account.permissions;
-  const groups = adminGroups.map(group => ({ ...group, sections: group.sections.filter(id => canAdminSection(id)) })).filter(group => group.sections.length);
-  const current = groups.find(group => group.sections.includes(adminState.section));
-  document.querySelector('.side-nav').innerHTML = groups.map(group => `<button type="button" class="admin-group-link ${group === current ? 'current' : ''}" data-admin-section="${group === current ? adminState.section : group.sections[0]}" ${group === current ? 'aria-current="true"' : ''}>${group.title}</button>`).join('');
+  const groups = adminNavigation.groups(adminState.account, adminState.section);
+  const current = groups.find(group => group.active);
+  document.querySelector('.side-nav').innerHTML = groups.map(group => `<button type="button" class="admin-group-link ${group.active ? 'current' : ''}" data-admin-section="${group.target}" ${group.active ? 'aria-current="true"' : ''}>${group.title}</button>`).join('');
   if (current?.sections.length > 1) document.querySelector('.admin-header').insertAdjacentHTML('afterend', `<nav class="admin-section-tabs" aria-label="${current.title}">${current.sections.map(id => `<button type="button" class="${id === adminState.section ? 'active' : ''}" data-admin-section="${id}" ${id === adminState.section ? 'aria-current="page"' : ''}>${adminTitles[id]}</button>`).join('')}</nav>`);
   document.querySelectorAll('[data-admin-section]').forEach(button => {
     if (!canAdminSection(button.dataset.adminSection)) button.remove();
@@ -412,25 +404,34 @@ async function refreshStoreBrand() {
 function selectWorkspaceHome() {
   const account = adminState.account;
   if (!account) return;
-  if (['/staff','/admin/staff'].includes(location.pathname) && account.permissions.includes('workdesk')) adminState.section = 'workdesk';
-  else if (['/cashier','/admin/cashier'].includes(location.pathname) && account.permissions.includes('pos')) adminState.section = 'pos';
-  else if (account.workspace === 'waiter') adminState.section = 'workdesk';
-  else if (account.workspace === 'cashier') adminState.section = 'pos';
-  else adminState.section = account.permissions.includes('dashboard') ? 'dashboard' : account.permissions.find(permission => permission !== 'refunds');
-  history.replaceState(null, '', adminState.section === 'workdesk' ? '/admin/staff' : account.workspace === 'cashier' ? '/admin/cashier' : '/admin');
+  adminNavigation.reset();
+  adminState.section = workspaceHome(account, location.pathname);
+  const cashierEntry = ['/cashier','/admin/cashier'].includes(location.pathname) || account.workspace === 'cashier';
+  history.replaceState(null, '', adminState.section === 'workdesk' ? '/admin/staff' : cashierEntry ? '/admin/cashier' : '/admin');
+}
+function openAdminSection(section, pathname) {
+  if (!canAdminSection(section)) return;
+  adminState.section = section;
+  const currentPath = ['/cashier','/admin/cashier'].includes(location.pathname) ? '/admin/cashier' : '/admin';
+  history.replaceState(null, '', section === 'workdesk' ? '/admin/staff' : pathname || currentPath);
+  return renderAdmin();
 }
 async function renderAdmin() {
   activeWorkdesk?.destroy(); activeWorkdesk = null;
   if (!adminState.account) return renderAdminLogin();
   const renderVersion = ++adminRenderVersion;
-  if (!canAdminSection(adminState.section)) adminState.section = adminState.account.permissions.find(permission => permission !== 'refunds') || 'dashboard';
+  if (!canAdminSection(adminState.section)) adminState.section = defaultAdminSection(adminState.account);
+  adminNavigation.visit(adminState.account, adminState.section);
   const renderingSection = adminState.section;
   if (renderingSection === 'workdesk') {
     await refreshStoreBrand();
     if (renderVersion !== adminRenderVersion || !adminState.account) return;
-    activeWorkdesk = mountWorkdesk({ root: document.querySelector('#app'), account: adminState.account, api: adminApi, brand: storeBrand,
-      logout: async () => { try { await adminApi('/logout', { method: 'POST' }); } finally { sessionStorage.removeItem('adminToken'); adminState.account = null; renderAdmin(); } },
-      switchWorkspace: mode => { adminState.section = mode === 'cashier' ? 'pos' : adminState.account.permissions.find(permission => !['workdesk','refunds'].includes(permission)); history.replaceState(null,'',mode === 'cashier' ? '/admin/cashier' : '/admin'); renderAdmin(); }
+    const groups = adminNavigation.groups(adminState.account), cashierTarget = groups.find(group => group.id === 'cashier')?.sections[0];
+    const returnTarget = adminNavigation.returnSection(adminState.account);
+    const canReturn = returnTarget && returnTarget !== 'workdesk' && (returnTarget !== cashierTarget || groups.some(group => !['workdesk','cashier'].includes(group.id)));
+    activeWorkdesk = mountWorkdesk({ root: document.querySelector('#app'), account: adminState.account, api: adminApi, brand: storeBrand, cashierTarget, canReturn,
+      logout: async () => { try { await adminApi('/logout', { method: 'POST' }); } finally { sessionStorage.removeItem('adminToken'); adminNavigation.reset(); adminState.account = null; renderAdmin(); } },
+      switchWorkspace: mode => openAdminSection(mode === 'cashier' ? cashierTarget : adminNavigation.returnSection(adminState.account), mode === 'cashier' ? '/admin/cashier' : '/admin')
     });
     return;
   }
@@ -449,6 +450,8 @@ async function renderAdmin() {
   document.querySelector('#app').innerHTML = `<main class="admin-shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">${escapeHtml([...storeBrand][0])}</span><div><strong>${escapeHtml(storeBrand)}</strong><small>${adminState.account.workspace === 'cashier' ? '收银工作台' : '运营管理台'}</small></div></div><div class="store-switcher">${escapeHtml(storeBrand)}</div><nav class="side-nav">${adminModules.filter(([id]) => canAdminSection(id)).map(([id, label]) => `<a class="${adminState.section === id ? 'current' : ''}" data-admin-section="${id}"><span>${label}</span></a>`).join('')}</nav><div class="sidebar-footer"><div class="staff-avatar">${escapeHtml(adminState.account.displayName.slice(0,1))}</div><div><strong>${escapeHtml(adminState.account.displayName)}</strong><small>${{super:'超级管理员',manager:'管理员',staff:'店员'}[adminState.account.role]}</small></div></div></aside><section class="admin-content"><header class="admin-header"><div><span class="eyebrow">${escapeHtml(storeBrand)} · ${adminState.account.workspace === 'cashier' ? '收银工作台' : '运营中心'}</span><h1>${adminTitles[adminState.section]}</h1></div><div class="header-actions"><button class="outline-button" data-action="password">修改密码</button><button class="outline-button" data-action="logout">退出登录</button><button class="outline-button" data-action="refresh">刷新数据</button></div></header>${content}</section></main><div id="admin-dialog-root"></div>${adminState.toast ? `<div class="toast admin-toast">${escapeHtml(adminState.toast)}</div>` : ''}`;
   organizeAdminNavigation();
   (document.querySelector('.admin-section-tabs') || document.querySelector('.admin-header')).insertAdjacentHTML('afterend', adminDataSummary(adminState.section, adminState.data || {}));
+  const inCashierArea = adminNavigation.groups(adminState.account, adminState.section).some(group => group.id === 'cashier' && group.active);
+  if (inCashierArea && canAdminSection('workdesk')) document.querySelector('.header-actions').insertAdjacentHTML('afterbegin', '<button class="outline-button admin-workspace-shortcut" data-admin-section="workdesk">服务工作台</button>');
   if (adminState.account.role === 'super' && adminState.section !== 'mini-page') {
     const shortcut = document.createElement('button');
     shortcut.className = 'outline-button';
@@ -456,7 +459,7 @@ async function renderAdmin() {
     shortcut.dataset.adminSection = 'mini-page';
     document.querySelector('.header-actions').prepend(shortcut);
   }
-  document.querySelectorAll('[data-admin-section]').forEach(button => button.onclick = () => { adminState.section = button.dataset.adminSection; renderAdmin(); });
+  document.querySelectorAll('[data-admin-section]').forEach(button => button.onclick = () => openAdminSection(button.dataset.adminSection));
   document.querySelector('[data-action="refresh"]')?.addEventListener('click', renderAdmin);
   bindAdminActions();
   const catalogContext={api:adminApi,data:adminState.data,account:adminState.account,refresh:renderAdmin,notify:adminNotice,onDialog:visible=>{adminState.dialog=visible?'catalog':null;}};
@@ -589,7 +592,7 @@ function bindAdminActions() {
   });
   document.querySelectorAll('[data-table-code]').forEach(button => button.onclick = () => openTableCode(adminState.data.tables.find(table => table.id === Number(button.dataset.tableCode))));
   action('[data-fulfill]', button => adminApi(`/rewards/redemptions/${button.dataset.fulfill}/fulfill`, { method: 'POST', body: '{}' }));
-  document.querySelectorAll('[data-admin-section]').forEach(button => button.onclick = () => { adminState.section = button.dataset.adminSection; renderAdmin(); });
+  document.querySelectorAll('[data-admin-section]').forEach(button => button.onclick = () => openAdminSection(button.dataset.adminSection));
   document.querySelectorAll('[data-action="new-product"],[data-action="new-table"],[data-action="new-storage"],[data-action="verify-group"],[data-action="new-wallet"]').forEach(button => button.onclick = () => openAdminDialog(button.dataset.action));
   document.querySelectorAll('[data-withdraw]').forEach(button => button.onclick = () => openAdminDialog('withdraw', adminState.data.records.find(r => r.id === Number(button.dataset.withdraw))));
   document.querySelectorAll('[data-adjust-stock]').forEach(button => button.onclick = () => openAdminDialog('stock', adminState.data.products.find(p => p.id === Number(button.dataset.adjustStock))));
@@ -617,7 +620,7 @@ function bindAdminActions() {
 
 
 
-  document.querySelector('[data-action="logout"]')?.addEventListener('click', async () => { try { await adminApi('/logout', { method:'POST' }); } finally { sessionStorage.removeItem('adminToken'); adminState.account = null; renderAdminLogin(); } });
+  document.querySelector('[data-action="logout"]')?.addEventListener('click', async () => { try { await adminApi('/logout', { method:'POST' }); } finally { sessionStorage.removeItem('adminToken'); adminNavigation.reset(); adminState.account = null; renderAdminLogin(); } });
   document.querySelector('#settings-form')?.addEventListener('submit', async event => { event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); button.disabled = true; try { await adminApi('/settings', { method:'PUT', body:JSON.stringify(Object.fromEntries(new FormData(form))) }); await renderAdmin(); adminNotice('配置已保存，请继续完成平台授权和联调'); } catch (error) { form.querySelector('.dialog-error').textContent = error.message; button.disabled = false; } });
   document.querySelector('#check-integrations')?.addEventListener('click', async event => { const button = event.currentTarget; button.disabled = true; try { const result = await adminApi('/settings/check', { method:'POST' }); adminNotice(result.message); } catch (error) { adminNotice(error.message); } finally { button.disabled = false; } });
   document.querySelector('#mini-page-form')?.addEventListener('submit', async event => { event.preventDefault(); const form = event.currentTarget; const values = Object.fromEntries(new FormData(form)); const entries = adminState.data.entries.map(({ key }) => ({ key, title: values[`title-${key}`], icon: values[`icon-${key}`] })); const button = form.querySelector('button'); button.disabled = true; try { await adminApi('/mini-page', { method:'PUT', body:JSON.stringify({ entries }) }); await renderAdmin(); adminNotice('页面设置已保存'); } catch (error) { form.querySelector('.dialog-error').textContent = error.message; button.disabled = false; } });
