@@ -47,6 +47,8 @@ test('dashboard and reports can be granted independently to either managed role,
       assert.equal((await call('/summary', { token })).status, permissions.includes('dashboard') ? 200 : 403);
       const allowed = permissions.includes('reports'), report = await call('/reports?date=2026-10-13', { token });
       assert.equal(report.status, allowed ? 200 : 403);
+      assert.equal((await call('/reports/details?date=2026-10-13', { token })).status, allowed ? 200 : 403);
+      assert.equal((await call('/reports/orders/999999?date=2026-10-13', { token })).status, allowed ? 404 : 403);
       if (allowed) {
         assert.equal(report.body.canConfigure, false);
         assert.ok(Object.hasOwn(report.body.totals, 'orderCost'));

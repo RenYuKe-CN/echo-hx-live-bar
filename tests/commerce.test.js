@@ -103,12 +103,54 @@ test('settlements preserve actual arrival dates and record only correction diffe
   assert.equal((await call(url,{method:'PATCH',body:{...body,amount:74}})).status,409);
   const next=await call('/admin/reports?startAt=2026-10-14T06:00&endAt=2026-10-14T08:00');assert.equal(next.body.totals.settlementReceived,-5);
 });
-test('Excel export has seven typed, filterable sheets and preserves exact identifiers and coupon reconciliation',async()=>{
-  ledgerFixture();const response=await call('/admin/reports/export?'+windowQuery,{binary:true});assert.equal(response.status,200);assert.ok(response.body.subarray(0,2).equals(Buffer.from('PK')));assert.ok(decodeURIComponent(response.headers.get('content-disposition')).includes('营业明细-202610131200-202610140600.xlsx'));
-  const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(response.body);assert.deepEqual(workbook.worksheets.map(s=>s.name),['当日概览','桌台账单','订单明细','商品明细','收付流水','基础货品流水','会员充值记录']);
+test('Excel export has ten readable, typed sheets and preserves exact identifiers and coupon reconciliation',async()=>{
+  ledgerFixture();const response=await call('/admin/reports/export?'+windowQuery+'&source=meituan&q=ORDER-102&page=2',{binary:true});assert.equal(response.status,200);assert.ok(response.body.subarray(0,2).equals(Buffer.from('PK')));assert.ok(decodeURIComponent(response.headers.get('content-disposition')).includes('营业明细-202610131200-202610140600.xlsx'));
+  const workbook=new ExcelJS.Workbook();await workbook.xlsx.load(response.body);assert.deepEqual(workbook.worksheets.map(s=>s.name),['营业总览','订单明细','桌台账单','商品明细','收付流水','退款明细','团购结算','基础货品流水','会员充值记录','统计说明']);
   const orders=workbook.getWorksheet('订单明细');assert.ok(orders.autoFilter);assert.equal(orders.views[0].ySplit,4);const order=orders.getRows(5,orders.rowCount-4).find(r=>r.getCell(1).value==='000012345678901234567890');assert.equal(typeof order.getCell(1).value,'string');const amountColumn=orders.getRow(4).values.indexOf('结算金额');assert.equal(typeof order.getCell(amountColumn).value,'number');assert.ok(order.getCell(5).value instanceof Date);
   const productRows=workbook.getWorksheet('商品明细').getRows(5,workbook.getWorksheet('商品明细').rowCount-4);const product=productRows.find(r=>r.getCell(1).value==='000012345678901234567890');assert.equal(product.getCell(8).value,110);assert.equal(product.getCell(9).value,10);assert.equal(product.getCell(10).value,100);
   assert.equal(productRows.filter(r=>r.getCell(4).value==='套餐').length,1);assert.equal(JSON.stringify(workbook.model).includes('fixture-ukey'),false);
+  const summary=workbook.getWorksheet('营业总览');assert.equal(summary.getCell('A6').value,214.99);assert.equal(summary.getCell('F6').value,137.98);assert.equal(summary.getCell('N6').value,695);assert.equal(summary.getCell('J6').numFmt,'0.00%');assert.equal(summary.getCell('J6').value,137.98/214.99);
+  const revenueColumn=orders.getRow(4).values.indexOf('本期净销售贡献');assert.equal(Math.round(orders.getRows(5,orders.rowCount-4).reduce((n,r)=>n+r.getCell(revenueColumn).value,0)*100),21499);
+  const checks=workbook.getWorksheet('统计说明');for(let r=14;r<=checks.rowCount;r++)assert.equal(checks.getCell(r,4).value,0);
+});
+test('interactive report charts and paginated drill-downs reconcile the full window including cross-period refunds',async()=>{
+  ledgerFixture();const response=await call('/admin/reports?'+windowQuery),r=response.body;
+  assert.equal(r.totals.grossMarginRate,137.98/214.99);
+  assert.equal(Math.round(r.bySource.reduce((n,s)=>n+s.revenue,0)*100),21499);
+  assert.equal(r.externalChannels.reduce((n,s)=>n+s.net,0),695);
+  for(const key of ['revenue','profit','orderCost','lossCost'])assert.equal(Math.round(r.trend.reduce((n,s)=>n+s[key],0)*100),Math.round(r.totals[key]*100));
+  const page=await call('/admin/reports/details?'+windowQuery+'&q=13800138001&pageSize=2&page=2');assert.equal(page.status,200);assert.equal(page.body.pagination.total,5);assert.equal(page.body.pagination.page,2);assert.equal(page.body.rows.length,2);
+  assert.ok(page.body.rows.every(o=>o.payerPhone==='13800138001'));assert.equal(JSON.stringify(page.body).includes('provider_json'),false);
+  const source=await call('/admin/reports/details?'+windowQuery+'&source=meituan');assert.equal(source.body.rows.length,1);assert.equal(source.body.rows[0].orderNo,'ORDER-102');
+  const details=await call('/admin/reports/orders/90?'+windowQuery);assert.equal(details.body.order.scope,'跨期退款');assert.equal(details.body.order.revenue,-25);assert.equal(details.body.order.returnedCost,5);
+  const refundSegment=r.trend.find(s=>s.startAt==='2026-10-13T13:00');const filtered=await call('/admin/reports/details?'+new URLSearchParams({startAt:'2026-10-13T12:00',endAt:'2026-10-14T06:00',segmentStart:refundSegment.startAt,segmentEnd:refundSegment.endAt}));assert.deepEqual(filtered.body.rows.map(o=>o.id),[90]);
+  const arrived=await call('/admin/reports/details?'+windowQuery+'&kind=flows&channel=settlement:meituan');assert.equal(arrived.body.rows.length,1);assert.equal(arrived.body.rows[0].amount,80);assert.equal(arrived.body.rows[0].external,true);
+  const internal=await call('/admin/reports/details?'+windowQuery+'&kind=flows&channel=meituan');assert.equal(internal.body.rows.length,1);assert.equal(internal.body.rows[0].external,false);
+  assert.equal((await call('/admin/reports/details?'+windowQuery+'&segmentStart=2026-10-12T12:00&segmentEnd=2026-10-13T13:00')).status,400);
+  assert.equal((await call('/admin/reports/orders/104?'+windowQuery)).status,404);
+});
+test('missing historical costs stay unknown in cards, trends and Excel instead of fabricating zero profit',async()=>{
+  ledgerFixture();db.prepare("UPDATE refund_transactions SET returned_cost_cents=NULL WHERE out_refund_no='REFUND-OLD'").run();
+  const r=(await call('/admin/reports?'+windowQuery)).body;assert.equal(r.totals.orderCost,null);assert.equal(r.totals.profit,null);assert.equal(r.totals.grossMarginRate,null);assert.ok(r.trend.some(s=>s.profit===null));
+  const exported=await call('/admin/reports/export?'+windowQuery,{binary:true}),book=new ExcelJS.Workbook();await book.xlsx.load(exported.body);assert.equal(book.getWorksheet('营业总览').getCell('F6').value,null);assert.equal(book.getWorksheet('营业总览').getCell('J6').value,null);
+});
+test('sales rankings never combine different historical units of the same product into a false quantity',async()=>{
+  addOrder(100,'2026-10-13 04:20:00',7600,{quantity:2});addOrder(101,'2026-10-13 05:20:00',20000);
+  db.prepare("UPDATE order_items SET unit_snapshot=CASE order_id WHEN 100 THEN '瓶' ELSE '箱' END").run();
+  const r=(await call('/admin/reports?'+windowQuery)).body;
+  assert.equal(r.byProduct.length,2);assert.equal(r.byProduct.find(p=>p.unit==='瓶').quantity,2);assert.equal(r.byProduct.find(p=>p.unit==='箱').quantity,1);
+  assert.equal(r.byProduct.reduce((n,p)=>n+p.amount,0),276);
+});
+test('pending customer applications remain queryable without reducing sales, and historical group arrivals exclude later corrections',async()=>{
+  ledgerFixture();addOrder(89,'2026-10-12 13:00:00',2000);
+  db.prepare("INSERT INTO refund_requests(order_id,user_id,amount_cents,reason,created_at) VALUES(89,1,500,'待审核不扣数','2026-10-13 09:00:00')").run();
+  const r=(await call('/admin/reports?'+windowQuery)).body;assert.equal(r.totals.pendingRefunds,1);assert.equal(r.totals.revenue,214.99);
+  const pending=(await call('/admin/reports/details?'+windowQuery+'&status=pendingRefund')).body;assert.deepEqual(pending.rows.map(o=>o.id),[89]);assert.equal(pending.rows[0].revenue,0);
+  const detail=(await call('/admin/reports/orders/89?'+windowQuery)).body.order;assert.equal(detail.refunds[0].confirmed,null);assert.equal(detail.refunds[0].statusLabel,'待审核申请');
+  db.prepare("UPDATE group_buy_redemptions SET expected_settlement_cents=9000 WHERE id='redemption'").run();
+  assert.equal((await call('/admin/group-buy/redemption/settlement',{method:'PATCH',body:{amount:75,settledAt:'2026-10-14T07:00',requestId:crypto.randomUUID()}})).status,200);
+  const before=(await call('/admin/reports/details?'+windowQuery+'&kind=redemptions')).body.rows[0];assert.equal(before.registered,80);assert.equal(before.inRangeReceived,80);assert.equal(before.pending,10);assert.equal(before.settlements.length,1);
+  const after=(await call('/admin/reports/details?startAt=2026-10-14T06:00&endAt=2026-10-14T08:00&kind=redemptions')).body.rows[0];assert.equal(after.registered,75);assert.equal(after.inRangeReceived,-5);assert.equal(after.paidInRange,false);
 });
 test('export identifies payers by their own phone and stable member ID after a nickname change, including unbound accounts',async()=>{
   const sameName='同名会员';db.prepare('UPDATE users SET nickname=? WHERE id=1').run(sameName);

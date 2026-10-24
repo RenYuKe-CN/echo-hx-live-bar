@@ -1,6 +1,7 @@
 import { catalogContent, bindCatalog } from './catalog-admin.js';
 import { groupBuyContent, bindGroupBuy } from './group-buy-admin.js';
-import { billsContent,printingContent,reportsContent,bindCommerce } from './commerce-admin.js';
+import { billsContent,printingContent,bindCommerce } from './commerce-admin.js';
+import { reportsContent,bindReports } from './reports-admin.js';
 import { shiftsContent, bindShifts } from './shifts-admin.js';
 import { logsContent, bindLogs } from './logs-admin.js';
 import { refundGroups, refundStockSelection } from './refund-stock-view.js';
@@ -14,7 +15,6 @@ import './membership-rules.css';
 import './payment-sheet.css';
 import './admin-operations.css';
 import './mini-page-admin.css';
-import './report-trend.css';
 import './order-note.css';
 
 let products = [
@@ -239,6 +239,7 @@ async function createOrder() {
 const adminState = { section: 'dashboard', productFilter: {}, logFilter: {}, logExport: null, data: null, toast: '', dialog: null, account: null, orderPhone: '', orderPhoneDraft: '', memberPhone: '', storagePhone: '', reportRange: {}, pages: { bills: 1, accounts: 1, logs: 1, products: 1, tables: 1, orders: 1, members: 1, storage: 1, storageMovements: 1, groupBuy: 1, wallet: 1, rewards: 1, coupons: 1, messages: 1, redemptions: 1, losses: 1, reportDaily: 1 }, pageSizes: { bills: 20, accounts: 20, logs: 20, products: 20, tables: 20, orders: 20, members: 20, storage: 20, storageMovements: 20, groupBuy: 20, wallet: 20, rewards: 20, coupons: 20, messages: 20, redemptions: 20, losses: 20, reportDaily: 20 }, pos: { phone: '', tableId: '', items: {}, method: 'cash', mode: 'order', packageId: '', requestId: crypto.randomUUID(), error: '' } };
 const isManagementSurface = /^\/(admin|staff|cashier)(\/|$)/.test(location.pathname);
 let activeWorkdesk = null;
+let activeReport = null;
 let adminRenderVersion = 0;
 let lastOrderEventCursor = null;
 let lastPendingRefundCount = null;
@@ -306,28 +307,6 @@ function adminRefundActions(order) {
   return buttons.join(' ');
 }
 function reportNumber(value) { return Number(String(value ?? 0).replace(/[^0-9.-]/g, '')) || 0; }
-function reportTrendChart(daily) {
-  const rows = daily.slice().reverse();
-  const width = Math.max(620, rows.length * 86 + 64);
-  const left = 42, right = width - 22, top = 18, bottom = 178;
-  const values = rows.flatMap(row => [reportNumber(row.revenue), reportNumber(row.profit)]);
-  const high = Math.max(1, ...values), low = Math.min(0, ...values);
-  const y = value => top + (high - value) / (high - low) * (bottom - top);
-  const x = index => left + (right - left) * (index + 0.5) / Math.max(rows.length, 1);
-  const zero = y(0);
-  const points = rows.map((row, index) => `${x(index)},${y(reportNumber(row.profit))}`).join(' ');
-  return `<div class="trend-scroll"><svg class="trend-plot" width="${width}" height="260" viewBox="0 0 ${width} 260" role="img" aria-label="每日订单净销售额柱形图与商品毛利估算折线图，具体金额见下方每日经营明细">
-    <line x1="${left}" x2="${right}" y1="${zero}" y2="${zero}" class="trend-zero"/>
-    ${rows.map((row, index) => { const cx = x(index), revenue = reportNumber(row.revenue), profit = reportNumber(row.profit); return `<g>
-      <rect class="trend-revenue" x="${cx - 12}" y="${Math.min(y(revenue), zero)}" width="24" height="${Math.max(Math.abs(zero - y(revenue)), 2)}"><title>${row.day} 订单净销售额 ${adminMoney(revenue)}</title></rect>
-      <text class="trend-date" x="${cx}" y="201">${escapeHtml(row.day.slice(5))}</text>
-      <text class="trend-revenue-value" x="${cx}" y="224">${adminMoney(revenue)}</text>
-      <text class="trend-profit-value" x="${cx}" y="244">${adminMoney(profit)}</text>
-    </g>`; }).join('')}
-    ${rows.length > 1 ? `<polyline class="trend-profit-line" points="${points}"/>` : ''}
-    ${rows.map((row, index) => `<circle class="trend-profit-point" cx="${x(index)}" cy="${y(reportNumber(row.profit))}" r="4"><title>${row.day} 商品毛利估算 ${adminMoney(row.profit)}</title></circle>`).join('')}
-  </svg></div>`;
-}
 function localDateString(date = new Date()) { const year = date.getFullYear(); const month = String(date.getMonth() + 1).padStart(2, '0'); const day = String(date.getDate()).padStart(2, '0'); return `${year}-${month}-${day}`; }
 function reportPresetRange(preset) {
   const end = new Date();
@@ -405,6 +384,7 @@ function selectWorkspaceHome() {
   const account = adminState.account;
   if (!account) return;
   adminNavigation.reset();
+  adminState.reportFilters = {};
   adminState.section = workspaceHome(account, location.pathname);
   const cashierEntry = ['/cashier','/admin/cashier'].includes(location.pathname) || account.workspace === 'cashier';
   history.replaceState(null, '', adminState.section === 'workdesk' ? '/admin/staff' : cashierEntry ? '/admin/cashier' : '/admin');
@@ -418,6 +398,7 @@ function openAdminSection(section, pathname) {
 }
 async function renderAdmin() {
   activeWorkdesk?.destroy(); activeWorkdesk = null;
+  activeReport?.destroy(); activeReport = null;
   if (!adminState.account) return renderAdminLogin();
   const renderVersion = ++adminRenderVersion;
   if (!canAdminSection(adminState.section)) adminState.section = defaultAdminSection(adminState.account);
@@ -467,7 +448,8 @@ async function renderAdmin() {
   if(adminState.section==='group-buy' && adminState.data?.mappings)bindGroupBuy(catalogContext);
   if(adminState.section==='shifts' && adminState.data?.history)bindShifts(catalogContext);
   if(adminState.section==='logs' && adminState.data?.logs)bindLogs({...catalogContext,filters:adminState.data.filters,lastExport:adminState.logExport,onFilter:async filters=>{adminState.logFilter=filters;adminState.pages.logs=1;await renderAdmin();},onExport:batch=>{adminState.logExport=batch;},onCleaned:batch=>{adminState.logExport=batch;}});
-  bindCommerce({...catalogContext,onReportRange:range=>{adminState.reportRange=range;renderAdmin();}});
+  bindCommerce(catalogContext);
+  if(adminState.section==='reports' && adminState.data?.totals)activeReport=bindReports({...catalogContext,filters:adminState.reportFilters||=( {} ),onReportRange:range=>{adminState.reportRange=range;adminState.reportFilters={};renderAdmin();}});
 }
 async function renderAdminLogin() {
   const version = ++adminRenderVersion;
@@ -501,7 +483,7 @@ function adminContent(section, data) {
   if (section === 'coupons') return `<div class="toolbar"><button class="primary-small" data-action="new-coupon">新增优惠券</button><span>先计算会员价，再计算优惠券；优惠券不可使用赠金。商品兑换券会扣库存并按进货价计入成本。</span></div>${adminTable(['优惠券','类型 / 优惠','门槛','发放数','每人限领','有效期','状态','操作'], data.coupons.map(c => `<tr><td><strong>${escapeHtml(c.name)}</strong><small>${c.isProductVoucher ? `赠送：${escapeHtml(c.giftProductName || '指定商品')}` : escapeHtml(c.description || '')}</small></td><td>${c.isProductVoucher ? '<span class="green-text">商品兑换券 · 1 件</span>' : c.type === 'fixed' ? adminMoney(c.amount) : `${(Number(c.discountRate) * 10).toFixed(1)} 折`}</td><td>${c.isProductVoucher ? '-' : adminMoney(c.minOrder)}</td><td>${c.issuedQuantity} / ${c.totalQuantity || '不限'}</td><td>${c.perUserLimit}</td><td>${c.validDays ? `领取后 ${c.validDays} 天` : escapeHtml(c.validUntil || '长期有效')}</td><td>${c.status === 'active' ? '启用' : '停用'}</td><td><button class="table-action" data-edit-coupon="${c.id}">编辑</button> <button class="table-action" data-issue-coupon="${c.id}" ${c.status !== 'active' ? 'disabled' : ''}>发放</button> <button class="table-action" data-coupon-status="${c.id}" data-status="${c.status === 'active' ? 'inactive' : 'active'}">${c.status === 'active' ? '停用' : '启用'}</button></td></tr>`).join(''))}${adminPagination('coupons', data.pagination)}<section class="panel"><h2>最近发放记录</h2>${adminTable(['会员','手机号','优惠券','状态','发放时间','有效期'], (data.issued || []).map(r => `<tr><td>${escapeHtml(r.nickname)}</td><td>${escapeHtml(r.phone || '未绑定')}</td><td>${escapeHtml(r.coupon_name)}</td><td>${escapeHtml(({ available:'可使用', locked:'订单占用', used:'已使用', expired:'已过期', cancelled:'已作废' })[r.status] || r.status)}</td><td>${escapeHtml(r.issued_at)}</td><td>${escapeHtml(r.expired_at || '长期')}</td></tr>`).join(''))}</section>`;
   if (section === 'messages') return `<div class="toolbar"><button class="primary-small" data-action="send-message">发送消息</button><span>站内消息始终发送；微信订阅消息需要用户一次性授权。微信失败不影响站内消息。</span></div><section class="panel"><h2>消息模板</h2>${adminTable(['模板','标识','微信模板 ID','字段映射','状态','操作'], data.templates.map(t => `<tr><td><strong>${escapeHtml(t.name)}</strong><small>${escapeHtml(t.title_template)}</small></td><td><code>${escapeHtml(t.template_key)}</code></td><td>${escapeHtml(t.wechat_template_id || '未配置')}</td><td><code>${escapeHtml(t.field_mapping || '{}')}</code></td><td>${t.enabled ? '启用' : '停用'}</td><td><button class="table-action" data-edit-message-template="${t.id}">编辑</button></td></tr>`).join(''))}</section><section class="panel"><h2>发送记录</h2>${adminTable(['时间','名称','模板','范围','接收人数','状态'], data.campaigns.map(c => `<tr><td>${escapeHtml(c.created_at)}</td><td>${escapeHtml(c.name)}</td><td>${escapeHtml(c.template_name || '优惠券发放')}</td><td>${c.audience_type === 'all' ? '全部会员' : '指定会员'}</td><td>${c.recipient_count}</td><td>${escapeHtml(c.status)}</td></tr>`).join(''))}${adminPagination('messages', data.pagination)}</section>`;
   if (section === 'mini-page') return `<section class="panel mini-page-panel"><h2>小程序首页</h2><p>店铺名称统一用于小程序导航、会员卡、授权提示和管理后台，修改后下次打开或刷新生效。微信搜索展示的正式名称仍需在微信公众平台修改。</p><form id="mini-page-form"><div class="mini-page-fields">${data.entries.filter(entry => entry.type === 'text').map(entry => `<label class="admin-field"><span>${miniEntryLabels[entry.key]}</span><input name="title-${entry.key}" maxlength="30" value="${escapeHtml(entry.title)}" required></label>`).join('')}</div><h2>会员中心入口</h2><div class="mini-page-fields">${data.entries.filter(entry => entry.type !== 'text').map(entry => `<div class="mini-entry-field"><strong>${miniEntryLabels[entry.key]}</strong><label class="admin-field"><span>显示名称</span><input name="title-${entry.key}" maxlength="8" value="${escapeHtml(entry.title)}" required></label><label class="admin-field"><span>图标</span><select name="icon-${entry.key}">${data.icons.map(icon => `<option value="${icon}" ${icon === entry.icon ? 'selected' : ''}>${miniIconLabels[icon]}</option>`).join('')}</select></label></div>`).join('')}</div><button class="primary-small">保存页面设置</button><p class="dialog-error"></p></form></section>`;
-  if (section === 'reports') return reportsContent(data,{trendHtml:data.daily?.length>1&&data.daily.every(d=>d.profit!=null)?reportTrendChart(data.daily):''});
+  if (section === 'reports') return reportsContent(data);
   if (section === 'printing') return printingContent(data);
   if (section === 'bills') return billsContent(data)+adminPagination('bills',data.pagination);
   if (section === 'losses') return `<div class="toolbar"><button class="primary-small" data-action="new-loss">上报赠酒 / 报损</button></div>${adminTable(['时间','类型','商品','数量','成本','原因','操作人'], data.records.map(r => `<tr><td>${r.created_at}</td><td>${r.type === 'gift' ? '赠酒' : '报损'}</td><td>${escapeHtml(r.product_name)}</td><td>${r.quantity}</td><td>${adminState.account.role === 'super' ? adminMoney(r.cost) : '-'}</td><td>${escapeHtml(r.reason)}</td><td>${escapeHtml(r.operator)}</td></tr>`).join(''))}${adminPagination('losses', data.pagination)}`;

@@ -1,8 +1,9 @@
 import QRCode from 'qrcode';
 import { db } from './db.js';
 import { storeName } from './branding.js';
-import { commerceError,commerceSettings,saveCommerceSettings,reportWindow,formatTime } from './business-time.js';
+import { commerceError,commerceSettings,saveCommerceSettings,reportWindow,formatTime,currentBusinessDate } from './business-time.js';
 import { businessReport,reportWorkbook } from './business-report.js';
+import { reportDetails,reportOrderDetail } from './report-views.js';
 import { billData } from './bills.js';
 import { receiptTemplate,saveReceiptTemplate,normalizeReceiptTemplate,receiptLines } from './receipts.js';
 import { receiptPreview,createPrintJob,checkPrintJob,printJobView,dispatchPrintJob,updateJobState } from './printing.js';
@@ -83,11 +84,13 @@ export function registerCommerceRoutes(router,{audit}) {
   router.put('/admin/reports/settings',safe((req,res)=>{superOnly(req);res.json({settings:saveCommerceSettings(req.body)});audit(req,'更新营业日和报表文件名规则');}));
   router.get('/admin/reports',safe((req,res)=>{
     const report=businessReport(reportWindow(req.query)),t=report.totals;
-    res.json({canConfigure:req.staff.role==='super',settings:commerceSettings(),daily:report.daily,dateRange:{startAt:report.window.start,endAt:report.window.end,timezone:report.window.timezone,filename:report.window.filename},totals:t,channels:report.channels,byProduct:report.byProduct.slice(0,50),flows:report.flows.slice(-50).reverse().map(f=>({...f,time:formatTime(f.time,report.window.timezone),amount:f.amount==null?null:f.amount/100})),today:{day:report.window.start.slice(0,10),revenue:t.revenue,profit:t.profit,orders:t.orders,orderCost:t.orderCost,lossCost:t.lossCost,recharge:t.rechargeReceived,offline:t.offlineReceived},generatedAt:report.generatedAt});
+    res.json({canConfigure:req.staff.role==='super',settings:commerceSettings(),currentBusinessDate:currentBusinessDate(),daily:report.daily,trend:report.trend,bySource:report.bySource,externalChannels:report.externalChannels,details:reportDetails(report),flows:report.flowViews.slice(-50).reverse(),dateRange:{startAt:report.window.start,endAt:report.window.end,timezone:report.window.timezone,filename:report.window.filename},totals:t,channels:report.channels,byProduct:report.byProduct.slice(0,50),productCount:report.byProduct.length,today:{day:report.window.start.slice(0,10),revenue:t.revenue,profit:t.profit,orders:t.orders,orderCost:t.orderCost,lossCost:t.lossCost,recharge:t.rechargeReceived,offline:t.offlineReceived},generatedAt:report.generatedAt});
   }));
+  router.get('/admin/reports/details',safe((req,res)=>{const report=businessReport(reportWindow(req.query));res.json({...reportDetails(report,req.query),generatedAt:report.generatedAt});}));
+  router.get('/admin/reports/orders/:id',safe((req,res)=>{const report=businessReport(reportWindow(req.query));res.json({order:reportOrderDetail(report,req.params.id)});}));
   router.get('/admin/reports/export',safe(async(req,res)=>{
     const report=businessReport(reportWindow(req.query));
-    if(req.query.format==='csv'){const t=report.totals,csv=['日期,订单数,订单净销售额,充值收款,线下收款,订单商品成本,赠酒报损成本,商品毛利估算',[report.window.start.slice(0,10),t.orders,t.revenue,t.rechargeReceived,t.offlineReceived,t.orderCost,t.lossCost,t.profit].map((v,i)=>i>1&&v!=null?Number(v).toFixed(2):v??'').join(',')].join('\n');res.type('text/csv').send('\ufeff'+csv);return;}
+    if(req.query.format==='csv'){const t=report.totals,csv=['日期,订单数,订单净销售额,充值收款,线下收款,订单商品成本,赠酒报损成本,商品毛利估算,毛利率,外部净收款',[report.window.start.slice(0,10),t.orders,t.revenue,t.rechargeReceived,t.offlineReceived,t.orderCost,t.lossCost,t.profit,t.grossMarginRate==null?null:(t.grossMarginRate*100).toFixed(2)+'%',t.externalNetReceived].map((v,i)=>i>1&&typeof v==='number'?v.toFixed(2):v??'').join(',')].join('\n');res.type('text/csv').send('\ufeff'+csv);return;}
     const buffer=await withBackgroundTask(()=>reportWorkbook(report));
     audit(req,'导出营业明细',`${report.window.filename} ${report.orders.length}笔`);
     res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');res.setHeader('Content-Disposition',`attachment; filename="business-report.xlsx"; filename*=UTF-8''${encodeURIComponent(report.window.filename)}`);res.send(buffer);
