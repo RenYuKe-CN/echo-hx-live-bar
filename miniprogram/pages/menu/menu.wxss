@@ -15,7 +15,7 @@
 .menu-tools{display:flex;align-items:stretch;overflow:hidden;background:rgba(243,243,224,.07);border:1rpx solid rgba(229,234,213,.14);border-radius:18rpx}
 .menu-tool{display:flex;align-items:center;gap:14rpx;flex:1;width:0;min-width:0;min-height:44px;margin:0;padding:16rpx 18rpx;background:transparent;border-radius:0;text-align:left;box-sizing:border-box}
 .tool-icon{display:flex;align-items:center;justify-content:center;width:56rpx;height:56rpx;border-radius:14rpx;background:#d8c29b;flex:none}.tool-icon image{width:32rpx;height:32rpx}
-.member-mark{background:#9e714b}.tool-copy{flex:1;min-width:0}.tool-title{display:block;color:#fff7e9;font-size:26rpx;font-weight:600;line-height:1.4;overflow-wrap:break-word}.tool-caption{display:block;color:#cad8c6;font-size:21rpx;line-height:1.4;margin-top:5rpx}.tool-chevron{color:#e1c395;font-size:32rpx;line-height:1;flex:none}.tool-divider{width:1rpx;background:rgba(229,234,213,.16);margin:18rpx 0;flex:none}
+.member-mark{background:#9e714b}.tool-copy{flex:1;min-width:0}.tool-title{display:block;color:#fff7e9;font-size:26rpx;font-weight:600;line-height:1.4;overflow-wrap:break-word}.tool-caption{display:block;color:#cad8c6;font-size:21rpx;line-height:1.4;margin-top:5rpx}.tool-chevron{color:#e1c395;font-size:32rpx;line-height:1;flex:none}
 .menu-tool:active{background:rgba(243,243,224,.09)}.menu-page .call-service:active{opacity:.8}
 
 .catalog-body{display:flex;flex:1;min-height:0;overflow:hidden;background:#fffefa;border-top:1rpx solid #e4e5dc}

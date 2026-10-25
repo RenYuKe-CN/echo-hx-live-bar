@@ -29,3 +29,5 @@
 
 .admin-header .header-actions .admin-workspace-shortcut{display:inline-flex;white-space:nowrap}
 @media(max-width:520px){.admin-header .header-actions{flex-wrap:wrap;justify-content:flex-end}}
+
+.pos-group-intro{padding:14px 16px;background:#eef5f1;border:1px solid #d7e5dc;border-radius:8px;margin-bottom:16px;font-size:13px;color:#365846}.pos-group-intro p,.pos-group-note{font-size:12px;line-height:1.8;color:#6b7e73}.pos-group-intro p{margin:6px 0 0}.pos-group-fields{display:grid;gap:14px;margin-top:16px}.pos-group-packages label{align-items:flex-start}.pos-group-packages label:has(input:checked){background:#f0f6f2}.pos-group-packages label:has(input:disabled){opacity:.55}.pos-group-packages small{line-height:1.7}.pos-group-packages b{white-space:nowrap}

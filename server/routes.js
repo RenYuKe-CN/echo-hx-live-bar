@@ -22,7 +22,7 @@ import { storeName } from './branding.js';
 import { registerWorkdeskRoutes, workEvent, workOrderView, fulfillmentLines, refundHold, hasDeliveryInProgress, cancelReadyBatchesForRefund } from './workdesk.js';
 import { catalogProduct, getCatalogProduct, assertStock, reserveStock, insertSaleItems, logStock, cartAvailability } from './catalog.js';
 import { registerCatalogRoutes } from './catalog-routes.js';
-import { registerGroupBuyRoutes, finalizeRedemption, reconcileMeituanRedemptions } from './group-buy.js';
+import { registerGroupBuyRoutes, finalizeRedemption, groupBuyOptions } from './group-buy.js';
 import { registerCommerceRoutes } from './commerce-routes.js';
 import { ensureBillIdentity,captureFinalBill } from './bills.js';
 import { reconcilePrintJobs } from './printing.js';
@@ -293,7 +293,7 @@ router.put('/admin/settings', (req, res) => {
 router.post('/admin/settings/check', (_req, res) => {
   const status = getIntegrationStatus();
   const checks = Object.fromEntries(Object.entries(status.groups).map(([group, value]) => [group, { status: value.configured ? 'ready_for_auth' : 'missing_config', missing: value.missing }]));
-  res.json({ ok: true, checks, integrationsActive: Boolean(status.groups.wechat?.configured && status.groups.wechatPay?.configured), message: '配置完整性检查完成；美团和抖音仍需平台授权后进行真实券码联调' });
+  res.json({ ok: true, checks, integrationsActive: Boolean(status.groups.wechat?.configured && status.groups.wechatPay?.configured), message: '配置完整性检查完成；微信支付和飞鹅打印仍需真实商户 / 设备联调。团购由商家端核销后在收银台登记' });
 });
 
 function renderMessageTemplate(template, values = {}) {
@@ -1475,7 +1475,7 @@ export function startBusinessSchedulers() {
   const tick = async () => {
     if (checking) return;
     checking = true;
-    try { await withBackgroundTask(async () => { await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); await reconcileMeituanRedemptions(settleOrder);await reconcilePrintJobs(); }); }
+    try { await withBackgroundTask(async () => { await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); await reconcilePrintJobs(); }); }
     catch (error) { console.error(`[wechat] 支付退款对账失败: ${error.message}`); }
     finally { checking = false; }
   };
@@ -1494,7 +1494,7 @@ router.get('/admin/pos', (req, res) => {
   const phone = String(req.query.phone || '').trim();
   if (phone && !/^1[3-9]\d{9}$/.test(phone)) return res.status(400).json({ message: '请输入完整会员手机号' });
   const member = phone ? db.prepare(posMemberSql).get(phone) : null;
-  res.json({ member: posMember(member), tables: db.prepare("SELECT id, table_no FROM tables WHERE status != 'disabled' ORDER BY table_no").all(), products: db.prepare("SELECT * FROM products WHERE status='active' AND sellable=1 ORDER BY sort,id").all().map(row=>({...productView(row),memberPrice:member?centsToMoney(unitPrice(row,memberPricing(member.id))):centsToMoney(row.price_cents)})).filter(p=>p.availableStock>0), packages: db.prepare("SELECT id,name,pay_cents,stored_cents,bonus_cents FROM wallet_packages WHERE status = 'active' ORDER BY pay_cents").all().map(row => ({ ...row, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })) });
+  res.json({ member: posMember(member), groupBuyPackages: groupBuyOptions(), tables: db.prepare("SELECT id, table_no FROM tables WHERE status != 'disabled' ORDER BY table_no").all(), products: db.prepare("SELECT * FROM products WHERE status='active' AND sellable=1 ORDER BY sort,id").all().map(row=>({...productView(row),memberPrice:member?centsToMoney(unitPrice(row,memberPricing(member.id))):centsToMoney(row.price_cents)})).filter(p=>p.availableStock>0), packages: db.prepare("SELECT id,name,pay_cents,stored_cents,bonus_cents FROM wallet_packages WHERE status = 'active' ORDER BY pay_cents").all().map(row => ({ ...row, pay: centsToMoney(row.pay_cents), stored: centsToMoney(row.stored_cents), bonus: centsToMoney(row.bonus_cents) })) });
 });
 
 router.post('/admin/pos/orders', (req, res) => {
@@ -1506,7 +1506,11 @@ router.post('/admin/pos/orders', (req, res) => {
   try {
     const order = db.transaction(() => {
       const prior = db.prepare('SELECT * FROM orders WHERE pos_request_id = ?').get(requestId);
-      if (prior) return prior;
+      if (prior) {
+        const priorTable=db.prepare('SELECT table_id FROM table_sessions WHERE id=?').get(prior.session_id)?.table_id;
+        if(prior.payment_method==='group_buy' || prior.payer_user_id!==member.id || priorTable!==table.id)throw new Error('重复请求的收银业务不一致');
+        return prior;
+      }
       const rows = items.map(item => ({ ...item, product: db.prepare("SELECT * FROM products WHERE id = ? AND status = 'active'").get(item.productId) }));
       assertStock(items);
       const pricing = memberPricing(member.id);
@@ -1785,7 +1789,7 @@ router.get('/admin/summary', (req, res) => {
 });
 
 registerCatalogRoutes(router, { audit });
-registerGroupBuyRoutes(router, { currentUserId, audit, settleOrder });
+registerGroupBuyRoutes(router, { audit, settleOrder, getOrCreateSession });
 router.delete('/admin/products/:id', (req, res) => { db.prepare("UPDATE products SET status = 'inactive', auto_unlisted = 0 WHERE id = ?").run(req.params.id); audit(req, '下架商品', req.params.id); res.json({ ok: true }); });
 
 router.get('/admin/categories', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM categories').get().value; return res.json({ categories: db.prepare('SELECT c.*, COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category_id = c.id GROUP BY c.id ORDER BY c.sort, c.id LIMIT ? OFFSET ?').all(pageSize, offset), pagination: paginationView(page, pageSize, total) }); });

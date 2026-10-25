@@ -29,8 +29,6 @@
     </view>
     <view class="menu-tools">
       <button class="menu-tool membership-entry" bindtap="openTierRules" aria-label="查看会员等级权益"><view class="tool-icon member-mark"><image src="/assets/icons/crown-gold.png" mode="aspectFit"/></view><view class="tool-copy"><text class="tool-title">{{isMember ? user.memberLevel : '普通会员'}}</text><text class="tool-caption">查看会员权益</text></view><text class="tool-chevron">›</text></button>
-      <view class="tool-divider"/>
-      <button class="menu-tool group-buy-entry" bindtap="openGroupBuy"><view class="tool-icon"><image src="/assets/icons/ticket-green.png" mode="aspectFit"/></view><view class="tool-copy"><text class="tool-title">团购兑换</text><text class="tool-caption">美团 · 抖音券码</text></view><text class="tool-chevron">›</text></button>
     </view>
   </view>
   <view class="catalog-body">

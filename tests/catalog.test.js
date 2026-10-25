@@ -9,6 +9,8 @@ Object.assign(process.env,{DATA_DIR:work,ECHO_ENV_FILE:path.join(work,'.env'),NO
 const {db}=await import('../server/db.js');
 const {createApp}=await import('../server/app.js');
 const {migrateCatalog}=await import('../server/catalog-schema.js');
+const {recipeSnapshot}=await import('../server/catalog.js');
+const {finalizeRedemption}=await import('../server/group-buy.js');
 const {orderCostSql}=await import('../server/refund-stock.js');
 const {displayOrderItems}=await import('../server/order-item-groups.js');
 const {distributeQuantities}=await import('../src/order-quantities.js');
@@ -42,18 +44,17 @@ async function call(url,{token=tokens.user,method='GET',body}={}){const r=await 
 const admin=(url,method='GET',body)=>call('/admin'+url,{token:tokens.admin,method,body:/^\/orders\/[^/]+\/refund$/.test(url)?{requestId:crypto.randomUUID(),reason:'测试退款',...body}:body});
 const stock=id=>db.prepare('SELECT stock,reserved_stock FROM products WHERE id=?').get(id);
 async function payBundle(quantity=1){assert.equal((await call('/sessions/1/cart/items',{method:'POST',body:{productId:bundleId,quantity}})).status,201);return call('/sessions/1/orders',{method:'POST',body:{paymentMethod:'balance'}});}
-function platformMock({timeout=false,certificates=1}={}){
-  const calls=[];process.env.DOUYIN_REDEMPTION_ENABLED='1';
-  globalThis.fetch=async(url,options={})=>{
-    const address=String(url);calls.push({url:address,options});
-    if(address.includes('/oauth/client_token/'))return new Response(JSON.stringify({data:{access_token:'fixture-token',expires_in:7200,error_code:0}}));
-    if(address.includes('/certificate/prepare/'))return new Response(`{"data":{"error_code":0,"verify_token":"platform-token-${calls.length}","certificates":[${Array.from({length:certificates},(_,i)=>`{"certificate_id":922337203685477580${i},"can_verify_status":1,"encrypted_code":"encrypted-${i}","amount":{"pay_amount":8999},"sku":{"sku_id":"sku-1","groupon_type":1,"title":"双人团购"}}`).join(',')}]}}`);
-    if(address.includes('/certificate/verify/')){if(timeout)throw new Error('network timeout');const payload=JSON.parse(options.body),i=payload.encrypted_codes[0].slice(-1);return new Response(`{"data":{"error_code":0,"verify_results":[{"certificate_id":922337203685477580${i},"verify_id":"verified-${i}","result":0}]}}`);}
-    throw new Error('Unexpected upstream request');
-  };return calls;
-}
 const query=()=>call('/sessions/1/group-buy/query',{method:'POST',body:{platform:'douyin',code:'000012345678'}});
 const consume=id=>call(`/sessions/1/group-buy/${id}/consume`,{method:'POST',body:{requestId:crypto.randomUUID()}});
+const groupBody=(patch={})=>({phone:'13800138001',tableId:1,mappingId,amount:'89.99',platformVerified:true,requestId:crypto.randomUUID(),...patch});
+const groupOrder=(body,token=tokens.cashier)=>call('/admin/pos/group-buy',{token,method:'POST',body});
+function legacyRedemption(state='unknown') {
+  const id=crypto.randomUUID(),snapshot=recipeSnapshot(bundleId);
+  db.prepare("INSERT INTO group_buy_redemptions(id,store_id,session_id,user_id,platform,certificate_id,voucher_hash,voucher_code,mapping_id,state,source,snapshot_json,provider_json,amount_cents,request_id) VALUES(?,1,1,1,'meituan',?,?,?,?,?,'api',?,'{}',8999,?)")
+    .run(id,'9223372036854775800','legacy-hash','000012345678',mappingId,state,JSON.stringify(snapshot),crypto.randomUUID());
+  for(const c of snapshot.components){db.prepare('INSERT INTO redemption_stock VALUES(?,?,?)').run(id,c.id,c.component_quantity);db.prepare('UPDATE products SET reserved_stock=reserved_stock+? WHERE id=?').run(c.component_quantity,c.id);}
+  return id;
+}
 test('bundle availability and cost derive from shared goods without a virtual stock balance',async()=>{
   db.prepare('UPDATE products SET stock=42,reserved_stock=0 WHERE id=1').run();db.prepare('UPDATE products SET stock=12 WHERE id=4').run();
   const p=(await admin('/products?all=1')).body.products.find(p=>p.id===bundleId);assert.equal(p.availableStock,7);assert.equal(p.physicalStock,null);assert.equal(p.calculatedCost,40.01);
@@ -97,43 +98,103 @@ test('stock pack conversion and previewed stocktake are atomic and reject stale 
   const fresh=(await admin('/inventory/import/preview','POST',{rows:[{productId:1,stock:120},{productId:4,stock:80}]})).body.rows;assert.equal((await admin('/inventory/import','POST',{rows:fresh,reason:'盘点'})).status,200);assert.equal(stock(4).stock,80);
   const detail=(await admin('/products/1/detail')).body;assert.ok(detail.logs.some(l=>l.change_quantity===48));assert.equal(detail.affectedBundles[0].id,bundleId);
 });
-test('unconfigured self redemption cannot create successful vouchers or change stock',async()=>{
-  const r=await query();assert.equal(r.status,503);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM group_buy_redemptions').get().n,0);assert.equal(stock(1).stock,100);
-  assert.equal((await call('/sessions/1/group-buy',{token:tokens.other})).status,403);
+test('removed customer and legacy entry points reject every request even with old enable flags and never call a provider',async()=>{
+  process.env.MEITUAN_REDEMPTION_ENABLED='1';process.env.DOUYIN_REDEMPTION_ENABLED='1';
+  let upstreamCalls=0;globalThis.fetch=async()=>{upstreamCalls++;throw new Error('No upstream request allowed');};
+  assert.equal((await query()).status,410);assert.equal((await consume('old-redemption')).status,410);
+  assert.equal((await call('/sessions/1/group-buy')).status,410);
+  assert.equal((await admin('/group-buy/verify','POST',groupBody())).status,410);
+  assert.equal((await admin('/group-buy/old-redemption/recheck','POST')).status,410);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM group_buy_redemptions').get().n,0);
+  assert.deepEqual(stock(1),{stock:100,reserved_stock:0});assert.equal(upstreamCalls,0);
+  const settings=(await admin('/settings')).body;assert.ok(!settings.settings.some(s=>/^(meituan|douyin)_/.test(s.key)));
+  assert.ok(!Object.hasOwn(settings.groups,'meituan'));assert.ok(!Object.hasOwn(settings.groups,'douyin'));
 });
-test('real adapter preserves long IDs and leading zero codes and uses platform verify_token',async()=>{
-  const calls=platformMock(),q=await query();assert.equal(q.status,200);const id=q.body.records[0].id;
-  assert.equal(db.prepare('SELECT certificate_id FROM group_buy_redemptions WHERE id=?').get(id).certificate_id,'9223372036854775800');assert.ok(calls.some(c=>c.url.includes('code=000012345678')));
-  const redeemed=await consume(id);assert.equal(redeemed.status,200);assert.equal(redeemed.body.record.state,'success');assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
-  const verify=calls.find(c=>c.url.includes('/certificate/verify/'));assert.match(JSON.parse(verify.options.body).verify_token,/^platform-token-/);
-  assert.equal((await consume(id)).body.record.orderNo,redeemed.body.record.orderNo);assert.equal(calls.filter(c=>c.url.includes('/certificate/verify/')).length,1);
-  const order=db.prepare('SELECT * FROM orders WHERE order_no=?').get(redeemed.body.record.orderNo);assert.equal(order.payment_method,'group_buy');assert.equal(order.offline_paid_cents,0);assert.equal(order.wechat_paid_cents,0);
-  assert.equal((await admin(`/orders/${order.id}/refund`,'POST',{amount:89.99})).status,409);
+test('POS-only staff can record a merchant-verified voucher with identity snapshots and exact bundle stock without taking money',async()=>{
+  db.prepare("UPDATE staff_accounts SET role='staff',permissions=? WHERE id=2").run(JSON.stringify(['pos']));
+  try {
+    const context=await call('/admin/pos?phone=13800138001',{token:tokens.cashier});assert.equal(context.status,200);
+    const option=context.body.groupBuyPackages.find(m=>m.id===mappingId);assert.equal(option.product.availableStock,16);assert.equal(Object.hasOwn(option.product,'calculatedCost'),false);
+    const beforeWallet=db.prepare('SELECT * FROM wallet_accounts WHERE user_id=1').get();
+    const result=await groupOrder(groupBody());assert.equal(result.status,201);assert.equal(result.body.payable,89.99);
+    const order=db.prepare('SELECT * FROM orders WHERE order_no=?').get(result.body.orderNo);
+    assert.equal(order.payment_method,'group_buy');assert.equal(order.source_channel,'douyin');assert.equal(order.payment_status,'paid');assert.equal(order.status,'awaiting_delivery');
+    for(const field of ['offline_paid_cents','wechat_paid_cents','stored_paid_cents','bonus_paid_cents','coupon_discount_cents'])assert.equal(order[field],0);
+    assert.equal(order.payer_phone_snapshot,'13800138001');assert.equal(order.payer_user_id,1);
+    assert.deepEqual(db.prepare('SELECT * FROM wallet_accounts WHERE user_id=1').get(),beforeWallet);
+    assert.deepEqual(stock(1),{stock:94,reserved_stock:0});assert.deepEqual(stock(4),{stock:99,reserved_stock:0});
+    assert.deepEqual(db.prepare('SELECT SUM(quantity*paid_price_cents) AS paid,SUM(quantity*cost_price_cents) AS cost FROM order_items WHERE order_id=?').get(order.id),{paid:8999,cost:4001});
+    const record=db.prepare('SELECT * FROM group_buy_redemptions WHERE order_id=?').get(order.id);assert.equal(record.source,'manual');assert.equal(record.voucher_code,'');assert.equal(record.expected_settlement_cents,8549);assert.equal(record.operator_id,2);assert.equal(record.actual_settlement_cents,null);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM work_events WHERE kind='order_new' AND entity_id=?").get(order.id).n,1);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM inventory_logs WHERE order_id=?').get(order.id).n,2);
+    assert.equal((await call('/me/orders/'+order.order_no)).body.order.order_no,order.order_no);
+    assert.equal((await admin('/bills')).body.bills[0].orders,1);
+    assert.equal((await admin(`/orders/${order.id}/refund`,'POST',{amount:89.99})).status,409);
+    assert.equal((await call('/admin/group-buy',{token:tokens.cashier})).status,403);
+  } finally {db.prepare("UPDATE staff_accounts SET role='manager',permissions=? WHERE id=2").run(JSON.stringify(['products','group-buy','pos','orders','tables','workdesk']));}
 });
-test('multiple coupons from one query cannot reuse an already consumed platform token',async()=>{
-  platformMock({certificates:2});const q=await query();assert.equal(q.status,200);assert.equal(q.body.records.length,2);
-  assert.equal((await consume(q.body.records[0].id)).body.record.state,'success');assert.equal((await consume(q.body.records[1].id)).status,409);assert.equal(stock(1).stock,94);
+test('repeated commands create one offline group order; retries remain safe after a table closes or a mapping is disabled',async()=>{
+  const body=groupBody(),first=await groupOrder(body);assert.equal(first.status,201);
+  assert.equal((await groupOrder(body)).body.orderNo,first.body.orderNo);
+  assert.equal((await groupOrder({...body,amount:'88'})).status,409);
+  assert.equal((await groupOrder({...body,tableId:2})).status,409);
+  db.prepare("UPDATE table_sessions SET status='closed' WHERE id=1").run();db.prepare("UPDATE group_buy_mappings SET status='inactive' WHERE id=?").run(mappingId);
+  assert.equal((await groupOrder(body)).body.orderNo,first.body.orderNo);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,1);assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
 });
-test('ambiguous redemption retains stock across restart migration, blocks table close and requires administrator evidence',async()=>{
-  const calls=platformMock({timeout:true}),q=await query(),id=q.body.records[0].id;
-  assert.equal((await consume(id)).body.record.state,'unknown');assert.deepEqual(stock(1),{stock:100,reserved_stock:6});
-  migrateCatalog(db);assert.deepEqual(stock(1),{stock:100,reserved_stock:6});assert.equal((await admin('/tables/1/close','POST',{})).status,409);
-  assert.equal((await consume(id)).body.record.state,'unknown');assert.equal(calls.filter(c=>c.url.includes('/certificate/verify/')).length,1);
+test('POS validates permission, confirmation, exact money and a single coupon bundle atomically',async()=>{
+  assert.equal((await groupOrder(groupBody(),tokens.waiter)).status,403);
+  assert.equal((await groupOrder(groupBody(),tokens.user)).status,401);
+  for(const patch of [{platformVerified:false},{phone:'13800138099'},{amount:''},{amount:'1.001'},{amount:-1},{quantity:2},{items:[{productId:1,quantity:1}]},{mappingId:999},{tableId:999}])assert.ok((await groupOrder(groupBody(patch))).status>=400,JSON.stringify(patch));
+  db.prepare('UPDATE products SET stock=5 WHERE id=1').run();assert.equal((await groupOrder(groupBody())).status,409);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM group_buy_redemptions').get().n,0);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,0);assert.equal(stock(1).reserved_stock,0);
+});
+test('cashier can open a table for a phone-bound guest, and administrators can create manual packages without external IDs',async()=>{
+  db.prepare("UPDATE table_sessions SET status='closed' WHERE id=1").run();
+  const configured=await admin('/group-buy/mappings','POST',{platform:'meituan',productId:bundleId,name:'收银美团套餐',price:80,feeRate:6});assert.equal(configured.status,200);
+  const mapping=db.prepare("SELECT * FROM group_buy_mappings WHERE platform='meituan'").get();assert.match(mapping.external_product_id,/^manual:/);
+  const result=await groupOrder(groupBody({mappingId:mapping.id}));assert.equal(result.status,201);
+  const order=db.prepare('SELECT * FROM orders WHERE order_no=?').get(result.body.orderNo);assert.notEqual(order.session_id,1);assert.equal(order.source_channel,'meituan');
+  assert.equal(db.prepare('SELECT user_id FROM session_members WHERE session_id=?').get(order.session_id).user_id,1);
+});
+test('manual group sales retain gross profit while platform arrivals are counted as separate external receipts',async()=>{
+  const result=await groupOrder(groupBody());assert.equal(result.status,201);
+  db.prepare("UPDATE orders SET created_at='2026-10-13 05:00:00',paid_at='2026-10-13 05:00:00' WHERE order_no=?").run(result.body.orderNo);
+  db.prepare("UPDATE group_buy_redemptions SET created_at='2026-10-13 05:00:00' WHERE id=?").run(result.body.record.id);
+  const url='/reports?startAt=2026-10-13T12:00&endAt=2026-10-14T06:00';
+  let report=(await admin(url)).body;
+  assert.equal(report.totals.revenue,89.99);assert.equal(report.totals.orderCost,40.01);assert.equal(report.totals.profit,49.98);assert.equal(report.totals.externalNetReceived,0);
+  assert.equal((await admin(`/group-buy/${result.body.record.id}/settlement`,'PATCH',{amount:85,settledAt:'2026-10-13T17:00',requestId:crypto.randomUUID()})).status,200);
+  report=(await admin(url)).body;assert.equal(report.totals.revenue,89.99);assert.equal(report.totals.externalNetReceived,85);assert.equal(report.totals.settlementReceived,85);
+});
+test('offline group entries need no voucher and independent orders for the same package do not collide',async()=>{
+  const first=await groupOrder(groupBody());assert.equal(first.status,201);assert.equal(first.body.record.voucher,'线下已核销');
+  const second=await groupOrder(groupBody({voucherNo:''}));assert.equal(second.status,201);assert.notEqual(first.body.orderNo,second.body.orderNo);
+  const records=db.prepare("SELECT certificate_id,voucher_hash,voucher_code FROM group_buy_redemptions ORDER BY created_at,id").all();
+  assert.equal(records.length,2);assert.ok(records.every(r=>r.voucher_code===''));assert.notEqual(records[0].certificate_id,records[1].certificate_id);assert.notEqual(records[0].voucher_hash,records[1].voucher_hash);
+  assert.equal(stock(1).stock,88);
+});
+test('legacy ambiguous redemptions retain stock across upgrade and still require administrator evidence',async()=>{
+  const id=legacyRedemption('verifying');migrateCatalog(db);assert.deepEqual(stock(1),{stock:100,reserved_stock:6});assert.equal((await admin('/tables/1/close','POST',{})).status,409);
   assert.equal((await admin(`/group-buy/${id}/resolve`,'POST',{outcome:'success',reason:'核对平台记录',platformChecked:true})).status,400);
-  const result=await admin(`/group-buy/${id}/resolve`,'POST',{outcome:'success',verifyId:'verified-evidence',reason:'核对平台记录',platformChecked:true});assert.equal(result.status,200);assert.equal(result.body.record.state,'success');assert.equal(stock(1).stock,94);assert.equal(stock(1).reserved_stock,0);
+  const result=await admin(`/group-buy/${id}/resolve`,'POST',{outcome:'success',verifyId:'verified-evidence',reason:'核对平台记录',platformChecked:true});assert.equal(result.status,200);assert.equal(result.body.record.state,'success');assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
 });
-test('a confirmed unused voucher releases reservations and a waiter cannot resolve it',async()=>{
-  platformMock({timeout:true});const q=await query(),id=q.body.records[0].id;await consume(id);
+test('legacy confirmed-unused vouchers release holds only through authorized manual review',async()=>{
+  const id=legacyRedemption();
   assert.equal((await call(`/admin/group-buy/${id}/resolve`,{token:tokens.waiter,method:'POST',body:{outcome:'failed',reason:'平台未核销',platformChecked:true}})).status,403);
   assert.equal((await admin(`/group-buy/${id}/resolve`,'POST',{outcome:'failed',reason:'平台未核销',platformChecked:true})).status,200);assert.deepEqual(stock(1),{stock:100,reserved_stock:0});
 });
-test('cashier manual confirmation is idempotent and a whole unserved external refund reverses stock and revenue once',async()=>{
-  const body={mappingId,sessionId:1,userId:1,voucherNo:'000009876543',amount:89.99,platformVerified:true,requestId:crypto.randomUUID()};
-  assert.equal((await admin('/group-buy/verify','POST',{...body,platformVerified:false})).status,400);
-  const first=await admin('/group-buy/verify','POST',body);assert.equal(first.status,201);const id=first.body.record.id;
-  assert.equal((await admin('/group-buy/verify','POST',body)).body.record.orderNo,first.body.record.orderNo);assert.equal(stock(1).stock,94);
-  const reverse={platformChecked:true,verifyId:'platform-refund-1',reason:'未交付，已在平台完成退款',stockMode:'restock',stockConfirmed:true,returnItems:db.prepare('SELECT id AS orderItemId,quantity FROM order_items WHERE order_id=(SELECT order_id FROM group_buy_redemptions WHERE id=?)').all(id)};assert.equal((await admin(`/group-buy/${id}/reverse`,'POST',reverse)).status,200);assert.equal(stock(1).stock,100);
+test('legacy locally verified orders recover once without any provider request',()=>{
+  const id=legacyRedemption('verified');let requests=0;globalThis.fetch=()=>{requests++;throw new Error('No network');};
+  const settle=order=>db.prepare("UPDATE orders SET payment_status='paid',status='awaiting_delivery' WHERE id=?").run(order.id);
+  const first=finalizeRedemption(id,settle),second=finalizeRedemption(id,settle);assert.equal(first.orderNo,second.orderNo);assert.equal(requests,0);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,1);
+});
+test('manual external refund reverses revenue once and applies only explicitly chosen returned goods',async()=>{
+  const body=groupBody(),first=await groupOrder(body);assert.equal(first.status,201);const id=first.body.record.id;
+  const reverse={platformChecked:true,verifyId:'platform-refund-1',reason:'未交付，已在平台完成退款',stockMode:'restock',stockConfirmed:true,returnItems:db.prepare('SELECT id AS orderItemId,quantity FROM order_items WHERE order_id=(SELECT order_id FROM group_buy_redemptions WHERE id=?)').all(id)};
+  assert.equal((await admin(`/group-buy/${id}/reverse`,'POST',reverse)).status,200);assert.equal(stock(1).stock,100);
   assert.equal((await admin(`/group-buy/${id}/reverse`,'POST',reverse)).status,200);assert.equal(stock(1).stock,100);assert.equal((await admin('/reports')).body.totals.revenue,0);
+  assert.equal((await groupOrder(body)).status,409);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,1);
 });
 test('super admin directly changes own and managed passwords; other sessions are invalidated and ordinary accounts still need their old password',async()=>{
   const otherSession='f'.repeat(64);db.prepare('INSERT INTO staff_sessions VALUES(?,?,?)').run(hash(otherSession),1,new Date(Date.now()+3600000).toISOString());
@@ -141,118 +202,6 @@ test('super admin directly changes own and managed passwords; other sessions are
   assert.equal((await call('/admin/change-password',{token:tokens.cashier,method:'POST',body:{newPassword:'new-cashier-password'}})).status,400);
   assert.equal((await admin('/accounts/2/reset-password','POST',{password:'reset-cashier-password'})).status,200);assert.equal((await call('/admin/session',{token:tokens.cashier})).status,401);
   assert.equal((await call('/admin/login',{token:null,method:'POST',body:{username:'cashier',password:'reset-cashier-password'}})).status,200);
-});
-
-const mtCode='000012345678',mtDeal='9223372036854775800';
-function meituanMock({timeout=false,prepareRejected=false,receiptMismatch=false,couponPatch={},queryMutation={},history='success',historyWait}={}) {
-  process.env.MEITUAN_REDEMPTION_ENABLED='1';
-  db.prepare("INSERT INTO group_buy_mappings(store_id,platform,external_product_id,external_sku_id,product_id,name,price_cents,fee_rate) VALUES(1,'meituan',?,'whole-package',?,'美团双人套餐',8999,5)").run(mtDeal,bundleId);
-  const calls=[];let queries=0,context;
-  globalThis.fetch=async(url,options)=>{
-    const parameters=Object.fromEntries(new URLSearchParams(options.body)),biz=JSON.parse(parameters.biz),action=String(url).split('/coupon/')[1];
-    calls.push({action,biz,parameters,options});
-    assert.equal(parameters.businessId,'79');assert.equal(parameters.version,'2');assert.equal(parameters.developerId,'100567');assert.match(parameters.sign,/^[a-f0-9]{40}$/);
-    const sorted=Object.keys(parameters).filter(key=>key!=='sign').sort().map(key=>key+parameters[key]).join('');
-    assert.equal(parameters.sign,crypto.createHash('sha1').update('fixture-mt-sign-key'+sorted).digest('hex'));
-    assert.equal(options.method,'POST');assert.equal(biz.vendorShopId,'fixture-mt-shop');
-    const response=data=>new Response(JSON.stringify({code:'OP_SUCCESS',traceId:'fixture-trace',data}));
-    if(action==='status/query') {
-      queries++;
-      return response({status:10,couponStatus:10,dealType:2,dealId:mtDeal,dealTitle:'美团双人套餐',dealValue:'120.00',realAmount:'89.99',dealRuleCouponLimit:-1,
-        dealSkuMappingDetail:{count:1,vendorSkus:['whole-package']},...couponPatch,...(queries>1?queryMutation:{})});
-    }
-    if(action==='batchPrepare') {
-      if(prepareRejected)return new Response(JSON.stringify({code:'COUPON_UNAVAILABLE',msg:'private code'}));
-      return response(undefined);
-    }
-    if(action==='batchConsume') {
-      context=biz;
-      const saved=db.prepare('SELECT * FROM group_buy_redemptions WHERE platform=\'meituan\'').get();
-      assert.equal(saved.state,'verifying');assert.equal(JSON.parse(saved.provider_json).verificationContext.vendorOrderId,biz.vendorOrderId);
-      if(timeout)throw new Error('fixture timeout after redemption may have reached platform');
-      return response({toPayAmount:biz.toPayAmount,couponCodeInfoList:[{couponCode:receiptMismatch?'other-coupon':biz.couponCodes[0]}]});
-    }
-    if(action==='queryLocalListByDate') {
-      if(historyWait)await historyWait();
-      if(history==='empty')return response({total:0,vendorOrderList:[]});
-      return response({total:1,vendorOrderList:[{vendorOrderId:history==='other-order'?'OTHER-ORDER':context.vendorOrderId,count:1,dealInfoList:[{dealId:history==='other-deal'?'OTHER-DEAL':mtDeal,dealType:2,couponCodeList:[mtCode],couponDetailList:[{couponCode:mtCode,couponStatus:history==='cancelled'?25:10,realAmount:history==='other-amount'?'1.00':'89.99'}]}]}]});
-    }
-    throw new Error('Unexpected Meituan request: '+action);
-  };
-  return calls;
-}
-const mtQuery=()=>call('/sessions/1/group-buy/query',{method:'POST',body:{platform:'meituan',code:mtCode}});
-test('Meituan is disabled until all direct-connect credentials and an explicit switch are configured',async()=>{
-  assert.equal((await call('/sessions/1/group-buy')).body.platforms.meituan.ready,false);
-  assert.equal((await mtQuery()).status,503);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM group_buy_redemptions').get().n,0);
-  process.env.MEITUAN_REDEMPTION_ENABLED='1';process.env.MEITUAN_VENDOR_SHOP_ID='';
-  assert.equal((await mtQuery()).status,503);assert.deepEqual(stock(1),{stock:100,reserved_stock:0});
-});
-test('Meituan query, preflight and consume create one delivery order with real components and exact revenue',async()=>{
-  const calls=meituanMock(),q=await mtQuery();assert.equal(q.status,200);const id=q.body.records[0].id;
-  assert.equal(q.body.records[0].amount,89.99);assert.equal(q.body.records[0].components[0].quantity,6);assert.equal(calls.length,1);
-  assert.equal(calls[0].biz.couponCode,mtCode);assert.equal(db.prepare('SELECT certificate_id FROM group_buy_redemptions WHERE id=?').get(id).certificate_id,mtCode);
-  const result=await consume(id);assert.equal(result.body.record.state,'success');assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
-  assert.deepEqual(calls.map(c=>c.action),['status/query','status/query','batchPrepare','batchConsume']);
-  const consumed=calls.at(-1).biz;assert.equal(result.body.record.orderNo,consumed.vendorOrderId);assert.equal(consumed.toPayAmount,'120.00');
-  assert.equal(consumed.orderSkus[0].vendorSkuId,'whole-package');assert.equal(consumed.orderSkus[0].unitPrice,'120.00');assert.equal(consumed.orderSkus[0].count,1);assert.equal(consumed.erpName,'顾客自助核销');
-  assert.equal((await consume(id)).body.record.orderNo,result.body.record.orderNo);assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);
-  const order=db.prepare('SELECT * FROM orders WHERE order_no=?').get(result.body.record.orderNo);assert.equal(order.source_channel,'meituan');assert.equal(order.payable_amount_cents,8999);
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM work_events WHERE kind=\'order_new\' AND entity_id=?').get(order.id).n,1);
-  const amount=db.prepare('SELECT SUM(quantity*paid_price_cents) AS amount FROM order_items WHERE order_id=?').get(order.id).amount;assert.equal(amount,8999);
-});
-test('Meituan cannot consume an unmapped package or insufficient shared goods',async()=>{
-  const calls=meituanMock();db.prepare("DELETE FROM group_buy_mappings WHERE platform='meituan'").run();assert.equal((await mtQuery()).status,409);assert.equal(calls.length,1);
-  db.prepare("INSERT INTO group_buy_mappings(store_id,platform,external_product_id,product_id,name) VALUES(1,'meituan',?,?,'双人套餐')").run(mtDeal,bundleId);
-  const q=await mtQuery();assert.equal(q.status,200);db.prepare('UPDATE products SET stock=5 WHERE id=1').run();
-  assert.equal((await consume(q.body.records[0].id)).status,409);assert.equal(calls.some(c=>c.action==='batchConsume'),false);
-});
-test('Meituan revalidates changed vouchers and preflight rejection releases stock without consuming',async()=>{
-  for(const options of [{prepareRejected:true},{queryMutation:{couponStatus:20}},{queryMutation:{realAmount:'1.00'}}]) {
-    db.prepare("DELETE FROM group_buy_redemptions").run();db.prepare("DELETE FROM group_buy_mappings WHERE platform='meituan'").run();
-    const calls=meituanMock(options),q=await mtQuery(),result=await consume(q.body.records[0].id);
-    assert.equal(result.body.record.state,'failed');assert.deepEqual(stock(1),{stock:100,reserved_stock:0});assert.equal(calls.some(c=>c.action==='batchConsume'),false);
-  }
-});
-test('Meituan limit and merchant configuration are checked before dispatching consumption',async()=>{
-  const calls=meituanMock({couponPatch:{dealRuleCouponLimit:1}}),q=await mtQuery(),id=q.body.records[0].id;
-  assert.match(q.body.records[0].rulesText,/上限：1 张/);
-  process.env.MEITUAN_VENDOR_SHOP_ID='other-shop';assert.equal((await consume(id)).status,503);assert.equal(calls.some(c=>c.action==='batchConsume'),false);
-  process.env.MEITUAN_VENDOR_SHOP_ID='fixture-mt-shop';assert.equal((await consume(id)).body.record.state,'success');
-  assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
-});
-test('Meituan timeout holds stock across restart and exact original order history recovers once without a second consumption',async()=>{
-  const calls=meituanMock({timeout:true}),q=await mtQuery(),id=q.body.records[0].id;
-  assert.equal((await consume(id)).body.record.state,'unknown');assert.deepEqual(stock(1),{stock:100,reserved_stock:6});migrateCatalog(db);
-  assert.equal((await admin('/tables/1/close','POST',{})).status,409);
-  assert.equal((await consume(id)).body.record.state,'unknown');assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);
-  const record=(await admin(`/group-buy/${id}/recheck`,'POST')).body.record;assert.equal(record.state,'success');assert.deepEqual(stock(1),{stock:94,reserved_stock:0});
-  const history=calls.find(c=>c.action==='queryLocalListByDate');assert.equal(history.biz.vendorOrderId,record.orderNo);assert.match(history.biz.date,/^\d{4}-\d{2}-\d{2}$/);
-  assert.equal((await admin(`/group-buy/${id}/recheck`,'POST')).body.record.orderNo,record.orderNo);assert.equal(calls.filter(c=>c.action==='queryLocalListByDate').length,1);
-  assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,1);
-});
-test('missing, cancelled, mismatched order/deal/amount history never releases or fulfills an ambiguous Meituan voucher',async()=>{
-  for(const history of ['empty','cancelled','other-order','other-deal','other-amount']) {
-    for(const table of ['redemption_stock','group_buy_redemptions'])db.prepare(`DELETE FROM ${table}`).run();db.prepare("DELETE FROM group_buy_mappings WHERE platform='meituan'").run();db.prepare('UPDATE products SET reserved_stock=0').run();
-    const calls=meituanMock({timeout:true,history}),q=await mtQuery(),id=q.body.records[0].id;await consume(id);
-    assert.equal((await admin(`/group-buy/${id}/recheck`,'POST')).body.record.state,'unknown',history);assert.deepEqual(stock(1),{stock:100,reserved_stock:6});
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,0);assert.equal(calls.filter(c=>c.action==='batchConsume').length,1);
-  }
-});
-test('incomplete Meituan success receipts remain unknown until original-order evidence is available',async()=>{
-  meituanMock({receiptMismatch:true});const q=await mtQuery(),id=q.body.records[0].id;
-  assert.equal((await consume(id)).body.record.state,'unknown');assert.deepEqual(stock(1),{stock:100,reserved_stock:6});
-  assert.equal((await admin(`/group-buy/${id}/recheck`,'POST')).body.record.state,'success');assert.equal(stock(1).stock,94);
-});
-test('concurrent Meituan result checks share one request and cannot race an administrator release',{timeout:5000},async()=>{
-  let complete;const waiting=new Promise(resolve=>{complete=resolve;});const calls=meituanMock({timeout:true,historyWait:()=>waiting});
-  const q=await mtQuery(),id=q.body.records[0].id;await consume(id);
-  assert.equal((await call(`/admin/group-buy/${id}/recheck`,{token:tokens.waiter,method:'POST'})).status,403);
-  const first=admin(`/group-buy/${id}/recheck`,'POST'),second=admin(`/group-buy/${id}/recheck`,'POST');
-  while(!calls.some(c=>c.action==='queryLocalListByDate'))await new Promise(resolve=>setImmediate(resolve));
-  assert.equal((await admin(`/group-buy/${id}/resolve`,'POST',{outcome:'failed',platformChecked:true,reason:'人工确认平台未核销'})).status,200);
-  complete();assert.equal((await first).body.record.state,'failed');assert.equal((await second).body.record.state,'failed');
-  assert.equal(calls.filter(c=>c.action==='queryLocalListByDate').length,1);assert.deepEqual(stock(1),{stock:100,reserved_stock:0});assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,0);
 });
 
 test('cent-split bundle goods are grouped across order views without changing historical amounts or names',async()=>{

@@ -91,7 +91,6 @@ Page({
     if (category && category !== this.data.category) this.setData({ category, sidebarTarget: `category-${index}` });
   },
   onResize() { this.measureCatalog(); },
-  openGroupBuy() { wx.navigateTo({ url: '/pages/group-buy/group-buy' }); },
   showDetail(e) { const product = this.data.visibleProducts.find(item => item.id === Number(e.currentTarget.dataset.id)); if (product) this.setData({ detailProduct: product }); },
   closeDetail() { this.setData({ detailProduct: null }); },
   noop() {},

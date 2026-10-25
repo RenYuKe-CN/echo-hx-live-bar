@@ -11,8 +11,7 @@
     "pages/messages/messages",
     "pages/storage/storage",
     "pages/rewards/rewards",
-    "pages/recharge/recharge",
-    "pages/group-buy/group-buy"
+    "pages/recharge/recharge"
   ],
   "window": {
     "navigationBarTitleText": "店铺点单",

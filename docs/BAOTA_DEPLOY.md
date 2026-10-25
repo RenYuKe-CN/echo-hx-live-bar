@@ -263,7 +263,7 @@ https://你的域名/api/payments/wechat/notify
 
 退款回调为 `https://你的域名/api/payments/wechat/refund/notify`。`WECHAT_REFUND_NOTIFY_URL` 留空时会从支付回调地址推导；使用微信支付 PEM 公钥时，还须填写该公钥对应的 `WECHAT_PLATFORM_SERIAL`（`PUB_KEY_ID_` 开头），使用平台 X.509 证书时会自动解析序列号。
 
-美团、抖音券码核销已有服务端实现，默认关闭。启用时须取得对应商户权限并完成实券联调：美团使用餐饮品牌直连凭证、门店与套餐 SKU 绑定，详见 [美团接入说明](MEITUAN-REDEMPTION.md)；抖音配置商家授权、Client Key / Secret 和门店，范围见 [套餐与团购说明](CATALOG-AND-GROUP-BUY.md)。商家端先核销、后台录入配送的路径可继续使用。
+美团、抖音在线查券和核销已移除。无需申请开放平台核销密钥；旧 `.env` 中 `MEITUAN_*` / `DOUYIN_*` 配置不再读取，也不能重新打开自助核销。收银先在商家端核销，再在“收银点单”选择“团购核销”登记套餐、手机号、桌台和金额，无需填写券码。历史核销、结算和未确认记录保留，处理方式见 [套餐与团购说明](CATALOG-AND-GROUP-BUY.md)。本次小程序也删除了相关页面，服务器更新后还须重新上传和发布小程序；未更新客户端调用旧接口会收到停用提示。
 
 ### 工作台、打印和营业日设置
 
