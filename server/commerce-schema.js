@@ -27,6 +27,8 @@ export function migrateCommerce(database) {
     UPDATE table_sessions SET store_name_snapshot=COALESCE((SELECT name FROM stores WHERE id=table_sessions.store_id),'') WHERE store_name_snapshot='';
     CREATE UNIQUE INDEX IF NOT EXISTS table_sessions_bill_unique ON table_sessions(bill_no);
   `);
+  // Existing devices keep their known paper/cutter settings until a model is selected.
+  add('receipt_printers','model',"TEXT NOT NULL DEFAULT 'custom'");
   add('receipt_printers','bound_user',"TEXT NOT NULL DEFAULT ''");
   add('receipt_printers','bound_region',"TEXT NOT NULL DEFAULT ''");
   add('print_parts','expires_at','INTEGER');

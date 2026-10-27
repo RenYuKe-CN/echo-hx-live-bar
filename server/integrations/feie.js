@@ -1,9 +1,11 @@
 import crypto from 'node:crypto';
 import { getIntegrationValues } from '../config.js';
+// Standard receipt API for FP-V58-H and compatible receipt printers.
+// Use the independent endpoint paths required by the 2026-01-15 migration.
 const bases={china:'https://api.feieyun.cn/Api/Open/',asia:'https://api.jp.feieyun.com/Api/Open/',europe:'https://api.de.feieyun.com/Api/Open/'};
 const failure=(message,definite=false)=>Object.assign(new Error(message),{status:503,definite});
 export function feieConfiguration(){const c=getIntegrationValues();return {user:c.feie_user,ukey:c.feie_ukey,region:c.feie_region || 'china',enabled:c.feie_printing_enabled==='1'};}
-export function feieStatus(){const c=feieConfiguration();return {ready:c.enabled&&!!(c.user&&c.ukey&&bases[c.region]),configured:!!(c.user&&c.ukey&&bases[c.region]),region:c.region};}
+export function feieStatus(){const c=feieConfiguration();return {ready:c.enabled&&!!(c.user&&c.ukey&&bases[c.region]),configured:!!(c.user&&c.ukey&&bases[c.region]),region:c.region,api:'Open_printMsg',protocol:'standard-receipt'};}
 export const feieSign=(user,ukey,stime)=>crypto.createHash('sha1').update(user+ukey+stime,'utf8').digest('hex');
 export function feieProvider(expected={}) {
   const c=feieConfiguration();

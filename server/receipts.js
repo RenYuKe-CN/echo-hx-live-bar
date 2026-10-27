@@ -1,6 +1,7 @@
 import { db } from './db.js';
 import { commerceError,formatTime } from './business-time.js';
 import { isAllowedImageUrl } from './storage.js';
+import { printerConfiguration } from './printer-models.js';
 const defaults={storeNameOverride:'',headerLines:[],footerLines:[{text:'感谢光临',align:'center',size:'normal'}],logoUrl:'',logoEnabled:false,qrImageUrl:'',qrMode:'none',qrContent:'',qrCaption:'扫码进入门店小程序',showComponents:true};
 export const receiptText=value=>String(value??'').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,'').replace(/</g,'＜').replace(/>/g,'＞');
 export function receiptTemplate(){const row=db.prepare('SELECT * FROM receipt_templates WHERE id=1').get();return {...defaults,...JSON.parse(row.settings_json),revision:row.revision};}
@@ -84,7 +85,7 @@ export function feieReceiptParts(lines,printer,template) {
   for(const tag of tags){if(Buffer.byteLength(current+tag+'<BR><BR><BR>')>4900){parts.push(current+'<BR><BR><BR>');current='';}if(Buffer.byteLength(tag)>4800)throw commerceError('单行小票内容过长');current+=tag;}
   if(current)parts.push(current+'<BR><BR><BR>');
   if(parts.length>1)for(let i=0;i<parts.length;i++)parts[i]=`<C>第 ${i+1}/${parts.length} 段</C><BR>`+parts[i];
-  // FP-V3-WH has no cutter: feed only. Cutter-enabled models can opt in.
-  if(printer.has_cutter)parts[parts.length-1]+='<CUT>';
+  // FP-V58-H uses manual tear-off. Only explicitly configured cutter models cut.
+  if(printerConfiguration(printer).has_cutter)parts[parts.length-1]+='<CUT>';
   return parts;
 }

@@ -11,6 +11,7 @@ const {db}=await import('../server/db.js');
 const {createApp}=await import('../server/app.js');
 const {reportWindow,businessWindow,parseLocal,currentBusinessDate}=await import('../server/business-time.js');
 const {businessReport}=await import('../server/business-report.js');
+const {feieReceiptParts}=await import('../server/receipts.js');
 const {migrateCommerce}=await import('../server/commerce-schema.js');
 const {insertSaleItems}=await import('../server/catalog.js');
 const {createBackup,restoreBackup}=await import('../server/backup.js');
@@ -33,7 +34,7 @@ beforeEach(()=>{
   db.prepare('INSERT INTO table_sessions(id,store_id,table_id,session_no,opened_at) VALUES(1,1,1,?,?)').run('COMMERCE-VISIT','2026-10-12 12:00:00');db.prepare('INSERT INTO session_members VALUES(1,1,CURRENT_TIMESTAMP)').run();
   bundleId=db.prepare("INSERT INTO products(store_id,category_id,name,kind,price_cents,cost_cents,extra_cost_cents,unit) VALUES(1,5,'双人套餐','bundle',8999,0,1,'套')").run().lastInsertRowid;
   db.prepare('INSERT INTO bundle_components VALUES(?,?,?)').run(bundleId,1,2);db.prepare('INSERT INTO bundle_components VALUES(?,?,?)').run(bundleId,4,1);
-  printerId=db.prepare("INSERT INTO receipt_printers(name,sn,device_key,bound,bound_user,bound_region) VALUES('FP-V3-WH','316500011','abcdefgh',1,'fixture-user','china')").run().lastInsertRowid;
+  printerId=db.prepare("INSERT INTO receipt_printers(name,sn,device_key,model,bound,bound_user,bound_region) VALUES('FP-V58-H 滴滴','316500011','abcdefgh','fp-v58-h',1,'fixture-user','china')").run().lastInsertRowid;
 });
 afterEach(()=>{globalThis.fetch=nativeFetch;});after(async()=>{await new Promise(resolve=>server.close(resolve));db.close();fs.rmSync(work,{recursive:true,force:true});});
 async function call(url,{method='GET',body,token=tokens.admin,binary=false}={}){const response=await nativeFetch(base+url,{method,headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},...(body?{body:JSON.stringify(body)}:{})});return {status:response.status,headers:response.headers,body:binary?Buffer.from(await response.arrayBuffer()):await response.json()};}
@@ -242,6 +243,48 @@ test('new receipts for closed bills use the current configured heading without c
   const copies=calls.filter(c=>c.action==='printMsg').slice(-2).map(c=>c.payload.content);
   assert.match(copies[0],/<CB>Echo HX Live Bar<\/CB>/);assert.equal(copies[0].includes('小票独立店名'),false);
   assert.equal(copies[1].includes('<CB>Echo 回响 Live '),true);assert.equal(copies[1].includes('小票独立店名'),false);
+});
+test('new Feie devices default to the FP-V58-H 4G preset and protect credentials and hardware dimensions',async()=>{
+  const created=await call('/admin/printing/printers',{method:'POST',body:{name:'收银 4G 小票',sn:'316500012',key:'fixturekey'}});
+  assert.equal(created.status,200);const p=created.body.printer;
+  assert.equal(p.model,'fp-v58-h');assert.equal(p.paperWidth,58);assert.equal(p.hasCutter,false);assert.equal(p.printableWidth,48);assert.equal(p.dotsPerLine,384);assert.equal(p.columns,32);assert.match(p.connection,/4G/);assert.equal(p.keyConfigured,true);assert.equal(JSON.stringify(p).includes('fixturekey'),false);
+  const settings=(await call('/admin/printing')).body;assert.equal(settings.defaultPrinterModel,'fp-v58-h');assert.equal(settings.provider.api,'Open_printMsg');assert.ok(settings.printerModels.some(m=>m.model==='custom'));
+  for(const body of [{paperWidth:80},{hasCutter:true},{model:'not-a-printer'}])assert.equal((await call(`/admin/printing/printers/${p.id}`,{method:'PATCH',body})).status,400);
+  assert.equal((await call(`/admin/printing/printers/${p.id}`,{method:'PATCH',body:{name:'改名后设备'}})).body.printer.keyConfigured,true);
+  feieMock();assert.equal((await call(`/admin/printing/printers/${p.id}/bind`,{method:'POST'})).status,200);
+  assert.equal((await call('/admin/printing/printers',{method:'POST',body:{name:'禁止店员配置',sn:'316500013',key:'fixturekey'},token:tokens.cashier})).status,403);
+});
+test('old printer migration preserves paper, cutter, account binding and keys instead of guessing its model',()=>{
+  db.prepare("UPDATE receipt_printers SET paper_width=80,has_cutter=1 WHERE id=?").run(printerId);
+  db.exec('ALTER TABLE receipt_printers DROP COLUMN model');migrateCommerce(db);
+  const p=db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(printerId);
+  assert.equal(p.model,'custom');assert.equal(p.paper_width,80);assert.equal(p.has_cutter,1);assert.equal(p.bound,1);assert.equal(p.bound_user,'fixture-user');assert.equal(p.device_key,'abcdefgh');
+  migrateCommerce(db);assert.equal(db.prepare('SELECT model FROM receipt_printers WHERE id=?').get(printerId).model,'custom');
+});
+test('FP-V58-H receipts use 32 text cells, never cut, and support the documented Logo plus link QR commands',async()=>{
+  addOrder(100,'2026-10-13 10:00:00',3800);const image='/api/product-images/11111111-1111-1111-1111-111111111111.png';
+  assert.equal((await call('/admin/printing/template',{method:'PUT',body:{logoEnabled:true,logoUrl:image,qrMode:'link',qrContent:'https://example.test/shop',headerLines:[{text:'十六个汉字一行超过时自动换行ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',align:'left',size:'normal'}]}})).status,200);
+  assert.equal((await call(`/admin/printing/printers/${printerId}/logo-confirm`,{method:'POST',body:{deviceLogoChecked:true}})).status,200);
+  // The model preset also wins over an accidentally inconsistent stored cutter flag.
+  db.prepare('UPDATE receipt_printers SET has_cutter=1 WHERE id=?').run(printerId);
+  const p=(await preview()).body;assert.equal(p.paperWidth,58);
+  for(const line of p.lines.filter(l=>l.text)){const width=[...line.text].reduce((n,c)=>n+(c.charCodeAt(0)>127?2:1),0);assert.ok(width<=(line.size==='large'?16:32),line.text);}
+  const calls=feieMock(),job=(await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:p.revision})).body.job;
+  assert.equal(job.state,'accepted');const content=calls.find(c=>c.action==='printMsg').payload.content;
+  assert.match(content,/<LOGO>/);assert.match(content,/<QR>https:\/\/example.test\/shop<\/QR>/);assert.ok(!content.includes('<CUT>'));
+});
+test('pending paper output blocks changes to geometry but permits labelling an existing 58mm device with the correct model',async()=>{
+  addOrder(100,'2026-10-13 10:00:00',3800);db.prepare("UPDATE receipt_printers SET model='custom' WHERE id=?").run(printerId);
+  feieMock();const p=(await preview()).body;await print({scope:'bill',targetId:1,printerId,requestId:crypto.randomUUID(),expectedRevision:p.revision});
+  const url=`/admin/printing/printers/${printerId}`;
+  assert.equal((await call(url,{method:'PATCH',body:{model:'custom',paperWidth:80,hasCutter:true}})).status,409);
+  assert.equal((await call(url,{method:'PATCH',body:{model:'fp-v58-h'}})).status,200);
+  assert.equal(db.prepare('SELECT paper_width FROM receipt_printers WHERE id=?').get(printerId).paper_width,58);
+});
+test('custom receipt printers retain their explicit 80mm and cutter support',async()=>{
+  const result=await call('/admin/printing/printers',{method:'POST',body:{model:'custom',name:'原有 80mm 设备',sn:'316500014',key:'fixturekey',paperWidth:80,hasCutter:true}});assert.equal(result.status,200);assert.equal(result.body.printer.paperWidth,80);assert.equal(result.body.printer.hasCutter,true);
+  const p=db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(result.body.printer.id);
+  assert.ok(feieReceiptParts([{text:'兼容原有设备',align:'left',size:'normal'}],p,{qrMode:'none',logoEnabled:false})[0].endsWith('<CUT>'));
 });
 test('disabled Feie cannot enqueue or fake a successful print',async()=>{
   addOrder(100,'2026-10-13 10:00:00',3800);const p=(await preview()).body;

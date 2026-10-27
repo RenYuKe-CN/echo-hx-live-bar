@@ -1,3 +1,4 @@
+import { printerConfiguration } from './printer-models.js';
 import crypto from 'node:crypto';
 import { db } from './db.js';
 import { storeName } from './branding.js';
@@ -17,7 +18,7 @@ export function printJobView(id){
 export function receiptPreview(scope,targetId,printerId,operator='') {
   if(!['order','bill'].includes(scope))throw commerceError('请选择订单或桌台账单');
   const data=scope==='order'?orderReceipt(targetId):billData(targetId),template=receiptTemplate();
-  const printer=db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(printerId);
+  const printer=printerConfiguration(db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(printerId));
   // A new receipt follows today's heading settings, even for a closed bill.
   // Keep the bill's historical name and financial revision intact; freeze the
   // resolved heading separately so later reprints retain the printed name.
@@ -39,13 +40,13 @@ export async function dispatchPrintJob(id) {
   if(!row)throw commerceError('打印任务不存在',404);
   const prior=printerTasks.get(row.printer_id)||Promise.resolve();
   const task=prior.catch(()=>{}).then(async()=>{
-    const job=db.prepare('SELECT * FROM print_jobs WHERE id=?').get(id),printer=db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(job.printer_id);
+    const job=db.prepare('SELECT * FROM print_jobs WHERE id=?').get(id),printer=printerConfiguration(db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(job.printer_id));
     if(['printed','confirmed','cancelled','unknown'].includes(job.state))return printJobView(id);
     const content=JSON.parse(job.content_json);
     for(const part of db.prepare("SELECT * FROM print_parts WHERE job_id=? AND state='queued' ORDER BY part_no").all(id)) {
       if(db.prepare("SELECT 1 FROM print_parts WHERE job_id=? AND state IN ('unknown','failed')").get(id))break;
       let provider;
-      try {if(printer.status!=='active'||!printer.bound)throw commerceError('打印机未启用或未绑定');provider=feieProvider({user:job.provider_account,region:job.provider_region});}
+      try {if(!printer||printer.status!=='active'||!printer.bound)throw commerceError('打印机未启用或未绑定');if(JSON.parse(job.snapshot_json).paperWidth!==printer.paper_width)throw commerceError('打印机纸宽已改变，请重新预览并创建打印任务');if(!printer.has_cutter&&content.some(part=>part.includes('<CUT>')))throw commerceError('此机型不带切刀，请重新预览并创建打印任务');provider=feieProvider({user:job.provider_account,region:job.provider_region});}
       catch(e){db.prepare("UPDATE print_parts SET state='failed' WHERE job_id=? AND part_no=? AND state='queued'").run(id,part.part_no);db.prepare('UPDATE print_jobs SET error=? WHERE id=?').run(e.message,id);break;}
       const expiresAt=Math.floor(Date.now()/1000)+15*60;
       db.transaction(()=>{db.prepare("UPDATE print_parts SET state='sending',expires_at=? WHERE job_id=? AND part_no=? AND state='queued'").run(expiresAt,id,part.part_no);db.prepare("UPDATE print_jobs SET state='sending',updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);})();
@@ -67,7 +68,7 @@ export async function createPrintJob(body,staff,{test=false}={}) {
   const existing=db.prepare('SELECT * FROM print_jobs WHERE request_id=?').get(body.requestId);
   const request={scope:test?'test':body.scope,targetId:test?0:Number(body.targetId),printerId:Number(body.printerId),expectedRevision:body.expectedRevision||'',reprintOf:body.reprintOf||''};
   if(existing){if(JSON.stringify(JSON.parse(existing.snapshot_json).request)!==JSON.stringify(request))throw commerceError('同一打印请求不能改为另一份内容',409);return printJobView(existing.id);}
-  const printer=db.prepare("SELECT * FROM receipt_printers WHERE id=? AND status='active'").get(request.printerId);
+  const printer=printerConfiguration(db.prepare("SELECT * FROM receipt_printers WHERE id=? AND status='active'").get(request.printerId));
   if(!printer||!printer.bound)throw commerceError('请选择已启用且已绑定的打印机');
   feieProvider();const config=feieConfiguration();
   if(printer.bound_user!==config.user||printer.bound_region!==config.region)throw commerceError('飞鹅账号或区域已改变，请重新确认设备绑定',409);

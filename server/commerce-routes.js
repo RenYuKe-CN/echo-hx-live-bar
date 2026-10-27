@@ -10,9 +10,10 @@ import { receiptPreview,createPrintJob,checkPrintJob,printJobView,dispatchPrintJ
 import { feieProvider,feieStatus,feieConfiguration } from './integrations/feie.js';
 import { saveUpload } from './storage.js';
 import { withBackgroundTask } from './maintenance.js';
+import { printerModels,defaultPrinterModel,printerConfiguration } from './printer-models.js';
 const superOnly=req=>{if(req.staff.role!=='super')throw commerceError('仅超级管理员可配置打印机、模板和营业日',403);};
 const safe=fn=>async(req,res)=>{try{await fn(req,res);}catch(e){res.status(e.status||409).json({message:e.message});}};
-const printerView=row=>({id:row.id,name:row.name,sn:row.sn,paperWidth:row.paper_width,hasCutter:!!row.has_cutter,status:row.status,bound:!!row.bound,boundUser:row.bound_user,boundRegion:row.bound_region,logoUrl:row.logo_url,keyConfigured:!!row.device_key});
+const printerView=value=>{const row=printerConfiguration(value);return {id:row.id,name:row.name,sn:row.sn,model:row.model,modelLabel:row.modelLabel,connection:row.connection,paperWidth:row.paper_width,printableWidth:row.printableWidth,dotsPerLine:row.dotsPerLine,columns:row.columns,hasCutter:!!row.has_cutter,status:row.status,bound:!!row.bound,boundUser:row.bound_user,boundRegion:row.bound_region,logoUrl:row.logo_url,keyConfigured:!!row.device_key};};
 const withQr=async preview=>{for(const line of preview.lines)if(line.type==='qr')line.previewImage=await QRCode.toDataURL(line.content,{width:224,margin:2});return preview;};
 export function registerCommerceRoutes(router,{audit}) {
   router.get('/admin/bills',safe((req,res)=>{
@@ -24,7 +25,7 @@ export function registerCommerceRoutes(router,{audit}) {
   router.get('/admin/bills/:id',safe((req,res)=>res.json({bill:billData(Number(req.params.id))})));
   router.get('/admin/printing',safe((req,res)=>{
     const jobs=db.prepare('SELECT id FROM print_jobs ORDER BY created_at DESC,rowid DESC LIMIT 50').all().map(j=>printJobView(j.id));
-    res.json({provider:feieStatus(),storeName:storeName(),template:receiptTemplate(),printers:db.prepare('SELECT * FROM receipt_printers ORDER BY id').all().map(printerView),jobs,canConfigure:req.staff.role==='super',canResolve:['super','manager'].includes(req.staff.role)});
+    res.json({provider:feieStatus(),printerModels,defaultPrinterModel,storeName:storeName(),template:receiptTemplate(),printers:db.prepare('SELECT * FROM receipt_printers ORDER BY id').all().map(printerView),jobs,canConfigure:req.staff.role==='super',canResolve:['super','manager'].includes(req.staff.role)});
   }));
   router.put('/admin/printing/template',safe((req,res)=>{superOnly(req);res.json({template:saveReceiptTemplate(req.body)});audit(req,'更新小票固定版式');}));
   router.post('/admin/printing/template/preview',safe(async(req,res)=>{
@@ -41,12 +42,17 @@ export function registerCommerceRoutes(router,{audit}) {
     const saved=await withBackgroundTask(()=>saveUpload({bytes,extension:match[1]==='jpeg'?'jpg':match[1],contentType:'image/'+match[1]}));audit(req,'上传小票图片',saved.name);res.status(201).json({url:saved.url});
   }));
   const savePrinter=(req,res,previous)=>{
-    superOnly(req);const b=req.body||{},name=String(b.name??previous?.name??'').trim(),sn=String(b.sn??previous?.sn??'').trim(),key=String(b.key||previous?.device_key||'').trim(),paperWidth=Number(b.paperWidth??previous?.paper_width??58),hasCutter=b.hasCutter??!!previous?.has_cutter,status=b.status??previous?.status??'active';
+    superOnly(req);const b=req.body||{},name=String(b.name??previous?.name??'').trim(),sn=String(b.sn??previous?.sn??'').trim(),key=String(b.key||previous?.device_key||'').trim(),model=b.model??previous?.model??defaultPrinterModel;
+    const preset=printerModels.find(p=>p.model===model);
+    if(!preset)throw commerceError('请选择支持的飞鹅小票机型号');
+    const paperWidth=Number(b.paperWidth??preset.paperWidth??previous?.paper_width??58),hasCutter=b.hasCutter??preset.hasCutter??!!previous?.has_cutter,status=b.status??previous?.status??'active';
     if(!name||name.length>60||/[#\r\n]/.test(name)||!/^\d{6,32}$/.test(sn)||!/^[a-zA-Z0-9]{4,64}$/.test(key)||![58,80].includes(paperWidth)||typeof hasCutter!=='boolean'||!['active','disabled'].includes(status))throw commerceError('打印机名称、编号、KEY 或纸张规格无效');
+    if(model==='fp-v58-h'&&(paperWidth!==58||hasCutter))throw commerceError('FP-V58-H 滴滴使用 58mm 纸、手动撕纸，不能设置为 80mm 或带切刀');
     if(previous&&sn!==previous.sn)throw commerceError('设备编号不能改为另一台打印机，请新增设备');
+    if(previous&&(paperWidth!==previous.paper_width||Number(hasCutter)!==previous.has_cutter)&&db.prepare("SELECT 1 FROM print_jobs j JOIN print_parts p ON p.job_id=j.id WHERE j.printer_id=? AND j.state NOT IN ('printed','confirmed','cancelled') AND p.state IN ('queued','sending','accepted','unknown') LIMIT 1").get(previous.id))throw commerceError('这台打印机仍有未完成或待核对任务，请处理后再修改纸宽和切刀规格',409);
     let id=previous?.id;
-    if(previous)db.prepare('UPDATE receipt_printers SET name=?,device_key=?,paper_width=?,has_cutter=?,status=? WHERE id=?').run(name,key,paperWidth,hasCutter?1:0,status,id);
-    else id=db.prepare('INSERT INTO receipt_printers(name,sn,device_key,paper_width,has_cutter,status) VALUES(?,?,?,?,?,?)').run(name,sn,key,paperWidth,hasCutter?1:0,status).lastInsertRowid;
+    if(previous)db.prepare('UPDATE receipt_printers SET name=?,device_key=?,model=?,paper_width=?,has_cutter=?,status=? WHERE id=?').run(name,key,model,paperWidth,hasCutter?1:0,status,id);
+    else id=db.prepare('INSERT INTO receipt_printers(name,sn,device_key,model,paper_width,has_cutter,status) VALUES(?,?,?,?,?,?,?)').run(name,sn,key,model,paperWidth,hasCutter?1:0,status).lastInsertRowid;
     audit(req,'保存小票打印机',`${id} ${name}`);res.json({printer:printerView(db.prepare('SELECT * FROM receipt_printers WHERE id=?').get(id))});
   };
   router.post('/admin/printing/printers',safe((req,res)=>savePrinter(req,res)));
