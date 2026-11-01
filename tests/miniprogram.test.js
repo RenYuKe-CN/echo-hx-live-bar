@@ -42,6 +42,14 @@ test('persistent unauthorized responses stop after one login retry', async () =>
   assert.equal(logins, 1); assert.equal(requests, 2);
 });
 
+test('structured phone-binding errors reach the page without triggering another login', async () => {
+  const api = client({
+    login: () => { throw new Error('phone binding is not a login expiry'); },
+    request: options => options.success({ statusCode: 403, data: { message: '请先绑定手机号', code: 'PHONE_BINDING_REQUIRED' } })
+  });
+  await assert.rejects(api.request('/sessions/1/orders', { method: 'POST' }), error => error.status === 403 && error.code === 'PHONE_BINDING_REQUIRED');
+});
+
 test('client payment success waits for server confirmation', async () => {
   let queries = 0;
   const api = client({

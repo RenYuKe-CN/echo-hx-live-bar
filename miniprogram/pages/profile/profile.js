@@ -1,10 +1,12 @@
 const api = require('../../utils/api');
 const branding = require('../../utils/branding');
+const { phoneAuthorizationError } = require('../../utils/phone-binding');
 
 Page({
   data: { avatarPath: '', avatarUrl: '', nickname: '', phone: '', ...branding.readSettings(), birthdayType: '', birthdayTypeIndex: 0, birthdayTypes: ['不设置', '阳历', '农历'], birthdayDate: '', birthdayLocked: false, solarBirthday: '2000-01-01', lunarMonth: '1', lunarDay: '1', lunarMonthIndex: 0, lunarDayIndex: 0, lunarMonths: Array.from({ length: 12 }, (_, index) => String(index + 1)), lunarDays: Array.from({ length: 30 }, (_, index) => String(index + 1)), busy: false, error: '', profileSaved: false },
-  onLoad() {
-    Promise.resolve(getApp().apiReady).then(() => api.request('/me')).then(({ user }) => {
+  onLoad(options = {}) {
+    this.setData({ phoneOnly: options.focus === 'phone' });
+    return Promise.resolve(getApp().apiReady).then(() => api.request('/me')).then(({ user }) => {
       const birthdayType = user.birthdayType || '';
       const birthdayDate = user.birthdayDate || '';
       const [birthdayMonth = '01', birthdayDay = '01'] = birthdayDate.split('-');
@@ -57,23 +59,29 @@ Page({
     const upload = this.data.avatarUrl ? Promise.resolve(this.data.avatarUrl) : api.uploadAvatar(this.data.avatarPath);
     upload.then(avatarUrl => api.request('/me/profile', { method: 'PATCH', data: { nickname, avatarUrl } }).then(({ user }) => {
       this.setData({ avatarUrl: user.avatarUrl || avatarUrl, avatarPath: api.imageUrl(user.avatarUrl || avatarUrl), profileSaved: true, nickname: user.nickname });
-      if (user.phone) this.finish();
+      if (user.phone) this.finish(user);
     })).catch(error => this.setData({ error: error.message || '资料保存失败，请重试' })).finally(() => this.setData({ busy: false }));
   },
   onPhone(e) {
     if (this.data.busy) return;
     if (!e.detail?.code) {
       const detail = e.detail?.errMsg || '';
-      return this.setData({ error: detail.includes('deny') || detail.includes('cancel') ? '你没有同意手机号授权，可以点击按钮重新授权' : `未获得手机号授权${detail ? `：${detail}` : '，请点击按钮重试'}` });
+      return this.setData({ error: phoneAuthorizationError(detail) });
     }
     this.setData({ busy: true, error: '' });
-    api.request('/me/phone', { method: 'POST', data: { code: e.detail.code } }).then(({ user }) => {
+    return api.request('/me/phone', { method: 'POST', data: { code: e.detail.code } }).then(({ user }) => {
       this.setData({ phone: user.phone || '' });
-      this.finish();
+      this.finish(user);
     }).catch(error => this.setData({ error: error.message || '手机号绑定失败，请重试' })).finally(() => this.setData({ busy: false }));
   },
-  finish() {
-    getApp().globalData.profileComplete = true;
-    wx.navigateBack();
+  finish(user) {
+    if (user) {
+      getApp().globalData.user = user;
+      getApp().globalData.profileComplete = Boolean(user.phone && user.avatarUrl && user.nickname && user.nickname !== '微信用户');
+    }
+    wx.navigateBack({ fail: () => wx.switchTab({ url: '/pages/menu/menu' }) });
+  },
+  returnToOrder() {
+    this.finish();
   }
 });

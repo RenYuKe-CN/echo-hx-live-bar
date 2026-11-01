@@ -35,7 +35,7 @@ test('decreasing a product still preserves its separate voucher row', async () =
   const fixture = miniappFixture({ cart: [{ id: 10, product_id: 1, quantity: 1, applied_coupon_id: 9 }, { id: 11, product_id: 1, quantity: 2 }] });
   const menu = fixture.loadPage('menu'); await menu.onShow(); await menu.updateProductQuantity(1, -1);
   const patch = fixture.calls.find(call => call.method === 'PATCH');
-  assert.equal(patch.url, '/sessions/1/cart/items/11'); assert.equal(patch.data.quantity, 1);
+  assert.equal(patch.url, '/sessions/1/cart/items/11'); assert.equal(patch.data.delta, -1);
 });
 
 test('failure has a retry path and does not turn unknown balances into zero', async () => {

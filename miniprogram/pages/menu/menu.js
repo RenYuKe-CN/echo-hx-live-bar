@@ -1,17 +1,19 @@
 const api = require('../../utils/api');
 const branding = require('../../utils/branding');
+const { phoneAuthorizationError } = require('../../utils/phone-binding');
 const service = require('../../utils/service');
 const tables = require('../../utils/table-selection');
+const { reservationState } = require('../../utils/cart-reservation');
 const { moneyText, productIcon } = require('../../utils/presentation');
 Page({
-  data: { ...tables.initialData, ...service.initialData, products: [], visibleProducts: [], categories: [], sections: [], category: '', targetSection: '', sidebarTarget: '', catalogTailHeight: 0, cart: [], cartMap: {}, pendingProducts: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, couponCheckout: null, selectedCouponId: '', totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: '', ...branding.readSettings(), loading: true, loadError: '', cartBusy: false, detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
+  data: { ...tables.initialData, ...service.initialData, products: [], visibleProducts: [], categories: [], sections: [], category: '', targetSection: '', sidebarTarget: '', catalogTailHeight: 0, cart: [], cartPreviewVisible: false, cartPreviewItems: [], inventoryError: '', inventoryReserved: true, reservationText: '', reservationExpiresAt: '', reservingCart: false, cartMap: {}, pendingProducts: {}, totals: { original: 0, member: 0, originalText: '0.00', memberText: '0.00', discount: 0 }, couponCheckout: null, selectedCouponId: '', totalQty: 0, user: {}, isMember: false, memberInitial: '会', tableNo: '', ...branding.readSettings(), loading: true, loadError: '', cartBusy: false, detailProduct: null, authVisible: false, authBusy: false, authError: '', authStep: 'profile', authAvatarPath: '', authAvatarUrl: '', authNickname: '' },
   ...service.methods,
   ...tables.methods,
   onLoad() { this.tableVersion = -1; },
   onReady() { this.measureCatalog(); },
-  onHide() { this.stopServicePolling(); if(this.data.tablePickerVisible){this.setData({tablePickerVisible:false});wx.showTabBar?.({animation:false});} },
-  onUnload() { this.stopServicePolling(); if(this.data.tablePickerVisible)wx.showTabBar?.({animation:false}); },
-  onShow() { this.startServicePolling(); return this.load().then(() => this.refreshServices()); },
+  onHide() { this.stopInventoryPolling(); this.closeCartPreview(); if(this.data.authVisible) wx.showTabBar?.({animation:false}); this.stopServicePolling(); if(this.data.tablePickerVisible){this.setData({tablePickerVisible:false});wx.showTabBar?.({animation:false});} },
+  onUnload() { this.stopInventoryPolling(); this.closeCartPreview(); if(this.data.authVisible) wx.showTabBar?.({animation:false}); this.stopServicePolling(); if(this.data.tablePickerVisible)wx.showTabBar?.({animation:false}); },
+  onShow() { this.startInventoryPolling(); this.startServicePolling(); return this.load().then(() => this.refreshServices()); },
   load() {
     const app = getApp();
     let version = app.globalData.tableVersion;
@@ -38,6 +40,7 @@ Page({
       app.globalData.user = session.user;
       const profileReady = Boolean(session.user.phone && session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户') || !session.session.id;
       this.setData({ products: products.products, categories: ['推荐'].concat(products.categories.filter(c => c !== '推荐')), user: session.user, isMember: Boolean(products.membership.active), memberInitial: (session.user.memberLevel || '会').charAt(0), authVisible: !profileReady && !this.authPostponed, authStep: session.user.avatarUrl && session.user.nickname && session.user.nickname !== '微信用户' ? 'phone' : 'profile', authAvatarPath: session.user.avatarUrl ? api.imageUrl(session.user.avatarUrl) : '', authAvatarUrl: session.user.avatarUrl || '', authNickname: session.user.nickname === '微信用户' ? '' : (session.user.nickname || ''), authError: '' });
+      this.syncOverlayTabs();
       this.filter();
       return this.refreshCart().then(() => this.consumePendingCoupon());
     }).catch(error => {
@@ -47,7 +50,7 @@ Page({
   },
   retryLoad() { const app = getApp(); if (app.globalData.loginError && app.initialize) app.initialize(); return this.load(); },
   filter() {
-    const list = this.data.products.map(p => ({ ...p, initial: (p.name || '商品').charAt(0), imageUrl: p.image_url && this.failedImages?.[p.id] !== api.imageUrl(p.image_url) ? api.imageUrl(p.image_url) : '', placeholderIcon: productIcon(p), remainingQuantity: Math.max(0, Number(p.stock) - (this.data.cartMap[p.id] || 0)), priceText: moneyText(p.price), memberPriceText: moneyText(p.memberPrice), referenceMemberPriceText: moneyText(p.referenceMemberPrice ?? p.price), showDiscount: this.data.isMember && p.memberPrice < p.price, componentsText: (p.components || []).map(c => `${c.name} × ${c.quantity}${c.unit}`).join(' · ') }));
+    const list = this.data.products.map(p => ({ ...p, initial: (p.name || '商品').charAt(0), imageUrl: p.image_url && this.failedImages?.[p.id] !== api.imageUrl(p.image_url) ? api.imageUrl(p.image_url) : '', placeholderIcon: productIcon(p), remainingQuantity: Math.max(0, Number(p.stock)), priceText: moneyText(p.price), memberPriceText: moneyText(p.memberPrice), referenceMemberPriceText: moneyText(p.referenceMemberPrice ?? p.price), showDiscount: this.data.isMember && p.memberPrice < p.price, componentsText: (p.components || []).map(c => `${c.name} × ${c.quantity}${c.unit}`).join(' · ') }));
     const categories = [...new Set(this.data.categories.concat(list.map(p => p.category)))].filter(c => list.some(p => p.category === c));
     const sections = categories.map((name,index) => ({ name, id: `section-${index}`, categoryId: `category-${index}`, productIndexes: list.map((p,i) => p.category === name ? i : -1).filter(i => i >= 0) }));
     this.setData({ visibleProducts: list, categories, sections, category: categories.includes(this.data.category) ? this.data.category : categories[0] || '' }, () => this.measureCatalog());
@@ -105,7 +108,9 @@ Page({
       // A product voucher creates a separate cart row. Keep the visible
       // quantity aggregated, but preserve ordinary rows for decrementing.
       const cartMap = {}; data.items.forEach(i => { cartMap[i.product_id] = (cartMap[i.product_id] || 0) + i.quantity; });
-      const updates = { cart: data.items, cartMap, totals: { ...data.totals, originalText: moneyText(data.totals.original), memberText: moneyText(data.totals.member) }, totalQty: data.items.reduce((n, i) => n + i.quantity, 0) };
+      const updates = { ...reservationState(data.reservation, data.items.length), inventoryError: '',
+        cartPreviewItems: data.items.map(item => { const product = this.data.products.find(p => p.id === item.product_id) || {}; return { ...item, name: item.name || product.name || '商品', image: api.imageUrl(item.image_url || product.image_url || ''), initial: (item.name || product.name || '商').charAt(0), amountText: moneyText(Number(item.memberPrice ?? product.memberPrice ?? product.price ?? 0) * item.quantity), canIncrease: !item.applied_coupon_id && Number(data.remainingByProduct?.[item.product_id] ?? 0) > 0 }; }),
+        cart: data.items, cartMap, totals: { ...data.totals, originalText: moneyText(data.totals.original), memberText: moneyText(data.totals.member) }, totalQty: data.items.reduce((n, i) => n + i.quantity, 0) };
       // Quantity changes must not replace the product rows or their photos.
       const availability = new Map(data.items.map(item => [Number(item.product_id), Number(item.availableStock ?? item.stock)]));
       Object.entries(data.stockByProduct || {}).forEach(([id,stock])=>availability.set(Number(id),Number(stock)));
@@ -115,7 +120,7 @@ Page({
       });
       this.data.visibleProducts.forEach((product, index) => {
         const stock = Number.isFinite(availability.get(product.id)) ? availability.get(product.id) : product.stock;
-        const remaining = data.remainingByProduct?.[product.id] ?? Math.max(0, Number(stock) - (cartMap[product.id] || 0));
+        const remaining = data.remainingByProduct?.[product.id] ?? Math.max(0, Number(stock));
         if (stock !== product.stock) updates[`visibleProducts[${index}].stock`] = stock;
         if (remaining !== product.remainingQuantity) updates[`visibleProducts[${index}].remainingQuantity`] = remaining;
         if (this.data.detailProduct?.id === product.id) {
@@ -167,9 +172,9 @@ Page({
     const id = Number(e.currentTarget.dataset.id), delta = Number(e.currentTarget.dataset.delta);
     return this.updateProductQuantity(id, delta);
   },
-  updateProductQuantity(id, delta) {
+  updateProductQuantity(id, delta, rowId) {
     if (!getApp().globalData.sessionId) { this.openTables(); return Promise.resolve(false); }
-    if(this.data.tableSwitching) return Promise.resolve(false);
+    if(this.data.tableSwitching || this.data.reservingCart) return Promise.resolve(false);
     this.pendingCartActions = this.pendingCartActions || new Map();
     if (this.pendingCartActions.has(id)) return Promise.resolve(false);
     const product = this.data.visibleProducts.find(item => item.id === id);
@@ -185,15 +190,18 @@ Page({
         const current = this.data.visibleProducts.find(row => row.id === id);
         if (delta > 0 && current?.remainingQuantity <= 0) return false;
         // Ordinary purchases and voucher gifts remain separate rows.
-        const item = this.data.cart.find(row => row.product_id === id && !row.applied_coupon_id)
+        const item = rowId ? this.data.cart.find(row => row.id === rowId) : this.data.cart.find(row => row.product_id === id && !row.applied_coupon_id)
           || this.data.cart.find(row => row.product_id === id);
-        if (delta > 0) await api.request(`/sessions/${context.sessionId}/cart/items`, { method: 'POST', data: { productId: id, quantity: 1 } });
-        else if (item) await api.request(`/sessions/${context.sessionId}/cart/items/${item.id}`, { method: 'PATCH', data: { quantity: item.quantity - 1 } });
+        if (rowId && (!item || (delta > 0 && item.applied_coupon_id))) return false;
+        this.cartRefreshVersion = (this.cartRefreshVersion || 0) + 1;
+        if (rowId) await api.request(`/sessions/${context.sessionId}/cart/items/${rowId}`, { method: 'PATCH', data: { delta } });
+        else if (delta > 0) await api.request(`/sessions/${context.sessionId}/cart/items`, { method: 'POST', data: { productId: id, quantity: 1 } });
+        else if (item) await api.request(`/sessions/${context.sessionId}/cart/items/${item.id}`, { method: 'PATCH', data: { delta: -1 } });
         else return false;
         await this.refreshCart(context);
         return this.isCurrentCart(context);
       } catch (error) {
-        if (this.isCurrentCart(context)) wx.showToast({ title: error.message, icon: 'none' });
+        if (this.isCurrentCart(context)) { wx.showToast({ title: error.message, icon: 'none' }); await this.refreshCart(context).catch(() => this.setData({ inventoryError: '购物车同步失败，请重试' })); }
         return false;
       }
     }).finally(() => {
@@ -204,11 +212,55 @@ Page({
     this.cartUpdateQueue = operation;
     return operation;
   },
+  syncOverlayTabs() { if(this.data.authVisible || this.data.cartPreviewVisible || this.data.tablePickerVisible) wx.hideTabBar?.({animation:false}); else wx.showTabBar?.({animation:false}); },
+  openCartPreview() {
+    if (!getApp().globalData.sessionId) return this.openTables();
+    this.setData({ cartPreviewVisible: true }); wx.hideTabBar?.({ animation: false });
+    if (!this.data.cartBusy) return this.refreshCart().catch(error => this.setData({ inventoryError: error.message || '购物车同步失败，请重试' }));
+  },
+  closeCartPreview() {
+    if (!this.data.cartPreviewVisible) return;
+    this.setData({ cartPreviewVisible: false }); this.syncOverlayTabs();
+  },
+  changePreviewQuantity(e) {
+    const item = this.data.cart.find(row => row.id === Number(e.currentTarget.dataset.id));
+    if (item) return this.updateProductQuantity(item.product_id, Number(e.currentTarget.dataset.delta), item.id);
+  },
+  async relockCart() {
+    if (this.data.cartBusy || this.data.reservingCart) return;
+    const context = this.cartContext(); if (!context.sessionId) return;
+    this.setData({ reservingCart: true });
+    try { await api.request(`/sessions/${context.sessionId}/cart/reserve`, { method: 'POST' }); }
+    catch (error) { if (this.isCurrentCart(context)) wx.showToast({ title: error.message, icon: 'none' }); }
+    finally { if (this.isCurrentCart(context)) { await this.refreshCart(context).catch(error => this.setData({ inventoryError: error.message })); this.setData({ reservingCart: false }); } }
+  },
+  startInventoryPolling() { this.stopInventoryPolling(); this.inventoryTimer = setInterval(() => this.pollInventory(), 5000); },
+  stopInventoryPolling() { if (this.inventoryTimer) clearInterval(this.inventoryTimer); this.inventoryTimer = null; },
+  async pollInventory() {
+    if (this.inventoryPolling || this.data.cartBusy || this.data.reservingCart || this.data.loading || this.data.tableSwitching) return;
+    this.inventoryPolling = true;
+    const context = this.cartContext();
+    try {
+      if (context.sessionId) await this.refreshCart(context);
+      else {
+        const data = await api.request('/products?storeId=1');
+        if (!this.isCurrentCart(context)) return;
+        const updates = { inventoryError: '' };
+        for (const key of ['products', 'visibleProducts']) this.data[key].forEach((p, i) => {
+          const stock = data.products.find(row => row.id === p.id)?.stock || 0;
+          updates[`${key}[${i}].stock`] = stock;
+          if (key === 'visibleProducts') updates[`${key}[${i}].remainingQuantity`] = stock;
+        });
+        this.setData(updates);
+      }
+    } catch (error) { if (this.isCurrentCart(context)) this.setData({ inventoryError: '库存同步失败，请检查网络后重试' }); }
+    finally { this.inventoryPolling = false; }
+  },
   upgrade() {
     wx.showModal({ title: '充值升级会员', content: '是否查看储值套餐？满足商家设置的升级条件后可享会员价，具体以充值后的会员等级为准。', confirmText: '查看套餐', success: result => { if (result.confirm) wx.navigateTo({ url: '/pages/recharge/recharge' }); } });
   },
-  preview() { if (this.data.cartBusy) return wx.showToast({ title: '正在更新购物车，请稍等', icon: 'none' }); if (!this.data.totalQty) return wx.showToast({ title: '请先选择商品', icon: 'none' }); const query = this.data.selectedCouponId ? `?userCouponId=${encodeURIComponent(this.data.selectedCouponId)}` : ''; wx.navigateTo({ url: `/pages/cart/cart${query}` }); },
-  closeAuth() { this.authPostponed = true; this.setData({ authVisible: false, authError: '' }); },
+  preview() { if (this.data.cartBusy) return wx.showToast({ title: '正在更新购物车，请稍等', icon: 'none' }); if (!this.data.totalQty) return wx.showToast({ title: '请先选择商品', icon: 'none' }); this.closeCartPreview(); const query = this.data.selectedCouponId ? `?userCouponId=${encodeURIComponent(this.data.selectedCouponId)}` : ''; wx.navigateTo({ url: `/pages/cart/cart${query}` }); },
+  closeAuth() { this.authPostponed = true; this.setData({ authVisible: false, authError: '' }); this.syncOverlayTabs(); },
   onAuthAvatar(e) {
     const avatarPath = e.detail?.avatarUrl;
     if (avatarPath) this.setData({ authAvatarPath: avatarPath, authAvatarUrl: '', authError: '' });
@@ -228,20 +280,20 @@ Page({
       getApp().globalData.user = user;
       getApp().globalData.profileComplete = Boolean(user.phone && user.avatarUrl && user.nickname && user.nickname !== '微信用户');
       this.setData({ user, memberInitial: (user.memberLevel || '会').charAt(0), authAvatarPath: api.imageUrl(user.avatarUrl || ''), authAvatarUrl: user.avatarUrl || '', authNickname: user.nickname, authStep: user.phone ? '' : 'phone', authError: '' });
-      if (user.phone) this.setData({ authVisible: false });
+      if (user.phone) { this.setData({ authVisible: false }); this.syncOverlayTabs(); }
     }).catch(error => this.setData({ authError: error.message || '头像昵称保存失败，请重试' })).finally(() => this.setData({ authBusy: false }));
   },
   onPhone(e) {
     if (this.data.authBusy) return;
     if (!e.detail?.code) {
       const detail = e.detail?.errMsg || '';
-      return this.setData({ authError: detail.includes('deny') || detail.includes('cancel') ? '你没有同意手机号授权，可以点击按钮重新授权' : `未获得手机号授权${detail ? `：${detail}` : '，请点击按钮重试'}` });
+      return this.setData({ authError: phoneAuthorizationError(detail) });
     }
     this.setData({ authBusy: true, authError: '' });
     api.request('/me/phone', { method: 'POST', data: { code: e.detail.code } }).then(({ user }) => {
       getApp().globalData.user = user;
       getApp().globalData.profileComplete = true;
-      this.setData({ user, authVisible: false, authStep: '', authError: '' });
+      this.setData({ user, authVisible: false, authStep: '', authError: '' }); this.syncOverlayTabs();
     }).catch(error => this.setData({ authError: error.message || '手机号绑定失败，请重试' })).finally(() => this.setData({ authBusy: false }));
   }
 });

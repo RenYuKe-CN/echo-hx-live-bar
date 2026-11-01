@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { db } from './db.js';
-import { assertStock } from './catalog.js';
+import { reserveCart } from './catalog.js';
 const fail = (message, status = 409) => { throw Object.assign(new Error(message), { status }); };
 export function registerTableSelection(router, { requireWechatUser, currentUserId, getOrCreateSession }) {
   router.get('/tables', requireWechatUser, (_req, res) => res.json({ tables: db.prepare(`SELECT t.id,t.table_no AS tableNo,
@@ -30,13 +30,12 @@ export function registerTableSelection(router, { requireWechatUser, currentUserI
         const session = getOrCreateSession(table.store_id,table.id,userId);
         if (cartAction === 'move' && old && old.id !== session.id) {
           const own = db.prepare("SELECT * FROM cart_items WHERE session_id=? AND added_by_user_id=? AND status='pending'").all(old.id,userId);
-          const existing = db.prepare("SELECT product_id,quantity FROM cart_items WHERE session_id=? AND status='pending'").all(session.id);
-          assertStock([...existing,...own]);
           for (const item of own) {
             if (!db.prepare("SELECT 1 FROM products WHERE id=? AND status='active' AND sellable=1").get(item.product_id)) fail('购物车有下架商品，请先处理后再移动');
             if (item.applied_coupon_id && db.prepare("SELECT 1 FROM cart_items WHERE session_id=? AND applied_coupon_id=? AND status='pending'").get(session.id,item.applied_coupon_id)) fail('目标桌已有同一张商品券，请先核对');
             db.prepare('UPDATE cart_items SET session_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(session.id,item.id);
           }
+          reserveCart(session.id);
         }
         db.prepare('INSERT INTO table_switch_commands(request_id,user_id,fingerprint,session_id) VALUES(?,?,?,?)').run(requestId,userId,fingerprint,session.id);
         return { table:{id:table.id,tableNo:table.table_no},session };

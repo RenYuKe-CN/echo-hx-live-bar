@@ -115,7 +115,7 @@ test('shift cash, recharge, refund and handover reconcile while online orders co
   shift=await current();const expected=10000+3000+offer.pay_cents-1000-1000;assert.equal(shift.expected_cents,expected);
   assert.equal((await post(`/admin/shifts/${shift.id}/count`,{revision:shift.revision},tokens.cashier)).status,200);
   const cashAttempt=await post('/admin/pos/orders',{tableId:1,phone:'13800138001',items:[{productId:1,quantity:1}],paymentMethod:'cash',requestId:crypto.randomUUID()},tokens.cashier);assert.equal(cashAttempt.status,409);
-  db.prepare('INSERT INTO cart_items(session_id,product_id,quantity,added_by_user_id) VALUES(1,1,1,1)').run();assert.equal((await post('/sessions/1/orders',{paymentMethod:'balance'},tokens.user)).status,201);
+  assert.equal((await post('/sessions/1/cart/items',{productId:1,quantity:1},tokens.user)).status,201);assert.equal((await post('/sessions/1/orders',{paymentMethod:'balance'},tokens.user)).status,201);
   shift=await current();assert.ok(shift.channels.some(row=>row.channel==='stored'&&row.net_cents===3000));assert.equal(shift.expected_cents,expected);
   assert.equal((await post(`/admin/shifts/${shift.id}/submit`,{revision:shift.revision,actual:expected/100},tokens.cashier)).status,200);
   shift=await current();const acceptance={requestId:crypto.randomUUID(),revision:shift.revision};assert.equal((await post(`/admin/shifts/${shift.id}/accept`,acceptance,tokens.cashier)).status,409);

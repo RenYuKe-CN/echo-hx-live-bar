@@ -20,7 +20,7 @@ import { parseRefundItems, returnOrderStock, orderCostSql, refundStockPlan, appl
 import { validateWechatPayment, validateWechatRefund } from './payment-validation.js';
 import { storeName } from './branding.js';
 import { registerWorkdeskRoutes, workEvent, workOrderView, fulfillmentLines, refundHold, hasDeliveryInProgress, cancelReadyBatchesForRefund } from './workdesk.js';
-import { catalogProduct, getCatalogProduct, assertStock, reserveStock, insertSaleItems, logStock, cartAvailability } from './catalog.js';
+import { catalogProduct, getCatalogProduct, assertStock, reserveStock, insertSaleItems, logStock, cartAvailability, reserveCart, reduceCartHold, assertCartReservation, releaseCartHolds, cleanupCartHolds, availableBasicStock, cartHeldStock, cartHoldTotals } from './catalog.js';
 import { registerCatalogRoutes } from './catalog-routes.js';
 import { registerGroupBuyRoutes, finalizeRedemption, groupBuyOptions } from './group-buy.js';
 import { registerCommerceRoutes } from './commerce-routes.js';
@@ -113,6 +113,12 @@ router.use((req, _res, next) => {
 const requireWechatUser = (req, res, next) => {
   const demoAllowed = process.env.NODE_ENV === 'development' && currentUserId(req) > 0;
   if (!req.user && !demoAllowed) return res.status(401).json({ message: '请先完成微信登录' });
+  next();
+};
+const validPhone = phone => /^1[3-9]\d{9}$/.test(phone);
+const requireOrderPhone = (req, res, next) => {
+  const user = db.prepare('SELECT phone FROM users WHERE id = ?').get(currentUserId(req));
+  if (!validPhone(user?.phone || '')) return res.status(403).json({ code: 'PHONE_BINDING_REQUIRED', message: '请先绑定手机号再下单，便于查询订单和处理售后' });
   next();
 };
 router.get('/auth/me', (req, res) => req.user ? res.json({ user: publicUser(req.user) }) : res.status(401).json({ message: '请先完成微信登录' }));
@@ -863,8 +869,8 @@ function getOrCreateSession(storeId, tableId, userId) {
   return session;
 }
 
-function productView(row) {
-  const product = catalogProduct(row);
+function productView(row, holds) {
+  const product = catalogProduct(row, false, holds);
   return { ...product, stock: product.availableStock, memberPrice: centsToMoney(row.member_price_cents ?? row.price_cents) };
 }
 
@@ -1060,7 +1066,7 @@ function getCouponForOrder(userId, userCouponId, items, options = {}) {
     LEFT JOIN products gift ON gift.id = cd.gift_product_id
     WHERE uc.id = ?`).get(userCouponId);
   const result = couponUsable(coupon, userId, items, options);
-  if (!result.ok) throw new Error(result.message);
+  if (!result.ok) throw Object.assign(new Error(result.message), { code: 'CHECKOUT_COUPON_INVALID' });
   return { ...coupon, ...result };
 }
 
@@ -1095,9 +1101,10 @@ function orderTotals(items, userId, selectedCouponId) {
 router.get('/products', (req, res) => {
   syncProductAvailability();
   const storeId = Number(req.query.storeId || 1);
-  const rows = db.prepare("SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id WHERE p.store_id = ? AND p.sellable=1 AND p.status = 'active' ORDER BY c.sort, p.sort, p.id").all(storeId).filter(row=>catalogProduct(row).availableStock>0);
+  const rows = db.prepare("SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id WHERE p.store_id = ? AND p.sellable=1 AND (p.status = 'active' OR p.auto_unlisted=1) ORDER BY c.sort, p.sort, p.id").all(storeId);
   const pricing = memberPricing(currentUserId(req));
-  res.json({ membership: pricing, products: rows.map(row => ({ ...productView(row), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) })), categories: [...new Set(rows.map(row => row.category))] });
+  const holds = cartHoldTotals();
+  res.json({ membership: pricing, products: rows.map(row => ({ ...productView(row, holds), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) })), categories: [...new Set(rows.map(row => row.category))] });
 });
 
 router.get('/tables/resolve', (req, res) => {
@@ -1125,7 +1132,7 @@ router.get('/sessions/:sessionId/cart', (req, res) => {
   const rows = db.prepare("SELECT ci.id, ci.product_id, ci.quantity, ci.added_by_user_id, ci.applied_coupon_id, p.name, p.detail, p.price_cents, p.member_price_cents, p.image_url, p.color, p.stock, p.reserved_stock FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending' ORDER BY ci.id").all(req.params.sessionId);
   const pricing = memberPricing(currentUserId(req));
   const totals = rows.reduce((sum, row) => { sum.original += row.price_cents * row.quantity; sum.member += unitPrice(row, pricing) * row.quantity; return sum; }, { original: 0, member: 0 });
-  res.json({ ...cartAvailability(rows), membership: pricing, items: rows.map(row => { const p=getCatalogProduct(row.product_id);return ({ ...row, stock:p.availableStock, physicalStock:p.physicalStock, reservedStock:p.reservedStock, availableStock:p.availableStock,kind:p.kind,unit:p.unit,components:p.components, price: centsToMoney(row.price_cents), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) }); }), totals: { original: centsToMoney(totals.original), member: centsToMoney(totals.member), discount: centsToMoney(totals.original - totals.member), points: Math.floor(totals.member / 100 * pricing.pointsRate) } });
+  res.json({ ...cartAvailability(req.params.sessionId), tableNo: db.prepare('SELECT t.table_no FROM table_sessions s JOIN tables t ON t.id=s.table_id WHERE s.id=?').get(req.params.sessionId)?.table_no || '', membership: pricing, items: rows.map(row => { const p=getCatalogProduct(row.product_id);return ({ ...row, stock:p.availableStock, physicalStock:p.physicalStock, reservedStock:p.reservedStock, availableStock:p.availableStock,kind:p.kind,unit:p.unit,components:p.components, price: centsToMoney(row.price_cents), referenceMemberPrice: centsToMoney(Math.min(row.price_cents, row.member_price_cents ?? row.price_cents)), memberPrice: centsToMoney(unitPrice(row, pricing)) }); }), totals: { original: centsToMoney(totals.original), member: centsToMoney(totals.member), discount: centsToMoney(totals.original - totals.member), points: Math.floor(totals.member / 100 * pricing.pointsRate) } });
 });
 
 router.post('/sessions/:sessionId/cart/items', (req, res) => {
@@ -1138,10 +1145,6 @@ router.post('/sessions/:sessionId/cart/items', (req, res) => {
       const session = db.prepare("SELECT * FROM table_sessions WHERE id = ? AND status = 'open'").get(req.params.sessionId);
       const product = db.prepare("SELECT * FROM products WHERE id = ? AND sellable=1 AND status = 'active'").get(productId);
       if (!session || !product) throw new Error('商品已下架或库存不足');
-      const inCart = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS quantity FROM cart_items WHERE session_id = ? AND product_id = ? AND status = 'pending'").get(session.id, product.id).quantity;
-      const available = catalogProduct(product).availableStock;
-      if (inCart + requested > available) throw new Error(`库存不足，当前最多还可下单 ${Math.max(available - inCart, 0)} 件`);
-      assertStock([...db.prepare("SELECT product_id,quantity FROM cart_items WHERE session_id=? AND status='pending'").all(session.id),{product_id:product.id,quantity:requested}]);
       db.prepare('INSERT OR IGNORE INTO session_members (session_id, user_id) VALUES (?, ?)').run(session.id, userId);
       // Never merge a normal purchase into a product-voucher row. The
       // voucher row is a fixed one-unit gift and must remain traceable to the
@@ -1149,6 +1152,7 @@ router.post('/sessions/:sessionId/cart/items', (req, res) => {
       const existing = db.prepare("SELECT id FROM cart_items WHERE session_id = ? AND product_id = ? AND added_by_user_id = ? AND status = 'pending' AND applied_coupon_id IS NULL").get(session.id, product.id, userId);
       if (existing) db.prepare('UPDATE cart_items SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(requested, existing.id);
       else db.prepare('INSERT INTO cart_items (session_id, product_id, quantity, added_by_user_id) VALUES (?, ?, ?, ?)').run(session.id, product.id, requested, userId);
+      reserveCart(session.id);
     })();
     res.status(201).json({ ok: true });
   } catch (error) { res.status(409).json({ message: error.message }); }
@@ -1174,13 +1178,10 @@ router.post('/sessions/:sessionId/coupons/:userCouponId/use', (req, res) => {
       const product = db.prepare("SELECT * FROM products WHERE id = ? AND sellable=1 AND status = 'active'").get(coupon.gift_product_id);
       if (!product) throw new Error('兑换商品已下架或库存不足');
       const applied = db.prepare("SELECT id, quantity FROM cart_items WHERE session_id = ? AND applied_coupon_id = ? AND status = 'pending' LIMIT 1").get(session.id, coupon.id);
-      if (applied) return { productId: product.id, productName: product.name, added: false, alreadyApplied: true, quantity: applied.quantity };
-      const inCart = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS quantity FROM cart_items WHERE session_id = ? AND product_id = ? AND status = 'pending'").get(session.id, product.id).quantity;
-      const available = catalogProduct(product).availableStock;
-      if (inCart + 1 > available) throw new Error(`库存不足，当前最多还可下单 ${Math.max(available - inCart, 0)} 件`);
+      if (applied) { reserveCart(session.id); return { productId: product.id, productName: product.name, added: false, alreadyApplied: true, quantity: applied.quantity }; }
       db.prepare('INSERT OR IGNORE INTO session_members (session_id, user_id) VALUES (?, ?)').run(session.id, userId);
-      assertStock([...db.prepare("SELECT product_id,quantity FROM cart_items WHERE session_id=? AND status='pending'").all(session.id),{product_id:product.id,quantity:1}]);
       db.prepare('INSERT INTO cart_items (session_id, product_id, quantity, added_by_user_id, applied_coupon_id) VALUES (?, ?, 1, ?, ?)').run(session.id, product.id, userId, coupon.id);
+      reserveCart(session.id);
       return { productId: product.id, productName: product.name, added: true, quantity: inCart + 1 };
     })();
     res.json({ ok: true, ...result });
@@ -1188,23 +1189,30 @@ router.post('/sessions/:sessionId/coupons/:userCouponId/use', (req, res) => {
 });
 
 router.patch('/sessions/:sessionId/cart/items/:itemId', (req, res) => {
-  const quantity = Number(req.body.quantity);
-  if (!Number.isInteger(quantity) || quantity < 0) return res.status(400).json({ message: '数量无效' });
+  const relative = Object.hasOwn(req.body || {}, 'delta');
+  const delta = Number(req.body?.delta), requested = Number(req.body?.quantity);
+  if (relative ? ![-1, 1].includes(delta) || Object.hasOwn(req.body, 'quantity') : !Number.isSafeInteger(requested) || requested < 0) return res.status(400).json({ message: '数量无效' });
   try {
     db.transaction(() => {
       const item = db.prepare("SELECT ci.*, p.stock, p.reserved_stock, p.status AS product_status FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.id = ? AND ci.session_id = ? AND ci.status = 'pending'").get(req.params.itemId, req.params.sessionId);
       if (!item) throw new Error('购物车商品不存在或已下架');
+      // Apply a single step to the current shared row, never a stale client quantity.
+      const quantity = relative ? item.quantity + delta : requested;
+      if (!Number.isSafeInteger(quantity) || quantity < 0) throw new Error('数量无效');
       if (quantity > 0) {
         if (item.applied_coupon_id && quantity > 1) throw new Error('商品兑换券赠送数量固定为 1 件');
-        const other = db.prepare("SELECT COALESCE(SUM(quantity), 0) AS quantity FROM cart_items WHERE session_id = ? AND product_id = ? AND status = 'pending' AND id != ?").get(req.params.sessionId, item.product_id, item.id).quantity;
-        const available = getCatalogProduct(item.product_id).availableStock;
-        if (item.product_status !== 'active' || available <= 0 || other + quantity > available) throw new Error(`库存不足，当前最多可下单 ${Math.max(available - other, 0)} 件`);
-        assertStock([...db.prepare("SELECT product_id,quantity FROM cart_items WHERE session_id=? AND status='pending' AND id!=?").all(req.params.sessionId,item.id),{product_id:item.product_id,quantity}]);
         db.prepare("UPDATE cart_items SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(quantity, item.id);
       } else db.prepare("UPDATE cart_items SET status = 'removed', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.id);
+      if (quantity >= item.quantity) reserveCart(item.session_id);
+      else reduceCartHold(item, quantity);
     })();
     res.json({ ok: true });
   } catch (error) { res.status(409).json({ message: error.message }); }
+});
+
+router.post('/sessions/:sessionId/cart/reserve', (req, res) => {
+  try { res.json({ reservation: reserveCart(Number(req.params.sessionId)) }); }
+  catch (error) { res.status(error.status || 409).json({ message: error.message, code: error.code }); }
 });
 
 function settleOrder(order, method, req, reserved = true) {
@@ -1369,7 +1377,7 @@ router.post('/payments/wechat/:orderNo/query', async (req, res) => {
   } catch (error) { res.status(error.status || 503).json({ message: error.message, code: error.code || 'WECHAT_QUERY_ERROR' }); }
 });
 
-router.post('/me/orders/:orderNo/pay', async (req, res) => {
+router.post('/me/orders/:orderNo/pay', requireOrderPhone, async (req, res) => {
   const userId = currentUserId(req);
   if (!userId) return res.status(401).json({ message: '请先登录' });
   const order = db.prepare("SELECT * FROM orders WHERE order_no = ? AND payer_user_id = ?").get(req.params.orderNo, userId);
@@ -1475,7 +1483,7 @@ export function startBusinessSchedulers() {
   const tick = async () => {
     if (checking) return;
     checking = true;
-    try { await withBackgroundTask(async () => { await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); await reconcilePrintJobs(); }); }
+    try { await withBackgroundTask(async () => { cleanupCartHolds(); await releaseExpiredWechatOrders(); await reconcileProcessingRefunds(); for(const row of db.prepare("SELECT id FROM group_buy_redemptions WHERE state='verified'").all()) finalizeRedemption(row.id,settleOrder); await reconcilePrintJobs(); }); }
     catch (error) { console.error(`[wechat] 支付退款对账失败: ${error.message}`); }
     finally { checking = false; }
   };
@@ -1573,7 +1581,7 @@ router.get('/sessions/:sessionId/checkout', (req, res) => {
   const rows = db.prepare("SELECT ci.id, ci.quantity, ci.applied_coupon_id, p.id AS product_id, p.category_id, p.price_cents, p.member_price_cents, p.allow_bonus FROM cart_items ci JOIN products p ON p.id = ci.product_id WHERE ci.session_id = ? AND ci.status = 'pending'").all(session.id);
   let totals;
   try { totals = orderTotals(rows, userId, req.query.userCouponId ? Number(req.query.userCouponId) : null); }
-  catch (error) { return res.status(409).json({ message: error.message }); }
+  catch (error) { return res.status(409).json({ message: error.message, code: error.code }); }
   const pricing = totals.pricing;
   const payable = totals.payable;
   const bonusEligible = totals.usingCoupon ? 0 : rows.reduce((n, item) => n + (item.allow_bonus ? unitPrice(item, pricing) * item.quantity : 0), 0);
@@ -1585,7 +1593,7 @@ router.get('/sessions/:sessionId/checkout', (req, res) => {
   res.json({ original: centsToMoney(totals.original), member: centsToMoney(totals.member), payable: centsToMoney(payable), discount: centsToMoney(totals.original - payable), memberDiscount: centsToMoney(totals.original - totals.member), couponDiscount: centsToMoney(totals.couponDiscount), coupon: totals.coupon ? { id: totals.coupon.id, name: totals.coupon.name, discount: centsToMoney(totals.couponDiscount), voucherType: totals.coupon.voucher_type || 'discount', giftProductId: totals.coupon.gift_product_id || null, giftProductName: totals.coupon.gift_product_name || null } : null, usingCoupon: totals.usingCoupon, productVoucher: totals.productVoucher, giftProductId: totals.giftProductId, stored: centsToMoney(wallet.stored_cents), bonus: centsToMoney(wallet.bonus_cents), accountBalance: centsToMoney(wallet.stored_cents), accountBonus: centsToMoney(wallet.bonus_cents), bonusEligible: centsToMoney(bonusEligible), bonusUsable: centsToMoney(bonusUsable), storedUsable: centsToMoney(storedUsable), balanceDeduction: centsToMoney(balanceDeduction), wechatDue: centsToMoney(wechatDue), balanceAvailable: wechatDue === 0, mixedPaymentAvailable: balanceDeduction > 0 && wechatDue > 0, couponCannotUseBonus: totals.usingCoupon });
 });
 
-router.post('/sessions/:sessionId/orders', async (req, res) => {
+router.post('/sessions/:sessionId/orders', requireOrderPhone, async (req, res) => {
   const userId = currentUserId(req);
   const method = req.body?.paymentMethod;
   const selectedCouponId = req.body?.userCouponId ? Number(req.body.userCouponId) : null;
@@ -1597,7 +1605,7 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
   if (!session || !items.length) return res.status(400).json({ message: '桌台没有待支付商品' });
   const existing = db.prepare("SELECT o.* FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.session_id = ? AND o.payment_status = 'pending' AND oi.cart_item_id IN (SELECT id FROM cart_items WHERE session_id = ? AND status = 'pending') ORDER BY o.id DESC LIMIT 1").get(session.id, session.id);
   if (existing) return res.status(409).json({ message: `订单 ${existing.order_no} 正在等待支付，请勿重复提交` });
-  try { assertStock(items); } catch(error) { return res.status(409).json({message:error.message}); }
+  try { assertCartReservation(session.id); assertStock(items, session.id); } catch(error) { return res.status(409).json({message:error.message, code:error.code}); }
   let totals;
   try { totals = orderTotals(items, userId, selectedCouponId); }
   catch (error) { return res.status(409).json({ message: error.message }); }
@@ -1617,7 +1625,8 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
     if (method === 'mixed' && (wechat <= 0 || bonus + stored <= 0)) throw new Error('当前订单不需要组合支付');
     const paymentExpireAt = method === 'balance' || totals.payable === 0 ? null : new Date(Date.now() + PAYMENT_EXPIRY_MS).toISOString();
     const result = db.prepare('INSERT INTO orders (order_no, session_id, payer_user_id, original_amount_cents, discount_amount_cents, payable_amount_cents, coupon_id, coupon_discount_cents, payment_method, stored_paid_cents, bonus_paid_cents, wechat_paid_cents, payment_expire_at, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(orderNo, session.id, userId, totals.original, totals.original - totals.payable, totals.payable, totals.coupon?.id || null, totals.couponDiscount, method, stored, bonus, wechat, paymentExpireAt, note);
-    assertStock(items);
+    assertCartReservation(session.id);
+    assertStock(items, session.id);
     const voucherGiftRowId = totals.productVoucher
       ? items.find(item => Number(item.applied_coupon_id) === Number(totals.coupon?.id)
         && Number(item.product_id) === Number(totals.giftProductId))?.id
@@ -1637,6 +1646,7 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
     });
     lockCoupon(result.lastInsertRowid, totals.coupon?.id, userId);
     db.prepare(`UPDATE cart_items SET status = 'checking_out' WHERE session_id = ? AND status = 'pending'`).run(session.id);
+    releaseCartHolds(session.id);
     reserveStock(assertStock(items));
     if (method === 'balance' || totals.payable === 0) {
       if (stored || bonus) {
@@ -1671,7 +1681,7 @@ router.post('/sessions/:sessionId/orders', async (req, res) => {
     queueUserMessage(userId, 'order_pending_payment', { ...orderMessageValues(order), minutes: Math.ceil(PAYMENT_EXPIRY_MS / 60000) }, 'order_pending', order.id, `订单待支付：${order.order_no}`);
   }
   res.status(201).json({ order: { ...order, originalAmount: centsToMoney(order.original_amount_cents), discountAmount: centsToMoney(order.discount_amount_cents), payableAmount: centsToMoney(order.payable_amount_cents), storedPaid: centsToMoney(order.stored_paid_cents), bonusPaid: centsToMoney(order.bonus_paid_cents), wechatPaid: centsToMoney(order.wechat_paid_cents) }, payment });
-  } catch (error) { res.status(409).json({ message: error.message }); }
+  } catch (error) { res.status(409).json({ message: error.message, code: error.code }); }
 });
 
 // Management APIs use the staff authentication and module permissions above.
@@ -1771,8 +1781,10 @@ router.get('/admin/summary', (req, res) => {
   const totalTables = db.prepare("SELECT COUNT(*) AS value FROM tables WHERE status != 'disabled'").get().value;
   const idleTables = Math.max(totalTables - activeTables, 0);
   const members = db.prepare("SELECT COUNT(*) AS value FROM users WHERE member_level != '普通会员'").get().value;
-  const lowStock = db.prepare("SELECT COUNT(*) AS value FROM products WHERE kind='basic' AND stock-reserved_stock<=safety_stock").get().value;
-  const outOfStock = db.prepare("SELECT COUNT(*) AS value FROM products WHERE kind='basic' AND stock-reserved_stock<=0").get().value;
+  const stockHolds = cartHoldTotals();
+  const inventory = db.prepare("SELECT * FROM products WHERE kind='basic'").all().map(p => ({...p, available: Math.max(0,p.stock-p.reserved_stock-(stockHolds.get(p.id)||0))}));
+  const lowStock = inventory.filter(p => p.available<=p.safety_stock).length;
+  const outOfStock = inventory.filter(p => p.available===0).length;
   const canViewOrders = req.staff.role === 'super' || JSON.parse(req.staff.permissions).includes('orders');
   const pendingOrders = canViewOrders ? db.prepare("SELECT o.id, o.order_no, o.paid_at, o.note, t.table_no, u.nickname FROM orders o JOIN table_sessions ts ON ts.id = o.session_id JOIN tables t ON t.id = ts.table_id JOIN users u ON u.id = o.payer_user_id WHERE o.status = 'awaiting_delivery' AND o.payment_status = 'paid' ORDER BY o.paid_at, o.id LIMIT 50").all() : [];
   const pendingRefunds = canProcessRefunds(req.staff) ? db.prepare("SELECT COUNT(*) AS value FROM refund_requests WHERE status = 'pending'").get().value : 0;
@@ -1957,7 +1969,6 @@ router.post('/admin/orders/:id/mark-paid', (req, res) => {
   })(); res.json({ ok: true }); } catch (error) { res.status(409).json({ message: error.message }); }
 });
 
-const validPhone = phone => /^1[3-9]\d{9}$/.test(phone);
 const birthdayView = row => {
   const match = getBirthdayMatchInfo(row.birthday_type, row.birthday_date);
   return { id: row.id, phone: row.phone, nickname: row.nickname, memberLevel: row.member_level, birthdayType: row.birthday_type || '', birthdayDate: row.birthday_date || '', adminNote: row.admin_note || '', daysUntil: match.daysUntil, birthdayLabel: match.label };
@@ -2134,8 +2145,8 @@ router.post('/rewards/:id/redeem', requireWechatUser, (req, res) => {
       const reward = db.prepare("SELECT * FROM reward_items WHERE id = ? AND status = 'active'").get(req.params.id);
       if (!reward) throw new Error('奖品已下架');
       if (reward.product_id) {
-        const product = db.prepare("SELECT stock, reserved_stock FROM products WHERE id = ? AND status = 'active'").get(reward.product_id);
-        if (!product || product.stock - product.reserved_stock < 1) throw new Error('商品可售库存不足');
+        const product = db.prepare("SELECT * FROM products WHERE id = ? AND status = 'active'").get(reward.product_id);
+        if (!product || availableBasicStock(product) < 1) throw new Error('商品可售库存不足');
       }
       const user = db.prepare('UPDATE users SET points = points - ? WHERE id = ? AND points >= ?').run(reward.points, currentUserId(req), reward.points);
       if (!user.changes) throw new Error('积分不足');
@@ -2215,6 +2226,8 @@ router.post('/admin/inventory/:productId/adjust', (req, res) => {
   if (!Number.isSafeInteger(change) || !Number.isSafeInteger(Number(req.body.change)) || change === 0 || !reason || (req.body.unit && !['base','pack'].includes(req.body.unit))) return res.status(400).json({ message: '请输入非零变动数量和原因' });
   try {
     const result = db.transaction(() => {
+      const latestStock = db.prepare('SELECT * FROM products WHERE id=?').get(req.params.productId);
+      if (change < 0 && availableBasicStock(latestStock) < -change) throw new Error('可售库存不足，购物车或待支付订单已占用库存');
       const updated = db.prepare('UPDATE products SET stock = stock + ? WHERE id = ? AND (? > 0 OR stock - reserved_stock >= ?)').run(change, req.params.productId, change, Math.max(-change, 0));
       if (!updated.changes) {
         const latest = db.prepare('SELECT stock, reserved_stock,kind,pack_size FROM products WHERE id = ?').get(req.params.productId);
@@ -2225,7 +2238,8 @@ router.post('/admin/inventory/:productId/adjust', (req, res) => {
       audit(req, '调整库存', `${req.params.productId}: ${change}, ${reason}`);
       return current;
     })();
-    res.json({ ok: true, stock: result.stock, physicalStock: result.stock, reservedStock: result.reserved_stock, availableStock: Math.max(result.stock - result.reserved_stock, 0) });
+    const cartReserved = cartHeldStock(Number(req.params.productId));
+    res.json({ ok: true, stock: result.stock, physicalStock: result.stock, reservedStock: result.reserved_stock + cartReserved, orderReservedStock: result.reserved_stock, availableStock: Math.max(result.stock - result.reserved_stock - cartReserved, 0), cartReservedStock: cartReserved });
   } catch (error) { res.status(409).json({ message: error.message }); }
 });
 router.get('/admin/losses', (req, res) => { const { page, pageSize, offset } = parsePagination(req); const total = db.prepare('SELECT COUNT(*) AS value FROM stock_losses').get().value; return res.json({ records: db.prepare('SELECT l.*, p.name AS product_name, a.display_name AS operator FROM stock_losses l JOIN products p ON p.id = l.product_id JOIN staff_accounts a ON a.id = l.operator_id ORDER BY l.id DESC LIMIT ? OFFSET ?').all(pageSize, offset).map(row => { const record = { ...row }; delete record.cost_cents; if (req.staff.role === 'super') record.cost = centsToMoney(row.cost_cents); return record; }), pagination: paginationView(page, pageSize, total) }); });
@@ -2233,7 +2247,7 @@ router.post('/admin/losses', (req, res) => {
   const product = db.prepare('SELECT * FROM products WHERE id = ?').get(req.body?.productId);
   const quantity = Number(req.body?.quantity), type = req.body?.type, reason = String(req.body?.reason || '').trim();
   if (!product || product.kind!=='basic' || !Number.isSafeInteger(quantity) || quantity < 1 || !['gift','damage'].includes(type) || !reason) return res.status(400).json({ message: '请选择商品、数量、类型并填写原因' });
-  try { const record = db.transaction(() => { const updated = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock - reserved_stock >= ?').run(quantity, product.id, quantity); if (!updated.changes) throw new Error(`可售库存不足，已有 ${product.reserved_stock} 件被待支付订单占用`); logStock(product.id,-quantity,`${type==='gift'?'赠送':'报损'}：${reason}`,{channel:type,operator:req.staff.username}); const r = db.prepare('INSERT INTO stock_losses (product_id, quantity, cost_cents, type, reason, operator_id) VALUES (?, ?, ?, ?, ?, ?)').run(product.id, quantity, product.cost_cents * quantity, type, reason, req.staff.id); audit(req, type === 'gift' ? '上报赠酒' : '上报报损', `${product.name} x${quantity}: ${reason}`); return db.prepare('SELECT * FROM stock_losses WHERE id = ?').get(r.lastInsertRowid); })(); if (req.staff.role !== 'super') delete record.cost_cents; res.status(201).json({ record }); } catch (error) { res.status(409).json({ message: error.message }); }
+  try { const record = db.transaction(() => { if (availableBasicStock(product) < quantity) throw new Error('可售库存不足，购物车或待支付订单已占用库存'); const updated = db.prepare('UPDATE products SET stock = stock - ? WHERE id = ? AND stock - reserved_stock >= ?').run(quantity, product.id, quantity); if (!updated.changes) throw new Error(`可售库存不足，已有 ${product.reserved_stock} 件被待支付订单占用`); logStock(product.id,-quantity,`${type==='gift'?'赠送':'报损'}：${reason}`,{channel:type,operator:req.staff.username}); const r = db.prepare('INSERT INTO stock_losses (product_id, quantity, cost_cents, type, reason, operator_id) VALUES (?, ?, ?, ?, ?, ?)').run(product.id, quantity, product.cost_cents * quantity, type, reason, req.staff.id); audit(req, type === 'gift' ? '上报赠酒' : '上报报损', `${product.name} x${quantity}: ${reason}`); return db.prepare('SELECT * FROM stock_losses WHERE id = ?').get(r.lastInsertRowid); })(); if (req.staff.role !== 'super') delete record.cost_cents; res.status(201).json({ record }); } catch (error) { res.status(409).json({ message: error.message }); }
 });
 
 router.get('/admin/storage', (req, res) => {

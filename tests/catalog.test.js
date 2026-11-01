@@ -253,3 +253,26 @@ test('a grouped partial bundle refund retains exact source prices and returns on
   assert.equal(beer.cancelledQuantity,5);assert.equal(beer.returnedQuantity,5);assert.equal(beer.unpreparedQuantity,1);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM refund_transactions WHERE order_id=?').get(id).n,1);
 });
+
+test('a cart-held bundle blocks direct sales of its basic goods and recipe edits, then releases on removal',async()=>{
+  db.prepare('UPDATE products SET stock=6 WHERE id=1').run();
+  const added=await call('/sessions/1/cart/items',{method:'POST',body:{productId:bundleId,quantity:1}});assert.equal(added.status,201);
+  const cart=(await call('/sessions/1/cart')).body;assert.equal(cart.reservation.reserved,true);assert.equal(cart.remainingByProduct[1],0);assert.equal(cart.remainingByProduct[bundleId],0);
+  const pos=await call('/admin/pos/orders',{token:tokens.cashier,method:'POST',body:{tableId:1,phone:'13800138001',items:[{productId:1,quantity:1}],paymentMethod:'balance',requestId:crypto.randomUUID()}});assert.equal(pos.status,409);
+  assert.equal((await groupOrder(groupBody())).status,409);
+  assert.equal((await admin(`/products/${bundleId}`,'PATCH',{components:[{productId:1,quantity:3},{productId:4,quantity:1}]})).status,409);
+  const item=cart.items[0];assert.equal((await call(`/sessions/1/cart/items/${item.id}`,{method:'PATCH',body:{delta:-1}})).status,200);
+  assert.equal((await groupOrder(groupBody())).status,201);assert.equal(stock(1).stock,0);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM cart_stock_holds').get().n,0);
+});
+
+test('moving a reserved cart keeps its claim once and does not release goods left by another guest',async()=>{
+  db.prepare("INSERT OR IGNORE INTO tables(id,store_id,table_no,qr_token) VALUES(2,1,'MOVE-02','move-02')").run();
+  db.prepare('INSERT INTO session_members(session_id,user_id) VALUES(1,2)').run();
+  assert.equal((await call('/sessions/1/cart/items',{method:'POST',body:{productId:1,quantity:2}})).status,201);
+  assert.equal((await call('/sessions/1/cart/items',{token:tokens.other,method:'POST',body:{productId:1,quantity:3}})).status,201);
+  const moved=await call('/tables/select',{method:'POST',body:{tableId:2,currentSessionId:1,cartAction:'move',requestId:crypto.randomUUID()}});assert.equal(moved.status,200);
+  assert.equal((await call(`/sessions/${moved.body.session.id}/cart`)).body.items[0].quantity,2);
+  assert.equal((await call('/sessions/1/cart',{token:tokens.other})).body.items[0].quantity,3);
+  assert.equal(db.prepare('SELECT SUM(quantity) AS n FROM cart_stock_holds WHERE product_id=1').get().n,5);
+  const p=(await admin('/products?all=1')).body.products.find(p=>p.id===1);assert.equal(p.availableStock,95);
+});

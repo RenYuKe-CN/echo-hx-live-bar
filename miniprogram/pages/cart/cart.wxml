@@ -1,26 +1,39 @@
 <view class="page">
-  <view class="title">确认本桌订单</view>
+  <view class="confirm-heading"><view class="title">确认本桌订单</view><text class="confirm-table">{{tableNo || '未选桌台'}}{{tableNo ? ' 桌' : ''}}</text></view>
   <text class="muted">多人加入的商品一起结算，支付后可继续加单</text>
+  <view wx:if="{{items.length}}" class="cart-hold {{!inventoryReserved ? 'expired' : ''}}"><text>{{reservationText}}</text><button wx:if="{{!inventoryReserved}}" bindtap="relockCart" disabled="{{cartBusy || submitting || refreshing || reservingCart}}" loading="{{reservingCart}}">重新锁定库存</button></view>
+  <view wx:if="{{loadError}}" class="cart-feedback"><text>{{loadError}}</text><button class="cart-retry" bindtap="refresh" disabled="{{refreshing || cartBusy || submitting}}">重新加载</button></view>
+  <view wx:elif="{{!items.length && !refreshing}}" class="cart-empty"><text>本桌暂无待结算商品</text><button class="cart-retry" bindtap="backToMenu">返回点单</button></view>
+  <view wx:elif="{{!items.length && refreshing}}" class="cart-empty">正在加载本桌商品…</view>
   <view wx:for="{{items}}" wx:key="id" class="item">
+    <view class="item-main">
     <image wx:if="{{item.image}}" class="pic pic-image" src="{{item.image}}" mode="aspectFit" />
     <view wx:else class="pic">{{item.initial}}</view>
-    <view class="info"><text>{{item.name}}</text><text class="muted">数量 {{item.quantity}}</text><text wx:if="{{item.isGiftItem}}" class="gift-caption">商品兑换券已赠送 {{item.giftQuantity}} 件</text></view>
+    <view class="info"><text>{{item.name}}</text><text wx:if="{{item.isGiftItem}}" class="gift-caption">商品兑换券已赠送 {{item.giftQuantity}} 件</text></view>
     <view class="item-prices">
       <view wx:if="{{item.isGiftItem}}" class="gift-price-block"><text class="gift-price">赠送 {{item.giftQuantity}} 件 · ¥0.00</text></view>
       <view wx:if="{{item.isGiftItem && item.paidQuantity > 0}}" class="paid-price-block"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.paidOriginalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">其余 {{item.paidQuantity}} 件 · ¥{{item.paidAmountText}}</text></view>
       <view wx:if="{{!item.isGiftItem}}"><text wx:if="{{item.showDiscount}}" class="old">¥{{item.originalText}}</text><text class="price {{!isMember ? 'regular-price' : ''}}">¥{{item.displayText}}</text><text wx:if="{{!isMember}}" class="reference-price">会员价 ¥{{item.referenceMemberText}}</text></view>
     </view>
+    </view>
+    <view class="item-actions">
+      <button class="item-remove" data-id="{{item.id}}" bindtap="removeItem" disabled="{{submitting || reservingCart || pendingItems[item.id] || loadError}}" aria-label="移除{{item.name}}">移除</button>
+      <view class="quantity-editor"><text class="quantity-label">{{pendingItems[item.id] ? '更新中' : '数量'}}</text><button class="quantity-button minus" data-id="{{item.id}}" data-delta="-1" bindtap="changeQuantity" disabled="{{submitting || reservingCart || pendingItems[item.id] || loadError}}" aria-label="减少{{item.name}}数量">−</button><text class="quantity-value">{{item.quantity}}</text><button class="quantity-button plus" data-id="{{item.id}}" data-delta="1" bindtap="changeQuantity" disabled="{{submitting || reservingCart || pendingItems[item.id] || loadError || !item.canIncrease}}" aria-label="增加{{item.name}}数量">＋</button></view>
+    </view>
+    <text wx:if="{{item.applied_coupon_id}}" class="quantity-hint">兑换券商品固定 1 件，可移除；额外加购请返回点单页。</text>
+    <text wx:elif="{{!item.canIncrease}}" class="quantity-hint">已达当前可选数量，可减少或移除。</text>
   </view>
+  <view wx:if="{{couponNotice}}" class="coupon-rule-banner">{{couponNotice}}</view>
   <view wx:if="{{coupons.length}}" class="coupon-select"><view class="section-title">优惠券</view><view class="coupon-option {{!selectedCouponId ? 'selected' : ''}}" data-id="" bindtap="chooseCoupon"><text>不使用优惠券</text><text>{{isMember ? '按会员价结算' : '按原价结算'}}</text></view><view wx:for="{{coupons}}" wx:key="id" class="coupon-option {{selectedCouponId == item.id ? 'selected' : ''}}" data-id="{{item.id}}" bindtap="chooseCoupon"><view><text>{{item.name}}</text><text class="hint">{{item.minimumText}} · 可叠加会员价</text></view><text class="coupon-amount">{{item.amountText}}</text></view></view>
-  <view class="order-note"><text class="section-title">订单备注</text><textarea value="{{note}}" maxlength="200" auto-height placeholder="例如：少冰、送到 A 区，不超过 200 字" bindinput="onNoteInput" /></view>
-  <view class="summary">
+  <view wx:if="{{items.length}}" class="order-note"><text class="section-title">订单备注</text><textarea value="{{note}}" maxlength="200" auto-height placeholder="例如：少冰、送到 A 区，不超过 200 字" bindinput="onNoteInput" disabled="{{submitting}}" /></view>
+  <view wx:if="{{items.length && checkout}}" class="summary">
     <view><text>商品原价</text><text>¥{{totals.originalText}}</text></view>
     <view wx:if="{{isMember}}"><text>会员优惠</text><text class="green">-¥{{checkout ? checkout.memberDiscount : totals.discountText}}</text></view>
     <view wx:if="{{checkout && checkout.usingCoupon}}"><text>{{checkout.productVoucher ? '商品兑换券赠送' : '优惠券优惠'}}</text><text class="green">-¥{{checkout.couponDiscount}}</text></view>
     <view class="pay"><text>应付金额</text><text>¥{{totals.payableText}}</text></view>
   </view>
   <view wx:if="{{checkout && checkout.usingCoupon}}" class="coupon-rule-banner">优惠券可叠加会员价，但不可使用赠金；商品兑换券赠送 1 件。</view>
-  <view wx:if="{{!isMember}}" class="upgrade-banner" bindtap="upgrade">当前按原价结算，是否充值余额并升级会员？<text>查看套餐 ›</text></view>
+  <view wx:if="{{!isMember && items.length}}" class="upgrade-banner" bindtap="upgrade">当前按原价结算，是否充值余额并升级会员？<text>查看套餐 ›</text></view>
   <view wx:if="{{checkout && items.length}}" class="methods">
     <view class="section-title">支付方式</view>
     <view class="method {{method === 'mixed' ? 'selected' : ''}}" data-method="mixed" bindtap="chooseMethod"><view><text>余额 + 微信支付</text><text class="hint">账户储值 ¥{{checkout.storedText}} · 本单抵扣 ¥{{checkout.balanceDeductionText}} · 微信支付 ¥{{checkout.wechatDueText}}</text></view><text class="radio">{{method === 'mixed' ? '●' : '○'}}</text></view>
@@ -28,5 +41,5 @@
     <view wx:if="{{!checkout.balanceAvailable}}" class="warning">余额不足时可使用组合支付，差额将通过微信支付完成</view>
     <view class="method {{method === 'wechat' ? 'selected' : ''}}" data-method="wechat" bindtap="chooseMethod"><view><text>仅微信支付</text><text class="hint">不使用账户余额，使用微信支付完成本单</text></view><text class="radio">{{method === 'wechat' ? '●' : '○'}}</text></view>
   </view>
-  <button class="pay-button" disabled="{{!items.length || submitting}}" loading="{{submitting}}" bindtap="pay">{{method === 'balance' ? '确认余额支付' : method === 'mixed' ? '余额抵扣 ¥' + checkout.balanceDeductionText + '，微信支付 ¥' + checkout.wechatDueText : '创建待支付订单'}} {{method === 'mixed' ? '' : '¥' + totals.payableText}}</button>
+  <button wx:if="{{items.length}}" class="pay-button" disabled="{{submitting || cartBusy || refreshing || loadError || reservingCart || !inventoryReserved}}" loading="{{submitting}}" bindtap="pay">{{!inventoryReserved ? '请先重新锁定库存' : cartBusy || refreshing ? '正在更新订单…' : loadError ? '请重新加载订单' : (method === 'balance' ? '确认余额支付 ¥' + totals.payableText : method === 'mixed' ? '余额抵扣 ¥' + checkout.balanceDeductionText + '，微信支付 ¥' + checkout.wechatDueText : '创建待支付订单 ¥' + totals.payableText)}}</button>
 </view>

@@ -1,4 +1,5 @@
 const api = require('../../utils/api');
+const phoneBinding = require('../../utils/phone-binding');
 
 Page({
   data: { orders: [], busyOrderNo: '' },
@@ -96,16 +97,19 @@ Page({
     if (orderNo) wx.navigateTo({ url: `/pages/order-detail/order-detail?orderNo=${encodeURIComponent(orderNo)}&refund=1` });
   },
 
-  continuePay(event) {
+  async continuePay(event) {
     const orderNo = event.currentTarget.dataset.orderNo;
     if (!orderNo || this.data.busyOrderNo) return;
     this.setData({ busyOrderNo: orderNo });
-    api.request(`/me/orders/${encodeURIComponent(orderNo)}/pay`, { method: 'POST' }).then(async data => {
+    try {
+      if (!await phoneBinding.ensureOrderPhone()) return;
+      const data = await api.request(`/me/orders/${encodeURIComponent(orderNo)}/pay`, { method: 'POST' });
       if (!data.payment) return this.loadOrders();
       const confirmed = await api.payWithWechat(data.payment, orderNo);
       wx.showToast({ title: confirmed ? '支付成功' : '支付状态核对中', icon: confirmed ? 'success' : 'none' });
       return this.loadOrders();
-    }).catch(error => wx.showToast({ title: error.message, icon: 'none' })).finally(() => this.setData({ busyOrderNo: '' }));
+    } catch (error) { await phoneBinding.handleOrderError(error); }
+    finally { this.setData({ busyOrderNo: '' }); }
   },
 
   cancelOrder(event) {

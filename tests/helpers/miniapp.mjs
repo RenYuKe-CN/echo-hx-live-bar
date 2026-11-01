@@ -7,7 +7,8 @@ const root = fileURLToPath(new URL('../../miniprogram/', import.meta.url));
 const clone = value => JSON.parse(JSON.stringify(value));
 
 export function miniappFixture(options = {}) {
-  const store = new Map(), modules = new Map(), calls = [], titles = [], updates = [];
+  const store = new Map(), modules = new Map(), timers = new Map(), calls = [], titles = [], updates = [];
+  let timerId=0; const setInterval=(callback)=>{timers.set(++timerId,callback);return timerId;},clearInterval=id=>timers.delete(id);
   const profile = options.profile || { user: { id: 1, nickname: 'Luna', phone: '13800138000', avatarUrl: 'https://example.test/avatar.png', memberLevel: '金卡会员', memberColor: '#debd8c', memberExpiresAt: '2026-10-28T23:59:59.000Z', points: 1280 }, wallet: { stored: 500, bonus: 100 }, membership: {} };
   const configuration = { entries: [
     { key: 'app_name', title: options.brandName || '示例酒馆', type: 'text' }, { key: 'home_title', title: '今晚喝点什么？', type: 'text' },
@@ -34,7 +35,7 @@ export function miniappFixture(options = {}) {
       if (url.startsWith('/products')) return { products: clone(products), categories: ['推荐', '啤酒', '鸡尾酒', '小吃', '套餐', '无酒精'], membership: { active: options.isMember !== false } };
       if (url.startsWith('/tables/')) return { session: { id: 1 }, user: clone(profile.user) };
       if (url === '/sessions/1/services') return { types: { help: '呼叫服务员', tissue: '需要纸巾', cleanup: '收拾桌面', remind: '催单', other: '其他帮助' }, requests: [] };
-      if (url === '/sessions/1/cart') return { items: clone(cart), totals: { original: 144, member: options.isMember === false ? 144 : 129, discount: options.isMember === false ? 0 : 15 } };
+      if (url === '/sessions/1/cart') return { membership: {active:options.isMember!==false}, tableNo:'A-08', reservation:{reserved:true,expiresAt:new Date(Date.now()+600000).toISOString()}, stockByProduct:Object.fromEntries(products.map(p=>[p.id,Math.max(0,p.stock-cart.filter(i=>i.product_id===p.id).reduce((n,i)=>n+i.quantity,0))])), remainingByProduct:Object.fromEntries(products.map(p=>[p.id,Math.max(0,p.stock-cart.filter(i=>i.product_id===p.id).reduce((n,i)=>n+i.quantity,0))])), items: cart.map(i=>({...clone(products.find(p=>p.id===i.product_id)),...clone(i)})), totals: { original: 144, member: options.isMember === false ? 144 : 129, discount: options.isMember === false ? 0 : 15 } };
       if (request.method === 'POST' || request.method === 'PATCH') return { ok: true };
       throw new Error('Unexpected mock request: ' + url);
     }
@@ -45,14 +46,14 @@ export function miniappFixture(options = {}) {
     if (filename.endsWith('/utils/subscription.js')) return { hasShownPrompt: () => true };
     if (modules.has(filename)) return modules.get(filename);
     const module = { exports: {} };
-    const context = { module, wx, setInterval: () => 1, clearInterval() {}, getApp: () => app, console, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) };
+    const context = { module, wx, setInterval, clearInterval, getApp: () => app, console, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) };
     vm.runInNewContext(fs.readFileSync(filename, 'utf8'), context, { filename });
     modules.set(filename, module.exports); return module.exports;
   }
   function loadPage(name) {
     const filename = path.join(root, 'pages', name, name + '.js');
     let definition;
-    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { wx, getApp: () => app, console, setInterval: () => 1, clearInterval() {}, Page: value => { definition = value; }, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) }, { filename });
+    vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { wx, getApp: () => app, console, setInterval, clearInterval, Page: value => { definition = value; }, require: name => loadModule(path.resolve(path.dirname(filename), name + '.js')) }, { filename });
     const instance = { ...definition, data: clone(definition.data), setData(value, callback) {
       const patch = clone(value); updates.push(patch);
       for (const [key, entry] of Object.entries(patch)) {
@@ -64,5 +65,5 @@ export function miniappFixture(options = {}) {
     } };
     instance.onLoad?.({}); return instance;
   }
-  return { loadPage, loadModule, app, api, wx, store, calls, titles, updates, profile, products, cart, configuration };
+  return { loadPage, loadModule, app, api, wx, store, calls, titles, updates, timers, profile, products, cart, configuration };
 }

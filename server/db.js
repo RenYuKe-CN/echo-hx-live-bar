@@ -267,11 +267,23 @@ ensureColumn('coupon_definitions', 'voucher_type', "TEXT NOT NULL DEFAULT 'disco
 ensureColumn('coupon_definitions', 'gift_product_id', 'INTEGER REFERENCES products(id)');
 db.prepare('UPDATE coupon_definitions SET allow_stack_member_discount = 1 WHERE allow_stack_member_discount = 0').run();
 ensureColumn('cart_items', 'applied_coupon_id', 'INTEGER REFERENCES user_coupons(id)');
+export function migrateCartHolds(database = db) {
+  database.exec(`CREATE TABLE IF NOT EXISTS cart_stock_holds (
+  cart_item_id INTEGER NOT NULL REFERENCES cart_items(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  quantity INTEGER NOT NULL CHECK(quantity > 0),
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY(cart_item_id, product_id)
+);
+CREATE INDEX IF NOT EXISTS cart_stock_holds_expiry ON cart_stock_holds(expires_at);
+CREATE INDEX IF NOT EXISTS cart_stock_holds_product ON cart_stock_holds(product_id);`);
+}
+migrateCartHolds();
 ensureColumn('wallet_accounts', 'stored_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 ensureColumn('wallet_accounts', 'bonus_reserved_cents', 'INTEGER NOT NULL DEFAULT 0');
 db.exec(`
-  -- Rebuild reservations after upgrades or an unclean restart. Only orders
-  -- still waiting for payment can hold stock.
+  -- Rebuild payment/legacy-redemption reservations after upgrades or restart.
+  -- Cart reservations remain in cart_stock_holds with their original expiry.
   UPDATE products SET reserved_stock = COALESCE((
     SELECT SUM(oi.quantity)
     FROM order_items oi
@@ -407,6 +419,7 @@ export function reopenDatabase() {
   migrateRefundStock();
   migrateOperations(db);
   migrateCatalog(db);
+  migrateCartHolds();
   migrateCommerce(db);
   migrateSingleStore(db);
   migrateAuditLogs(db);

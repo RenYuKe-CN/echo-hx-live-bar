@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { catalogError, catalogProduct, componentsFor, logStock } from './catalog.js';
+import { catalogError, catalogProduct, componentsFor, logStock, cartHeldStock, cartHoldTotals } from './catalog.js';
 
 const number = (value, label, fallback, integer = false) => {
   const n = value == null || value === '' ? fallback : Number(value);
@@ -9,7 +9,7 @@ const number = (value, label, fallback, integer = false) => {
 const cents = (v,label,fallback=0) => Math.round(number(v,label,fallback/100)*100);
 export function registerCatalogRoutes(router, { audit }) {
   const handled = fn => (req,res) => { try { fn(req,res); } catch(e) { res.status(e.status || 409).json({message:e.message}); } };
-  const products = costs => db.prepare('SELECT p.*,c.name AS category FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id DESC').all().map(p => catalogProduct(p,costs));
+  const products = costs => { const holds=cartHoldTotals(); return db.prepare('SELECT p.*,c.name AS category FROM products p JOIN categories c ON c.id=p.category_id ORDER BY p.id DESC').all().map(p => catalogProduct(p,costs,holds)); };
   const impacts = id => db.prepare('SELECT p.id,p.name,bc.quantity FROM bundle_components bc JOIN products p ON p.id=bc.bundle_id WHERE bc.product_id=? ORDER BY p.id').all(id);
   router.get('/admin/products', handled((req,res) => {
     const rows = products(req.staff.role==='super').map(p => ({...p, affectedBundles:p.kind==='basic' ? impacts(p.id) : []}));
@@ -50,7 +50,7 @@ export function registerCatalogRoutes(router, { audit }) {
     if(!name || name.length>80 || !category || !unit || unit.length>8) throw catalogError('请填写有效名称、分类和单位',400);
     const stock=number(b.stock,'库存',current?.stock||0,true),safety=number(b.safetyStock,'补货线',current?.safety_stock??20,true),target=number(b.targetStock,'目标库存',current?.target_stock??100,true),pack=number(b.packSize,'每箱数量',current?.pack_size??1,true);
     if(!pack || target<safety) throw catalogError('每箱数量须大于零，目标库存须不小于补货线',400);
-    if(current && stock<current.reserved_stock) throw catalogError(`库存不能低于已预占的 ${current.reserved_stock} 件`);
+    if(current && stock<current.reserved_stock+cartHeldStock(current.id)) throw catalogError(`库存不能低于已预占的 ${current.reserved_stock+cartHeldStock(current.id)} 件`);
     const price=cents(b.price,'售价',current?.price_cents),member=b.memberPrice===''?null:b.memberPrice==null?current?.member_price_cents??null:cents(b.memberPrice,'会员价');
     const cost=cents(b.cost,'进货成本',current?.cost_cents),extra=cents(b.extraCost,'附加成本',current?.extra_cost_cents),reference=b.referenceCost===''?null:b.referenceCost==null?current?.reference_cost_cents??null:cents(b.referenceCost,'参考成本');
     const status=b.status??current?.status??'active',sellable=b.sellable==null?current?.sellable??1:['1',1,true].includes(b.sellable)?1:0;
@@ -74,6 +74,7 @@ export function registerCatalogRoutes(router, { audit }) {
       const old=componentsFor(id).map(p=>({productId:p.id,quantity:p.component_quantity}));
       const normalized=kind==='bundle'?parts.map(p=>({productId:Number(p.productId),quantity:Number(p.quantity)})).sort((a,b)=>a.productId-b.productId):[];
       if(JSON.stringify(old)!==JSON.stringify(normalized)) {
+        if(current && db.prepare(`SELECT 1 FROM cart_stock_holds h JOIN cart_items ci ON ci.id=h.cart_item_id JOIN table_sessions s ON s.id=ci.session_id WHERE ci.product_id=? AND ci.status='pending' AND s.status='open' AND h.expires_at>?`).get(id,Date.now())) throw catalogError('套餐正在购物车中锁定库存，请等待释放或处理购物车后再修改组成');
         if(current && db.prepare('SELECT 1 FROM group_buy_mappings WHERE product_id=?').get(id))throw catalogError('此套餐已关联平台券。修改组成请新建套餐并关联新的平台套餐 ID，保留旧套餐供历史券兑换');
         db.prepare('DELETE FROM bundle_components WHERE bundle_id=?').run(id);
         normalized.forEach(p=>db.prepare('INSERT INTO bundle_components VALUES(?,?,?)').run(id,p.productId,p.quantity));
@@ -88,7 +89,7 @@ export function registerCatalogRoutes(router, { audit }) {
   router.patch('/admin/products/:id',handled((req,res)=>{const p=db.prepare('SELECT * FROM products WHERE id=?').get(req.params.id);if(!p)throw catalogError('商品不存在',404);save(req,res,p);}));
   const importRows=rows=>{
     if(!Array.isArray(rows)||!rows.length||rows.length>500||new Set(rows.map(r=>r.productId)).size!==rows.length)throw catalogError('请输入 1～500 条不重复的基础货品',400);
-    return rows.map(r=>{const p=db.prepare('SELECT * FROM products WHERE id=?').get(r.productId);if(!p || p.kind!=='basic'||!Number.isSafeInteger(r.productId)||!Number.isSafeInteger(r.stock)||r.stock<0||r.stock<p.reserved_stock)throw catalogError('货品 ID、盘点数量无效，或低于已预占数量',400);return {...r,name:p.name,expectedStock:p.stock,expectedReserved:p.reserved_stock};});
+    return rows.map(r=>{const p=db.prepare('SELECT * FROM products WHERE id=?').get(r.productId);if(!p || p.kind!=='basic'||!Number.isSafeInteger(r.productId)||!Number.isSafeInteger(r.stock)||r.stock<0||r.stock<p.reserved_stock+cartHeldStock(p.id))throw catalogError('货品 ID、盘点数量无效，或低于已预占数量',400);return {...r,name:p.name,expectedStock:p.stock,expectedReserved:p.reserved_stock+cartHeldStock(p.id)};});
   };
   router.post('/admin/inventory/import/preview',handled((req,res)=>res.json({rows:importRows(req.body?.rows)})));
   router.post('/admin/inventory/import',handled((req,res)=>{

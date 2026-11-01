@@ -21,6 +21,7 @@ Object.assign(process.env, {
 const databaseModule = await import('../server/db.js');
 let db = databaseModule.db;
 const { createBackup, restoreBackup } = await import('../server/backup.js');
+const { reserveCart, cleanupCartHolds } = await import('../server/catalog.js');
 const { createApp } = await import('../server/app.js');
 const { reconcileProcessingRefunds, releaseExpiredWechatOrders } = await import('../server/routes.js');
 const { verifyNotification } = await import('../server/integrations/wechat.js');
@@ -87,7 +88,70 @@ test('an empty or overlong store name cannot partially update page settings', as
     assert.equal(db.prepare('SELECT name FROM stores WHERE id=1').get().name, 'Test Store');
   }
 });
-function addCart() { db.prepare('INSERT INTO cart_items(id,session_id,product_id,quantity,added_by_user_id) VALUES(1,1,1,1,1)').run(); }
+function addCart() { db.prepare('INSERT INTO cart_items(id,session_id,product_id,quantity,added_by_user_id) VALUES(1,1,1,1,1)').run(); reserveCart(1); }
+test('unbound payers cannot create any kind of order or change shared cart, stock, wallet and coupons', async () => {
+  addCart();
+  db.prepare('UPDATE cart_items SET added_by_user_id=2').run();
+  let providerCalls = 0;
+  globalThis.fetch = async () => { providerCalls++; throw new Error('must not contact payment provider'); };
+  const snapshot = () => JSON.stringify(['orders','order_items','cart_items','products','wallet_accounts','wallet_transactions','user_coupons','inventory_logs'].map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()));
+  const initial = snapshot();
+  for (const phone of [null, '', '   ', 'invalid-phone']) {
+    db.prepare('UPDATE users SET phone=? WHERE id=1').run(phone);
+    for (const paymentMethod of ['balance', 'wechat', 'mixed']) {
+      const result = await call('/sessions/1/orders', { method: 'POST', body: { paymentMethod, phone: '13800138002', userId: 2 } });
+      assert.equal(result.status, 403);
+      assert.equal(result.body.code, 'PHONE_BINDING_REQUIRED');
+      assert.equal(snapshot(), initial);
+    }
+  }
+  assert.equal(providerCalls, 0);
+  assert.equal((await call('/products?storeId=1')).status, 200);
+  assert.equal((await call('/sessions/1/cart')).status, 200);
+  assert.equal((await call('/sessions/1/checkout')).status, 200);
+  // A zero-price order still needs an identifiable payer.
+  db.prepare('UPDATE products SET price_cents=0,member_price_cents=0 WHERE id=1').run();
+  assert.equal((await call('/sessions/1/orders', { method: 'POST', body: { paymentMethod: 'balance' } })).body.code, 'PHONE_BINDING_REQUIRED');
+});
+
+test('official phone binding allows the retained cart to be ordered without requiring avatar or nickname', async () => {
+  addCart();
+  db.prepare("UPDATE users SET phone=NULL,nickname='微信用户',avatar_url='' WHERE id=1").run();
+  const originalSecret = process.env.WECHAT_APP_SECRET;
+  process.env.WECHAT_APP_SECRET = 'test-phone-secret';
+  globalThis.fetch = async url => {
+    if (String(url).startsWith('https://api.weixin.qq.com/cgi-bin/token?')) return Response.json({ access_token: 'test-phone-token', expires_in: 7200 });
+    if (String(url).startsWith('https://api.weixin.qq.com/wxa/business/getuserphonenumber?')) return Response.json({ phone_info: { purePhoneNumber: '13800138001', countryCode: '86' } });
+    throw new Error('Unexpected provider call');
+  };
+  try {
+    assert.equal((await call('/sessions/1/orders', { method: 'POST', body: { paymentMethod: 'balance' } })).status, 403);
+    const bound = await call('/me/phone', { method: 'POST', body: { code: 'test-authorized-phone-code' } });
+    assert.equal(bound.status, 200);
+    assert.equal(bound.body.user.phone, '13800138001');
+    const result = await call('/sessions/1/orders', { method: 'POST', body: { paymentMethod: 'balance', note: '少冰' } });
+    assert.equal(result.status, 201);
+    assert.equal(result.body.payment.status, 'paid');
+    assert.equal(db.prepare('SELECT payer_phone_snapshot,note FROM orders WHERE id=?').get(result.body.order.id).payer_phone_snapshot, '13800138001');
+    assert.equal(result.body.order.note, '少冰');
+  } finally {
+    if (originalSecret === undefined) delete process.env.WECHAT_APP_SECRET;
+    else process.env.WECHAT_APP_SECRET = originalSecret;
+  }
+});
+
+test('unbound users cannot resume an old pending payment but can still view their orders', async () => {
+  makeOrder({ method: 'wechat', status: 'pending_payment', stored: 0, wechat: 6000 });
+  db.prepare('UPDATE users SET phone=NULL WHERE id=1').run();
+  const original = db.prepare('SELECT * FROM orders WHERE id=100').get();
+  globalThis.fetch = async () => { throw new Error('must not create another prepayment'); };
+  const result = await call('/me/orders/TEST-ORDER/pay', { method: 'POST' });
+  assert.equal(result.status, 403);
+  assert.equal(result.body.code, 'PHONE_BINDING_REQUIRED');
+  assert.deepEqual(db.prepare('SELECT * FROM orders WHERE id=100').get(), original);
+  assert.equal((await call('/me/orders')).status, 200);
+});
+
 function makeOrder({ method = 'balance', status = 'awaiting_delivery', quantity = 2, stored = 6000, wechat = 0, bonus = 0 } = {}) {
   const total = quantity * 3000;
   db.prepare(`INSERT INTO orders(id,order_no,session_id,payer_user_id,original_amount_cents,payable_amount_cents,payment_method,stored_paid_cents,bonus_paid_cents,wechat_paid_cents,status,payment_status,paid_at,delivered_at)
@@ -381,7 +445,7 @@ test('restoring a pre-migration backup backfills return quantities without resto
   await tar.x({ file: path.join(work, 'backups', backup.name), cwd: incoming });
   const legacyPath = path.join(incoming, 'database.sqlite');
   const legacy = new Database(legacyPath);
-  legacy.exec('ALTER TABLE order_items DROP COLUMN returned_delivered_quantity; ALTER TABLE order_items DROP COLUMN delivered_quantity; ALTER TABLE order_items DROP COLUMN returned_quantity');
+  legacy.exec('DROP TABLE cart_stock_holds; ALTER TABLE order_items DROP COLUMN returned_delivered_quantity; ALTER TABLE order_items DROP COLUMN delivered_quantity; ALTER TABLE order_items DROP COLUMN returned_quantity');
   legacy.close();
   const manifestPath = path.join(incoming, 'manifest.json');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -391,7 +455,101 @@ test('restoring a pre-migration backup backfills return quantities without resto
   await tar.c({ file: archive, cwd: incoming, gzip: true }, ['manifest.json', 'database.sqlite', 'uploads']);
   await restoreBackup(archive);
   db = databaseModule.db;
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM cart_stock_holds').get().n,0);
   assert.equal(db.prepare('SELECT returned_quantity FROM order_items WHERE id=100').get().returned_quantity, 1);
   assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock, 99);
   assert.equal((await call('/me')).status, 401);
+});
+
+test('cart holds arbitrate two tables atomically, expire without reads renewing them, and require explicit reacquisition', async () => {
+  db.prepare('UPDATE products SET stock=1 WHERE id=1').run();
+  db.prepare("INSERT OR IGNORE INTO tables(id,store_id,table_no,qr_token) VALUES(2,1,'TEST-02','test-02')").run();
+  db.prepare("INSERT INTO table_sessions(id,store_id,table_id,session_no) VALUES(2,1,2,'SECOND-TABLE')").run();
+  db.prepare('INSERT INTO session_members(session_id,user_id) VALUES(2,2)').run();
+  const results = await Promise.all([
+    call('/sessions/1/cart/items',{method:'POST',body:{productId:1}}),
+    call('/sessions/2/cart/items',{method:'POST',token:tokens.outsider,body:{productId:1}})
+  ]);
+  assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);
+  const winner=results[0].status===201?1:2, loser=winner===1?2:1;
+  const tokenFor=id=>id===1?tokens.user:tokens.outsider;
+  const initial=(await call(`/sessions/${winner}/cart`,{token:tokenFor(winner)})).body;
+  assert.equal(initial.reservation.reserved,true); assert.equal(initial.remainingByProduct[1],0);
+  assert.equal((await call(`/sessions/${winner}/cart`,{token:tokenFor(winner)})).body.reservation.expiresAt,initial.reservation.expiresAt);
+  assert.equal((await call('/products')).body.products.find(p=>p.id===1).stock,0);
+  const inventory=(await call('/admin/products',{token:tokens.admin})).body.products.find(p=>p.id===1);
+  assert.equal(inventory.physicalStock,1); assert.equal(inventory.cartReservedStock,1); assert.equal(inventory.orderReservedStock,0);
+  db.prepare('UPDATE cart_stock_holds SET expires_at=?').run(Date.now()-1);
+  assert.equal((await call(`/sessions/${winner}/orders`,{method:'POST',token:tokenFor(winner),body:{paymentMethod:'balance'}})).body.code,'CART_RESERVATION_EXPIRED');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM orders').get().n,0);
+  assert.equal((await call(`/sessions/${loser}/cart/items`,{method:'POST',token:tokenFor(loser),body:{productId:1}})).status,201);
+  assert.equal((await call(`/sessions/${winner}/cart/reserve`,{method:'POST',token:tokenFor(winner)})).status,409);
+  const winnerCart=(await call(`/sessions/${winner}/cart`,{token:tokenFor(winner)})).body;
+  assert.equal(winnerCart.items.length,1); assert.equal(winnerCart.reservation.reserved,false);
+  const loserItem=(await call(`/sessions/${loser}/cart`,{token:tokenFor(loser)})).body.items[0];
+  assert.equal((await call(`/sessions/${loser}/cart/items/${loserItem.id}`,{method:'PATCH',token:tokenFor(loser),body:{delta:-1}})).status,200);
+  assert.equal((await call(`/sessions/${winner}/cart/reserve`,{method:'POST',token:tokenFor(winner)})).status,200);
+  assert.equal((await call(`/sessions/${winner}/orders`,{method:'POST',token:tokenFor(winner),body:{paymentMethod:'balance'}})).status,201);
+  assert.deepEqual(db.prepare('SELECT stock,reserved_stock FROM products WHERE id=1').get(),{stock:0,reserved_stock:0});
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM cart_stock_holds').get().n,0);
+});
+
+test('shared cart deltas use current quantity, release on reductions, and do not prevent removing unavailable goods', async () => {
+  assert.equal((await call('/sessions/1/cart/items',{method:'POST',body:{productId:1,quantity:2}})).status,201);
+  const item=(await call('/sessions/1/cart')).body.items[0];
+  db.prepare('INSERT INTO session_members(session_id,user_id) VALUES(1,2)').run();
+  const responses=await Promise.all([tokens.user,tokens.outsider].map(token=>call(`/sessions/1/cart/items/${item.id}`,{method:'PATCH',token,body:{delta:1}})));
+  assert.ok(responses.every(r=>r.status===200));
+  assert.equal((await call('/sessions/1/cart')).body.items[0].quantity,4);
+  assert.equal(db.prepare('SELECT SUM(quantity) AS n FROM cart_stock_holds').get().n,4);
+  for(const body of [{delta:2},{delta:1,quantity:2},{quantity:-1},{quantity:1.5}]) assert.equal((await call(`/sessions/1/cart/items/${item.id}`,{method:'PATCH',body})).status,400);
+  db.prepare("UPDATE products SET status='inactive',auto_unlisted=0 WHERE id=1").run();
+  assert.equal((await call(`/sessions/1/cart/items/${item.id}`,{method:'PATCH',body:{delta:-1}})).status,200);
+  assert.equal(db.prepare('SELECT SUM(quantity) AS n FROM cart_stock_holds').get().n,3);
+  assert.equal((await call('/sessions/1/cart')).body.reservation.reserved,false);
+  assert.equal((await call(`/sessions/1/cart/items/${item.id}`,{method:'PATCH',body:{quantity:0}})).status,200);
+  assert.equal((await call('/sessions/1/cart')).body.items.length,0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM cart_stock_holds').get().n,0);
+});
+
+test('cart holds transfer into payment reservations once and cancellation releases them without silently re-locking the cart', async () => {
+  addCart();
+  globalThis.fetch=async()=>{throw new TypeError('network timeout');};
+  assert.equal((await call('/sessions/1/orders',{method:'POST',body:{paymentMethod:'wechat'}})).status,502);
+  assert.equal(db.prepare('SELECT reserved_stock FROM products WHERE id=1').get().reserved_stock,1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM cart_stock_holds').get().n,0);
+  const order=db.prepare('SELECT * FROM orders').get();
+  globalThis.fetch=async url=>String(url).endsWith('/close')?new Response(null,{status:204}):Response.json({trade_state:'NOTPAY'});
+  assert.equal((await call(`/me/orders/${order.order_no}/cancel`,{method:'POST'})).status,200);
+  const cart=(await call('/sessions/1/cart')).body;assert.equal(cart.items.length,1);assert.equal(cart.reservation.reserved,false);
+  assert.equal(db.prepare('SELECT reserved_stock FROM products WHERE id=1').get().reserved_stock,0);
+  assert.equal((await call('/sessions/1/cart/reserve',{method:'POST'})).status,200);
+  assert.equal(db.prepare('SELECT SUM(quantity) AS n FROM cart_stock_holds').get().n,1);
+});
+
+test('inventory adjustments, stocktake and losses cannot consume cart-held units; closed tables release immediately', async () => {
+  db.prepare('UPDATE products SET stock=2 WHERE id=1').run();addCart();
+  for(const [url,body] of [
+    ['/admin/inventory/1/adjust',{change:-2,reason:'盘点'}],
+    ['/admin/losses',{productId:1,quantity:2,type:'damage',reason:'报损'}],
+    ['/admin/inventory/import/preview',{rows:[{productId:1,stock:0}]}],
+    ['/admin/products/1',{stock:0}]
+  ]) assert.ok((await call(url,{token:tokens.admin,method:url==='/admin/products/1'?'PATCH':'POST',body})).status>=400);
+  db.prepare("UPDATE table_sessions SET status='closed' WHERE id=1").run();
+  assert.equal((await call('/products')).body.products.find(p=>p.id===1).stock,2);
+  cleanupCartHolds();assert.equal(db.prepare('SELECT COUNT(*) AS n FROM cart_stock_holds').get().n,0);
+});
+
+test('cart-held units survive reopen without extending their deadline and block reward redemptions',async()=>{
+  db.prepare('UPDATE products SET stock=1 WHERE id=1').run();addCart();
+  const expiry=db.prepare('SELECT expires_at FROM cart_stock_holds').get().expires_at;
+  db.close();databaseModule.reopenDatabase();db=databaseModule.db;
+  assert.equal(db.prepare('SELECT expires_at FROM cart_stock_holds').get().expires_at,expiry);
+  assert.equal((await call('/sessions/1/cart')).body.reservation.reserved,true);
+  db.prepare('UPDATE users SET points=100 WHERE id=1').run();
+  const reward=db.prepare("INSERT INTO reward_items(product_id,name,points,stock) VALUES(1,'锁定库存测试奖品',10,1)").run().lastInsertRowid;
+  assert.equal((await call(`/rewards/${reward}/redeem`,{method:'POST'})).status,409);
+  assert.equal(db.prepare('SELECT points FROM users WHERE id=1').get().points,100);
+  assert.equal(db.prepare('SELECT stock FROM reward_items WHERE id=?').get(reward).stock,1);
+  assert.equal(db.prepare('SELECT stock FROM products WHERE id=1').get().stock,1);
 });

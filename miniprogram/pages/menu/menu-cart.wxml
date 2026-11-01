@@ -1,0 +1,18 @@
+<view wx:if="{{cartPreviewVisible}}" class="cart-preview-mask">
+  <view class="cart-preview-backdrop" catchtap="closeCartPreview" catchtouchmove="noop"/>
+  <view class="cart-preview-sheet" catchtap="noop">
+    <view class="cart-preview-handle"/>
+    <view class="cart-preview-head"><view><text class="cart-preview-title">本桌购物车</text><text class="cart-preview-table">{{tableNo}} 桌 · 已选 {{totalQty}} 件</text></view><button class="cart-preview-close" bindtap="closeCartPreview" aria-label="关闭购物车">×</button></view>
+    <view wx:if="{{totalQty}}" class="cart-reservation {{!inventoryReserved ? 'expired' : ''}}"><text>{{reservationText}}</text><button wx:if="{{!inventoryReserved}}" bindtap="relockCart" disabled="{{cartBusy || reservingCart}}" loading="{{reservingCart}}">重新锁定库存</button></view>
+    <view wx:if="{{inventoryError}}" class="inventory-warning"><text>{{inventoryError}}</text><button bindtap="pollInventory">重试</button></view>
+    <scroll-view scroll-y="{{true}}" class="cart-preview-scroll">
+      <view wx:if="{{!cartPreviewItems.length}}" class="cart-preview-empty"><text>购物车还是空的</text><text>挑选喜欢的商品，和同桌一起点单</text><button bindtap="closeCartPreview">去选商品</button></view>
+      <view wx:for="{{cartPreviewItems}}" wx:key="id" class="cart-preview-row">
+        <image wx:if="{{item.image}}" class="cart-preview-image" src="{{item.image}}" mode="aspectFit"/>
+        <view wx:else class="cart-preview-image cart-preview-placeholder">{{item.initial}}</view>
+        <view class="cart-preview-info"><text class="cart-preview-name">{{item.name}}</text><text wx:if="{{item.applied_coupon_id}}" class="cart-preview-voucher">兑换券商品 · 固定 1 件</text><view class="cart-preview-actions"><text class="cart-preview-price">¥{{item.amountText}}</text><view class="product-counter"><button class="counter-button counter-minus" data-id="{{item.id}}" data-delta="-1" bindtap="changePreviewQuantity" disabled="{{pendingProducts[item.product_id] || reservingCart}}" aria-label="减少{{item.name}}数量"><view>−</view></button><text class="counter-quantity">{{item.quantity}}</text><button class="counter-button counter-plus" data-id="{{item.id}}" data-delta="1" bindtap="changePreviewQuantity" disabled="{{pendingProducts[item.product_id] || reservingCart || !item.canIncrease}}" aria-label="增加{{item.name}}数量"><view>+</view></button></view></view></view>
+      </view>
+    </scroll-view>
+    <view class="cart-preview-footer"><view><text class="cart-preview-total">¥{{couponCheckout ? couponCheckout.payableText : totals.memberText}}</text><text class="cart-preview-caption">{{couponCheckout ? '已使用优惠券 · ' : ''}}优惠及支付金额以确认页为准</text></view><button class="cart-preview-checkout" bindtap="preview" disabled="{{!totalQty || cartBusy || reservingCart}}">去结算</button></view>
+  </view>
+</view>

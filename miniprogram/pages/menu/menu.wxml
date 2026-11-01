@@ -16,7 +16,7 @@
           </view>
         </view>
         <text wx:if="{{item.componentsText}}" class="product-composition">{{item.componentsText}}</text>
-        <text class="product-stock {{item.stock <= 5 ? 'stock-low' : ''}}">剩余 {{item.stock}} {{item.unit || '件'}}{{item.remainingQuantity <= 0 ? ' · 已达可选数量' : ''}}</text>
+        <text class="product-stock {{item.stock <= 5 ? 'stock-low' : ''}}">还可选 {{item.remainingQuantity}} {{item.unit || '件'}}{{item.remainingQuantity <= 0 ? ' · 暂无可售库存' : ''}}</text>
       </view>
     </view>
 </template>
@@ -31,6 +31,7 @@
       <button class="menu-tool membership-entry" bindtap="openTierRules" aria-label="查看会员等级权益"><view class="tool-icon member-mark"><image src="/assets/icons/crown-gold.png" mode="aspectFit"/></view><view class="tool-copy"><text class="tool-title">{{isMember ? user.memberLevel : '普通会员'}}</text><text class="tool-caption">查看会员权益</text></view><text class="tool-chevron">›</text></button>
     </view>
   </view>
+  <view wx:if="{{inventoryError}}" class="inventory-warning"><text>{{inventoryError}}</text><button bindtap="pollInventory">重试</button></view>
   <view class="catalog-body">
     <scroll-view class="category-sidebar" scroll-y="{{true}}" scroll-into-view="{{sidebarTarget}}" scroll-with-animation="{{true}}">
       <button wx:for="{{categories}}" wx:key="*this" id="category-{{index}}" class="category-tab {{category === item ? 'is-active' : ''}}" data-category="{{item}}" bindtap="selectCategory" aria-label="{{item}}分类">{{item}}</button>
@@ -50,7 +51,7 @@
     </scroll-view>
   </view>
   <view class="checkout-dock">
-    <view class="checkout-summary" bindtap="preview" role="button" aria-label="查看本桌购物车"><view class="checkout-bag"><image src="/assets/icons/bag-gold.png" mode="aspectFit"/><text wx:if="{{totalQty}}" class="checkout-count">{{totalQty > 99 ? '99+' : totalQty}}</text></view><view class="checkout-amount"><text class="checkout-total">¥{{couponCheckout ? couponCheckout.payableText : totals.memberText}}</text><text class="checkout-caption">已选 {{totalQty}} 件{{couponCheckout ? ' · 已使用优惠券' : ''}}</text></view></view>
+    <view class="checkout-summary" bindtap="openCartPreview" role="button" aria-label="查看本桌购物车"><view class="checkout-bag"><image src="/assets/icons/bag-gold.png" mode="aspectFit"/><text wx:if="{{totalQty}}" class="checkout-count">{{totalQty > 99 ? '99+' : totalQty}}</text></view><view class="checkout-amount"><text class="checkout-total">¥{{couponCheckout ? couponCheckout.payableText : totals.memberText}}</text><text class="checkout-caption">{{totalQty && !inventoryReserved ? '库存已释放 · 点此查看' : '已选 ' + totalQty + ' 件'}}{{inventoryReserved && couponCheckout ? ' · 已使用优惠券' : ''}}</text></view></view>
     <button class="checkout-button" bindtap="preview" disabled="{{!totalQty}}">去结算</button>
   </view>
 </view>
@@ -59,3 +60,5 @@
 <include src="menu-service.wxml"/>
 
 <include src="menu-tables.wxml"/>
+
+<include src="menu-cart.wxml"/>

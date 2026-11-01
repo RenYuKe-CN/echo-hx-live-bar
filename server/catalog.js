@@ -1,36 +1,97 @@
 import { db, centsToMoney } from './db.js';
 
+export const CART_HOLD_MS = 10 * 60 * 1000;
+// Cart holds are independent of payment reservations. Expired/closed carts stop
+// consuming stock immediately, even before the background cleanup runs.
+const liveHoldsSql = `FROM cart_stock_holds h JOIN cart_items ci ON ci.id=h.cart_item_id
+  JOIN table_sessions s ON s.id=ci.session_id
+  WHERE ci.status='pending' AND s.status='open' AND h.expires_at>?`;
+export function cartHeldStock(productId, excludeSessionId = 0) {
+  return db.prepare(`SELECT COALESCE(SUM(h.quantity),0) AS quantity ${liveHoldsSql} AND h.product_id=? AND ci.session_id!=?`).get(Date.now(), productId, Number(excludeSessionId)).quantity;
+}
+export function cartHoldTotals() { return new Map(db.prepare(`SELECT h.product_id, SUM(h.quantity) AS quantity ${liveHoldsSql} GROUP BY h.product_id`).all(Date.now()).map(row => [row.product_id, row.quantity])); }
+export const availableBasicStock = (product, excludeSessionId = 0) => Math.max(0, product.stock - product.reserved_stock - cartHeldStock(product.id, excludeSessionId));
+export function cleanupCartHolds() {
+  db.prepare(`DELETE FROM cart_stock_holds WHERE expires_at<=? OR cart_item_id IN (
+    SELECT ci.id FROM cart_items ci JOIN table_sessions s ON s.id=ci.session_id WHERE ci.status!='pending' OR s.status!='open')`).run(Date.now());
+}
+export function releaseCartHolds(sessionId) {
+  db.prepare('DELETE FROM cart_stock_holds WHERE cart_item_id IN (SELECT id FROM cart_items WHERE session_id=?)').run(sessionId);
+}
+export const pendingCartItems = sessionId => db.prepare("SELECT * FROM cart_items WHERE session_id=? AND status='pending' ORDER BY id").all(sessionId);
+export function cartReservation(sessionId) {
+  const items = pendingCartItems(sessionId);
+  if (!items.length) return { reserved: true, expiresAt: null };
+  let expiresAt = Infinity;
+  try {
+    for (const item of items) {
+      const required = stockRequirements([item]);
+      const held = db.prepare(`SELECT h.* ${liveHoldsSql} AND ci.id=?`).all(Date.now(), item.id);
+      if (held.length !== required.size || held.some(h => required.get(h.product_id) !== h.quantity)) return { reserved: false, expiresAt: null };
+      expiresAt = Math.min(expiresAt, ...held.map(h => h.expires_at));
+    }
+    return { reserved: true, expiresAt: new Date(expiresAt).toISOString() };
+  } catch { return { reserved: false, expiresAt: null }; }
+}
+export function assertCartReservation(sessionId) {
+  if (!cartReservation(sessionId).reserved) throw Object.assign(catalogError('购物车库存已释放或商品发生变化，请重新锁定库存后确认订单'), { code: 'CART_RESERVATION_EXPIRED' });
+}
+export function reserveCart(sessionId) {
+  return db.transaction(() => {
+    if (!db.prepare("SELECT 1 FROM table_sessions WHERE id=? AND status='open'").get(sessionId)) throw catalogError('桌台已结束，请重新选择');
+    const items = pendingCartItems(sessionId);
+    assertStock(items, sessionId);
+    cleanupCartHolds();
+    releaseCartHolds(sessionId);
+    const expiresAt = Date.now() + CART_HOLD_MS;
+    const insert = db.prepare('INSERT INTO cart_stock_holds(cart_item_id,product_id,quantity,expires_at) VALUES(?,?,?,?)');
+    for (const item of items) for (const [id, quantity] of stockRequirements([item])) insert.run(item.id, id, quantity, expiresAt);
+    return { reserved: true, expiresAt: items.length ? new Date(expiresAt).toISOString() : null };
+  })();
+}
+// Reductions must remain possible for expired/unavailable items. Release only
+// that row's old claims first; if the full cart cannot be renewed, keep the
+// other valid claims with their original deadlines and report it as unreserved.
+export function reduceCartHold(item, quantity) {
+  if (quantity > 0) db.prepare('UPDATE cart_stock_holds SET quantity=quantity*?/? WHERE cart_item_id=?').run(quantity,item.quantity,item.id);
+  else db.prepare('DELETE FROM cart_stock_holds WHERE cart_item_id=?').run(item.id);
+  try { reserveCart(item.session_id); } catch { /* Keep reductions and the remaining original deadlines. */ }
+}
+
 export const catalogError = (message, status = 409) => Object.assign(new Error(message), { status });
 export function componentsFor(productId) {
   return db.prepare(`SELECT p.*,bc.quantity AS component_quantity FROM bundle_components bc JOIN products p ON p.id=bc.product_id WHERE bc.bundle_id=? ORDER BY p.id`).all(productId);
 }
-export function catalogProduct(row, costs = false) {
+export function catalogProduct(row, costs = false, holds = cartHoldTotals()) {
   if (!row) return null;
   const components = row.kind === 'bundle' ? componentsFor(row.id) : [];
-  const available = product => product.status === 'active' || product.auto_unlisted ? Math.max(product.stock - product.reserved_stock, 0) : 0;
+  const free = product => Math.max(0, product.stock - product.reserved_stock - (holds.get(product.id) || 0));
+  const available = product => product.status === 'active' || product.auto_unlisted ? free(product) : 0;
   const availableStock = row.kind === 'bundle'
     ? (components.length ? Math.min(...components.map(p => Math.floor(available(p) / p.component_quantity))) : 0)
-    : Math.max(row.stock - row.reserved_stock, 0);
+    : free(row);
   const cost = row.kind === 'bundle' ? components.reduce((n,p) => n + p.cost_cents * p.component_quantity, row.extra_cost_cents) : row.cost_cents;
   const product = { ...row, physicalStock: row.kind === 'bundle' ? null : row.stock,
-    reservedStock: row.kind === 'bundle' ? null : row.reserved_stock, availableStock,
+    reservedStock: row.kind === 'bundle' ? null : row.reserved_stock + (holds.get(row.id) || 0), orderReservedStock: row.kind === 'bundle' ? null : row.reserved_stock, cartReservedStock: row.kind === 'bundle' ? null : (holds.get(row.id) || 0), availableStock,
     price: centsToMoney(row.price_cents), memberPrice: row.member_price_cents == null ? null : centsToMoney(row.member_price_cents),
     warning: row.kind === 'basic' && availableStock <= row.safety_stock,
     replenishQuantity: row.kind === 'basic' ? Math.max(0, row.target_stock - availableStock) : 0,
-    components: components.map(p => ({ productId: p.id, name: p.name, quantity: p.component_quantity, unit: p.unit, availableStock: Math.max(p.stock-p.reserved_stock,0), ...(costs ? { cost: centsToMoney(p.cost_cents) } : {}) })) };
+    components: components.map(p => ({ productId: p.id, name: p.name, quantity: p.component_quantity, unit: p.unit, availableStock: free(p), ...(costs ? { cost: centsToMoney(p.cost_cents) } : {}) })) };
   if (costs) { product.calculatedCost = centsToMoney(cost); product.cost_cents = cost; }
   else for (const key of ['cost_cents','extra_cost_cents','reference_cost_cents']) delete product[key];
   return product;
 }
 export const getCatalogProduct = (id, costs = false) => catalogProduct(db.prepare('SELECT p.*,c.name AS category FROM products p JOIN categories c ON c.id=p.category_id WHERE p.id=?').get(id), costs);
 
-export function cartAvailability(items) {
-  const demand=new Map(),rows=db.prepare('SELECT * FROM products').all();
-  const parts=p=>p.kind==='bundle'?componentsFor(p.id):[{...p,component_quantity:1}];
-  for(const item of items){const p=rows.find(p=>p.id===item.product_id);if(p)for(const part of parts(p))demand.set(part.id,(demand.get(part.id)||0)+part.component_quantity*item.quantity);}
-  const stockByProduct={},remainingByProduct={};
-  for(const p of rows){const components=parts(p);stockByProduct[p.id]=catalogProduct(p).availableStock;remainingByProduct[p.id]=components.length && p.status==='active'?Math.max(0,Math.min(...components.map(c=>Math.floor((Math.max(0,c.stock-c.reserved_stock)-(demand.get(c.id)||0))/c.component_quantity)))):0;}
-  return {stockByProduct,remainingByProduct};
+export function cartAvailability(sessionId) {
+  const stockByProduct = {}, remainingByProduct = {};
+  const reserved = cartReservation(sessionId), holds = cartHoldTotals();
+  for (const p of db.prepare('SELECT * FROM products').all()) {
+    const available = catalogProduct(p, false, holds).availableStock;
+    stockByProduct[p.id] = available;
+    remainingByProduct[p.id] = p.status === 'active' ? available : 0;
+  }
+  return { stockByProduct, remainingByProduct, reservation: reserved };
 }
 
 export function stockRequirements(items) {
@@ -47,16 +108,18 @@ export function stockRequirements(items) {
   }
   return required;
 }
-export function assertStock(items) {
+export function assertStock(items, excludeSessionId = 0) {
   const required = stockRequirements(items);
   for (const [id, quantity] of required) {
     const product = db.prepare('SELECT * FROM products WHERE id=?').get(id);
-    if (product.stock - product.reserved_stock < quantity) throw catalogError(`货品“${product.name}”库存不足，需要 ${quantity} ${product.unit}，可售 ${Math.max(0,product.stock-product.reserved_stock)} ${product.unit}`);
+    if (availableBasicStock(product, excludeSessionId) < quantity) throw catalogError(`货品“${product.name}”库存不足，需要 ${quantity} ${product.unit}，可售 ${availableBasicStock(product, excludeSessionId)} ${product.unit}`);
   }
   return required;
 }
 export function reserveStock(requirements) {
   for (const [id, quantity] of requirements) {
+    const product = db.prepare('SELECT * FROM products WHERE id=?').get(id);
+    if (!product || availableBasicStock(product) < quantity) throw catalogError('库存发生变化，请重新查询');
     if (!db.prepare('UPDATE products SET reserved_stock=reserved_stock+? WHERE id=? AND kind=\'basic\' AND stock-reserved_stock>=?').run(quantity,id,quantity).changes) throw catalogError('库存发生变化，请重新查询');
   }
 }

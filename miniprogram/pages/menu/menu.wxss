@@ -1,3 +1,4 @@
+@import "menu-cart.wxss";
 @import "menu-service.wxss";
 @import "menu-overlays.wxss";
 
